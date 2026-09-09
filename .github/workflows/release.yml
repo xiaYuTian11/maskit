@@ -141,6 +141,8 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # stable (pinned commit)
+        with:
+          toolchain: stable
       - uses: swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
         with:
           workspaces: src-tauri

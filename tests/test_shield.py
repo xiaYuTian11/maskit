@@ -2947,6 +2947,7 @@ class PanelConfigTests(unittest.TestCase):
         old_emit = panel._emit_log
         old_popen = panel.subprocess.Popen
         old_kill = panel._kill_proxy_tree
+        old_lpp = panel._listening_port_pids
         killed = []
 
         class FakePopen:
@@ -2955,6 +2956,15 @@ class PanelConfigTests(unittest.TestCase):
 
             def poll(self):
                 return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def communicate(self, *args, **kwargs):
+                return (b"", b"")
 
         class FakeThread:
             def __init__(self, *args, **kwargs):
@@ -2966,6 +2976,7 @@ class PanelConfigTests(unittest.TestCase):
         try:
             # 端口永远不可用 → 启动必须判失败（而不是假装成功）
             panel._port_listen = lambda port: False
+            panel._listening_port_pids = lambda ports, fresh=False: {}
             panel.load_config = lambda: {**panel.default_config(), "capture_mode": "local"}
             panel.enabled_domains = lambda cfg: ["api.openai.com"]
             panel.is_admin = lambda: True
@@ -2985,6 +2996,7 @@ class PanelConfigTests(unittest.TestCase):
             self.assertIsNone(panel.proc["p"], "判定失败后不得残留进程句柄")
             self.assertEqual(killed, [12345], "启动失败必须清理进程，防止占端口的僵尸")
         finally:
+            panel._listening_port_pids = old_lpp
             panel.proc["p"] = None
             panel.state["proxy_running"] = False
             panel.state["proxy_pid"] = None
@@ -3312,15 +3324,16 @@ class AutoHealTests(unittest.TestCase):
             return old_run(argv, timeout=timeout)
 
         panel._run_console = fake_run
-        cmdlines["7777"] = r"C:\Python313\python.exe D:\work\shield\panel.py"
-        self.assertTrue(panel._is_shield_panel_pid(7777), "源码面板必须被识别")
-        cmdlines["8888"] = r'"D:\work\dist\LLMShield\LLMShield.exe"'
-        self.assertTrue(panel._is_shield_panel_pid(8888), "打包面板必须被识别")
-        cmdlines["9999"] = r"C:\Python313\python.exe manage.py runserver"
-        self.assertFalse(panel._is_shield_panel_pid(9999), "无关 python 不能误判")
-        cmdlines["1111"] = r"C:\Python313\python.exe mitmdump.exe -s D:\shield\transparent.py"
-        self.assertFalse(panel._is_shield_panel_pid(1111), "mitmdump 类进程归 _is_mitmdump_pid 管")
-        self.assertFalse(panel._is_shield_panel_pid(os.getpid()), "本进程绝不识别")
+        with mock.patch.object(panel.sys, "platform", "win32"):
+            cmdlines["7777"] = r"C:\Python313\python.exe D:\work\shield\panel.py"
+            self.assertTrue(panel._is_shield_panel_pid(7777), "源码面板必须被识别")
+            cmdlines["8888"] = r'"D:\work\dist\LLMShield\LLMShield.exe"'
+            self.assertTrue(panel._is_shield_panel_pid(8888), "打包面板必须被识别")
+            cmdlines["9999"] = r"C:\Python313\python.exe manage.py runserver"
+            self.assertFalse(panel._is_shield_panel_pid(9999), "无关 python 不能误判")
+            cmdlines["1111"] = r"C:\Python313\python.exe mitmdump.exe -s D:\shield\transparent.py"
+            self.assertFalse(panel._is_shield_panel_pid(1111), "mitmdump 类进程归 _is_mitmdump_pid 管")
+            self.assertFalse(panel._is_shield_panel_pid(os.getpid()), "本进程绝不识别")
 
     def test_free_upstream_ports_kills_stale_panel_listener(self):
         """残留端口清理必须覆盖「另一面板的 503 占位监听」：

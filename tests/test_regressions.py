@@ -1263,16 +1263,17 @@ class StabilityFixTests(unittest.TestCase):
         panel._netstat_cache["ts"] = 0.0
         panel._netstat_cache["data"] = {}
 
-        self.assertEqual(panel._listening_port_pids({18777}), {18777: {4321}})
-        listening["on"] = False  # 端口真实释放（等价 _stop_passthrough）
-        # 默认走缓存：仍是旧快照
-        self.assertEqual(panel._listening_port_pids({18777}), {18777: {4321}},
-                         "轮询路径应继续吃缓存（保住 netstat 降频优化）")
-        # 启停路径：必须实时
-        self.assertEqual(panel._listening_port_pids({18777}, fresh=True), {},
-                         "fresh=True 必须绕过缓存，否则启动会被旧快照误判为端口占用")
-        # fresh 之后缓存也应被刷新，后续轮询不再拿到过期数据
-        self.assertEqual(panel._listening_port_pids({18777}), {})
+        with mock.patch.object(panel.sys, "platform", "win32"):
+            self.assertEqual(panel._listening_port_pids({18777}), {18777: {4321}})
+            listening["on"] = False  # 端口真实释放（等价 _stop_passthrough）
+            # 默认走缓存：仍是旧快照
+            self.assertEqual(panel._listening_port_pids({18777}), {18777: {4321}},
+                             "轮询路径应继续吃缓存（保住 netstat 降频优化）")
+            # 启停路径：必须实时
+            self.assertEqual(panel._listening_port_pids({18777}, fresh=True), {},
+                             "fresh=True 必须绕过缓存，否则启动会被旧快照误判为端口占用")
+            # fresh 之后缓存也应被刷新，后续轮询不再拿到过期数据
+            self.assertEqual(panel._listening_port_pids({18777}), {})
 
     def test_expected_listen_ports_covers_every_upstream(self):
         """就绪判定要覆盖全部 upstream 端口，不能只看第一个。
@@ -1309,12 +1310,13 @@ class StabilityFixTests(unittest.TestCase):
             return old_run(argv, timeout=timeout)
 
         panel._run_console = fake_run
-        cmdlines["4321"] = r"C:\Python313\python.exe D:\shield\transparent.py"
-        self.assertTrue(panel._is_mitmdump_pid(4321),
-                        "加载了本项目 addon 的 python 子进程必须被识别为引擎进程")
-        cmdlines["4321"] = r"C:\Python313\python.exe manage.py runserver"
-        self.assertFalse(panel._is_mitmdump_pid(4321),
-                         "无关 python 进程绝不能被误判（会被强杀，有数据丢失风险）")
+        with mock.patch.object(panel.sys, "platform", "win32"):
+            cmdlines["4321"] = r"C:\Python313\python.exe D:\shield\transparent.py"
+            self.assertTrue(panel._is_mitmdump_pid(4321),
+                            "加载了本项目 addon 的 python 子进程必须被识别为引擎进程")
+            cmdlines["4321"] = r"C:\Python313\python.exe manage.py runserver"
+            self.assertFalse(panel._is_mitmdump_pid(4321),
+                             "无关 python 进程绝不能被误判（会被强杀，有数据丢失风险）")
 
     def test_start_fallback_dispatches_by_stop_mode(self):
         """三种 stop_mode 各自的兜底形态必须分派正确。"""
