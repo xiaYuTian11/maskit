@@ -36,4 +36,4 @@ tauri-plugin-updater = "2"
 # 用 winreg 而不是 `reg query` 拿 stdout —— reg 在中文 Windows 输出 GBK，
 # 按 UTF-8 解会把中文安装路径解坏，而那条路径要拿来做比对。
 [target.'cfg(windows)'.dependencies]
-winreg = "0.55"
+winreg = "0.56"
