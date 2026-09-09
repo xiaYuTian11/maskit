@@ -7,7 +7,7 @@
  * 保存走 POST /api/config 全量提交，warnings 必须展示（端口变化自动重启提示）
  */
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVisibility } from '@/lib/useVisibility'
 import {
@@ -68,7 +68,7 @@ import { cn, copyText } from '@/lib/utils'
 import dayjs from 'dayjs'
 import { useI18n } from '@/lib/i18n'
 import { AboutUpdateCard } from '@/components/settings/AboutUpdateCard'
-import { FeedbackCard } from '@/components/settings/FeedbackCard'
+
 import { BackgroundCard } from '@/components/settings/BackgroundCard'
 
 // 内置规则分组（将 19 项规则按场景归类，降低视觉负荷与误伤风险）
@@ -440,6 +440,7 @@ function ConfigBackupCard() {
 export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } = {}) {
   const { lang, setLang, t, tf } = useI18n()
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   // 页面隐藏时停止轮询；可见时自动刷新
   const { hidden } = useVisibility()
@@ -1336,7 +1337,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 </p>
               </CardHeader>
               <CardContent>
-                <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => setActiveTab('clients')}>
+                <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => navigate('/clients')}>
                   {t('settings.advanced.goClients')}
                 </Button>
               </CardContent>
@@ -2006,9 +2007,6 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
           {/* 个性化背景 */}
           <BackgroundCard />
-
-          {/* 反馈与诊断 */}
-          <FeedbackCard />
         </TabsContent>
         )}
 

@@ -32,9 +32,9 @@
   !else
     !define _EXE_NAME "${PRODUCTNAME}"
   !endif
-  CreateShortcut "$DESKTOP\Data Maskit.lnk" "$INSTDIR\${_EXE_NAME}.exe"
+  CreateShortcut "$DESKTOP\Data Maskit.lnk" "$INSTDIR\${_EXE_NAME}.exe" "" "$INSTDIR\${_EXE_NAME}.exe" 0
   ; 开始菜单
-  CreateShortcut "$SMPROGRAMS\Data Maskit.lnk" "$INSTDIR\${_EXE_NAME}.exe"
+  CreateShortcut "$SMPROGRAMS\Data Maskit.lnk" "$INSTDIR\${_EXE_NAME}.exe" "" "$INSTDIR\${_EXE_NAME}.exe" 0
   !undef _EXE_NAME
 
   ; "应用和功能"列表里的显示名改成中文（默认是 productName=Maskit，中文用户搜不到）

@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-09
+
+修复与体验优化版本。
+
+### 优化与修复
+- 修复 Windows 任务栏图标由于缺少多尺寸位图导致的白纸空白问题（补齐 16~256 全尺寸标准 ICO）。
+- 移除关于页遗留的反馈卡片，避免重复入口。
+- 修复高级设置中点击「去客户端管理配置」跳转导致下方内容空白的问题。
+- 关闭 Dependabot 自动化拉取 PR 限制，保持仓库 PR 列表清爽。
+
 ## [0.2.0] - 2026-09-09
 
 发布增强与上线版本。
@@ -31,6 +41,7 @@
 - Docker 镜像（amd64 / arm64）内嵌 Web 控制台，远程访问需 `MASKIT_PANEL_TOKEN`。
 - 中英文界面一键切换、深浅主题。
 
-[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.1
 [0.2.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.1.0

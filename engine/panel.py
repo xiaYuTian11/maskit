@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 import json
 import copy
 import hashlib
