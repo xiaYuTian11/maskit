@@ -26,6 +26,7 @@ import {
   HelpCircle,
   Coins,
   Loader2,
+  LockKeyhole,
 } from 'lucide-react'
 import { getStatus, dismissAutoRecover } from '@/api/proxy'
 import { getTodayStats, getRestoreItems, getConfig, saveConfig, getHealth, getStatsModels } from '@/api/settings'
@@ -730,7 +731,7 @@ export default function Dashboard() {
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{w.label}</span>
                     <span className="truncate font-mono text-xs" title={display}>{display}</span>
-                    {cred && <span className="shrink-0 text-[10px]" title={t('stats.credHint')}>🔒</span>}
+                    {cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                   </div>
                   <span className="shrink-0 tabular-nums text-xs text-muted-foreground">×{w.count.toLocaleString()}</span>
                 </div>
@@ -763,7 +764,7 @@ export default function Dashboard() {
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{it.label}</span>
                     <span className="truncate font-mono text-xs" title={display}>{display}</span>
-                    {it.cred && <span className="shrink-0 text-[10px]" title={t('stats.credHint')}>🔒</span>}
+                    {it.cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                   </div>
                   <span className="shrink-0 tabular-nums text-xs text-muted-foreground">×{it.events}</span>
                 </div>

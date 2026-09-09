@@ -14,7 +14,7 @@
 #   只清理构建树里残留的进程（按 ExecutablePath 在仓库内判定），不启动、不验证、
 #   不更新快捷方式与自启。用户在软件内点更新升级，不由脚本替他装。
 #   不带该开关 = 开发机自测模式（会杀进程并拉起构建产物验证），别对着在用的机器跑。
-param([switch]$ReleaseOnly, [string]$Version = "")
+param([switch]$ReleaseOnly, [string]$Version = "", [switch]$Unsigned)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
@@ -22,7 +22,7 @@ Set-Location $Root
 # 只终止本项目进程（Maskit.exe 壳 / MaskitEngine.exe 引擎 / 旧版同名 / 其 mitmdump 子进程树）
 function Stop-ShieldProcesses {
     # -ReleaseOnly：只清理**构建树里**残留的实例（ExecutablePath 在仓库内），
-    # 用户安装目录（如 D:\software\work\Maskit）的实例一律不碰——他正在用它
+    # 用户安装目录（如 C:\Program Files\Maskit）的实例一律不碰——他正在用它
     # 代理全部 LLM 流量，杀掉就是中断他手上的工作。
     if ($ReleaseOnly) {
         $repo = $Root.TrimEnd('\')
@@ -97,12 +97,33 @@ function Move-WithRetry {
 
 # 1. 读取当前版本并计算新版本号
 $panelPath = "engine\panel.py"
+$confPath = "src-tauri\tauri.conf.json"
+$cargoPath = "src-tauri\Cargo.toml"
+$cargoLockPath = "src-tauri\Cargo.lock"
+$pkgJsonPath = "frontend\package.json"
+$pkgLockPath = "frontend\package-lock.json"
 $verLine = Select-String -Path $panelPath -Pattern "__version__ = '(\d+)\.(\d+)\.(\d+)'" | Select-Object -First 1
 if (-not $verLine) { Write-Error "$panelPath 里找不到 __version__"; exit 1 }
 $m = [regex]::Match($verLine.Line, "__version__ = '(\d+)\.(\d+)\.(\d+)'")
 $major, $minor, $patch = [int]$m.Groups[1].Value, [int]$m.Groups[2].Value, [int]$m.Groups[3].Value
 $origVer = "$major.$minor.$patch"
+
+# 在任何写入前保存版本文件的原始字节。失败回滚不能依赖正则猜测旧值：
+# package-lock 里同一个版本字符串可能出现数百次，误替换或漏恢复都会让工作区
+# 处在「四处看似一致、锁文件实际已脏」的状态。
+$versionBackups = @{}
+foreach ($versionPath in @($panelPath, $confPath, $cargoPath, $cargoLockPath, $pkgJsonPath, $pkgLockPath)) {
+    $resolvedVersionPath = (Resolve-Path $versionPath -ErrorAction Stop).Path
+    $versionBackups[$resolvedVersionPath] = [IO.File]::ReadAllBytes($resolvedVersionPath)
+}
+
+if ($Version -and $Version.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
+    $Version = $Version.Substring(1)
+}
 if ($Version) {
+    if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+        Write-Error "版本号必须是 X.Y.Z（收到: $Version）"; exit 1
+    }
     $newVer = $Version
     Write-Host "指定版本构建: $origVer -> $newVer" -ForegroundColor Cyan
 } else {
@@ -110,18 +131,32 @@ if ($Version) {
     Write-Host "版本升级: $origVer -> $newVer" -ForegroundColor Cyan
 }
 
+# 同一版本 tag 已存在时禁止覆盖构建，避免生成无法区分的更新包。
+$existingTag = @(git tag --list "v$newVer")
+if ($existingTag.Count -gt 0) {
+    Write-Error "Git tag v$newVer 已存在；请使用新的版本号，不覆盖已有发布"; exit 1
+}
+
 # 2. 写回 panel.py（唯一来源）+ 同步 tauri.conf.json / Cargo.toml 的 version
 $panelSrc = (Get-Content $panelPath -Raw -Encoding UTF8) -replace "__version__ = '$origVer'", "__version__ = '$newVer'"
 [IO.File]::WriteAllText((Resolve-Path $panelPath), $panelSrc, (New-Object Text.UTF8Encoding $false))
-$confPath = "src-tauri\tauri.conf.json"
 $confSrc = (Get-Content $confPath -Raw -Encoding UTF8) -replace '"version": "\d+\.\d+\.\d+"', "`"version`": `"$newVer`""
 [IO.File]::WriteAllText((Resolve-Path $confPath), $confSrc, (New-Object Text.UTF8Encoding $false))
-$cargoPath = "src-tauri\Cargo.toml"
 # 只替第一处 version（[package] 段）：依赖项的 version 不能动，所以限定行首锚点。
 $cargoSrc = (Get-Content $cargoPath -Raw -Encoding UTF8) -replace '(?m)^version = "\d+\.\d+\.\d+"', "version = `"$newVer`""
 [IO.File]::WriteAllText((Resolve-Path $cargoPath), $cargoSrc, (New-Object Text.UTF8Encoding $false))
+# Cargo.lock 的根 package 版本不会在每次早期失败前自动更新；显式同步，确保
+# 版本检查和 release tag 在未运行 cargo build 的情况下也保持一致。
+$cargoLockSrc = Get-Content $cargoLockPath -Raw -Encoding UTF8
+$cargoLockSrc = [regex]::Replace(
+    $cargoLockSrc,
+    '(?ms)(\[\[package\]\]\s*\r?\nname = "maskit"\s*\r?\nversion = )"\d+\.\d+\.\d+"',
+    "`${1}`"$newVer`"",
+    1
+)
+[IO.File]::WriteAllText((Resolve-Path $cargoLockPath), $cargoLockSrc, (New-Object Text.UTF8Encoding $false))
 # frontend/package.json + package-lock.json 顶层 version（关于页/npm 元数据；只替顶层第一处）
-foreach ($pkgPath in @("frontend\package.json", "frontend\package-lock.json")) {
+foreach ($pkgPath in @($pkgJsonPath, $pkgLockPath)) {
     $pkgSrc = Get-Content $pkgPath -Raw -Encoding UTF8
     $pkgSrc = [regex]::new('"version": "\d+\.\d+\.\d+"').Replace($pkgSrc, "`"version`": `"$newVer`"", 2)
     [IO.File]::WriteAllText((Resolve-Path $pkgPath), $pkgSrc, (New-Object Text.UTF8Encoding $false))
@@ -129,27 +164,40 @@ foreach ($pkgPath in @("frontend\package.json", "frontend\package-lock.json")) {
 $check = Select-String -Path $panelPath -Pattern "__version__ = '$newVer'"
 if (-not $check) { Write-Error "版本写回失败"; exit 1 }
 
+# package-lock 必须同时更新根对象和 packages[""]，否则 npm ci 会继续使用旧元数据。
+try {
+    # -AsHashtable 保留 package-lock `packages[""]` 这个合法但特殊的空键，
+    # 避免 PowerShell 把它当成无效属性访问。
+    $pkgObj = Get-Content $pkgJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    $lockObj = Get-Content $pkgLockPath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    $rootLock = $lockObj["packages"][""]
+    if ($pkgObj["version"] -ne $newVer -or $lockObj["version"] -ne $newVer -or
+        $null -eq $rootLock -or $rootLock["version"] -ne $newVer -or
+        $pkgObj["name"] -ne $lockObj["name"] -or $pkgObj["name"] -ne $rootLock["name"]) {
+        throw "package.json / package-lock.json 根版本或名称不一致"
+    }
+} catch {
+    Write-Error "package-lock 一致性校验失败: $($_.Exception.Message)"; exit 1
+}
+
 # 2b. 三方版本硬校验：任何一处对不上立即失败，绝不打出版本分叉的包。
 $vPanel = ([regex]::Match((Get-Content $panelPath -Raw -Encoding UTF8), "__version__ = '(\d+\.\d+\.\d+)'")).Groups[1].Value
 $vConf  = ([regex]::Match((Get-Content $confPath -Raw -Encoding UTF8), '"version": "(\d+\.\d+\.\d+)"')).Groups[1].Value
 $vCargo = ([regex]::Match((Get-Content $cargoPath -Raw -Encoding UTF8), '(?m)^version = "(\d+\.\d+\.\d+)"')).Groups[1].Value
 $vPkg   = ([regex]::Match((Get-Content "frontend\package.json" -Raw -Encoding UTF8), '"version": "(\d+\.\d+\.\d+)"')).Groups[1].Value
-if (($vPanel -ne $newVer) -or ($vConf -ne $newVer) -or ($vCargo -ne $newVer) -or ($vPkg -ne $newVer)) {
-    Write-Host "版本不一致：panel=$vPanel tauri.conf=$vConf Cargo=$vCargo package.json=$vPkg 期望=$newVer" -ForegroundColor Red
+$vCargoLock = ([regex]::Match((Get-Content "src-tauri\Cargo.lock" -Raw -Encoding UTF8), '(?ms)^\[\[package\]\]\s*\nname = "maskit"\s*\nversion = "(\d+\.\d+\.\d+)"')).Groups[1].Value
+if (($vPanel -ne $newVer) -or ($vConf -ne $newVer) -or ($vCargo -ne $newVer) -or ($vPkg -ne $newVer) -or ($vCargoLock -ne $newVer)) {
+    Write-Host "版本不一致：panel=$vPanel tauri.conf=$vConf Cargo=$vCargo Cargo.lock=$vCargoLock package.json=$vPkg 期望=$newVer" -ForegroundColor Red
     Write-Error "版本分叉，打包中止"
     exit 1
 }
 Write-Host "版本一致性校验通过: panel/tauri.conf/Cargo/package.json 均为 $newVer" -ForegroundColor Green
 
 function Restore-Version {
-    $orig = "$major.$minor.$patch"
-    $restored = (Get-Content $panelPath -Raw -Encoding UTF8) -replace "__version__ = '$newVer'", "__version__ = '$orig'"
-    [IO.File]::WriteAllText((Resolve-Path $panelPath), $restored, (New-Object Text.UTF8Encoding $false))
-    $confRestored = (Get-Content $confPath -Raw -Encoding UTF8) -replace '"version": "\d+\.\d+\.\d+"', "`"version`": `"$orig`""
-    [IO.File]::WriteAllText((Resolve-Path $confPath), $confRestored, (New-Object Text.UTF8Encoding $false))
-    $cargoRestored = (Get-Content $cargoPath -Raw -Encoding UTF8) -replace '(?m)^version = "\d+\.\d+\.\d+"', "version = `"$orig`""
-    [IO.File]::WriteAllText((Resolve-Path $cargoPath), $cargoRestored, (New-Object Text.UTF8Encoding $false))
-    Write-Host "打包失败，已恢复版本号 $orig" -ForegroundColor Yellow
+    foreach ($entry in $versionBackups.GetEnumerator()) {
+        [IO.File]::WriteAllBytes($entry.Key, [byte[]]$entry.Value)
+    }
+    Write-Host "打包失败，已恢复所有版本文件（含 package-lock）" -ForegroundColor Yellow
 }
 
 # 3. Python 语法 + 单测（不碰运行中进程）
@@ -258,15 +306,70 @@ Write-Host "Tauri 打包（先尝试不杀进程）..." -ForegroundColor Cyan
 if ($env:MASKIT_GH_MIRROR) { $env:TAURI_BUNDLER_TOOLS_GITHUB_MIRROR = $env:MASKIT_GH_MIRROR }
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 # 更新包签名：私钥在仓库外（~/.tauri/maskit-updater.key，永不入库），公钥在 tauri.conf.json。
-# bundle.createUpdaterArtifacts=true 时不设这个变量，tauri build 直接报错退出；
-# 签名不对的包客户端会拒装（这正是防投毒的那道闸）。
+# 正式 signed 构建必须提供私钥；显式 -Unsigned 构建会临时关闭 updater artifacts，
+# 产物只能作为手工安装包发布，绝不能被标记为可自动更新。
 $signKey = Join-Path $env:USERPROFILE ".tauri\maskit-updater.key"
-if (-not (Test-Path $signKey)) {
-    Restore-Version
-    Write-Error "缺少更新签名私钥: $signKey`n生成: frontend\node_modules\.bin\tauri.cmd signer generate -w `"$signKey`" -p `"`""
-    exit 1
+# CI 可直接注入 TAURI_SIGNING_PRIVATE_KEY；本机才回退到仓库外的 key 文件。
+# 私钥只保存在当前 PowerShell 变量中，并仅通过 ProcessStartInfo 传给 tauri 子进程，
+# 不写入项目、不落盘到日志，也不污染父进程环境。
+$signKeyContent = $env:TAURI_SIGNING_PRIVATE_KEY
+$signKeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+if ([string]::IsNullOrWhiteSpace($signKeyContent)) {
+    if (-not (Test-Path $signKey) -and -not $Unsigned) {
+        Restore-Version
+        Write-Error "缺少更新签名私钥: $signKey`n生成: frontend\node_modules\.bin\tauri.cmd signer generate -w `"$signKey`" -p `"`""
+        exit 1
+    }
+    if (Test-Path $signKey) {
+        $signKeyContent = (Get-Content $signKey -Raw -Encoding UTF8).Trim()
+    }
 }
-$env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $signKey -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($signKeyContent) -and -not $Unsigned) {
+    Restore-Version
+    Write-Error "更新签名私钥为空"; exit 1
+}
+$unsignedBuild = [bool]$Unsigned -or [string]::IsNullOrWhiteSpace($signKeyContent)
+
+# unsigned 模式只在当前 tauri build 生命周期内关闭更新产物，成功/失败都会恢复为 true，
+# 避免本机下一次正式打包悄悄变成无签名包。
+$updaterOverrideApplied = $false
+if ($unsignedBuild) {
+    $confText = Get-Content $confPath -Raw -Encoding UTF8
+    if ($confText -notmatch '"createUpdaterArtifacts"\s*:\s*true') {
+        Restore-Version
+        Write-Error "无法在 tauri.conf.json 找到 createUpdaterArtifacts=true"; exit 1
+    }
+    $confText = $confText -replace '"createUpdaterArtifacts"\s*:\s*true', '"createUpdaterArtifacts": false'
+    [IO.File]::WriteAllText((Resolve-Path $confPath), $confText, (New-Object Text.UTF8Encoding $false))
+    $updaterOverrideApplied = $true
+    Write-Host "未提供更新签名私钥：构建 UNSIGNED 安装包（不生成 updater .sig/latest.json）" -ForegroundColor Yellow
+}
+
+function Restore-UpdaterConfig {
+    if (-not $script:updaterOverrideApplied) { return }
+    try {
+        $current = Get-Content $confPath -Raw -Encoding UTF8
+        $current = $current -replace '"createUpdaterArtifacts"\s*:\s*false', '"createUpdaterArtifacts": true'
+        [IO.File]::WriteAllText((Resolve-Path $confPath), $current, (New-Object Text.UTF8Encoding $false))
+    } finally {
+        $script:updaterOverrideApplied = $false
+    }
+}
+
+function Start-WithoutSigningEnvironment {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    # 构建签名私钥即使来自调用方环境，也不应被本机启动的产品进程继承。
+    $oldKey = [Environment]::GetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY", "Process")
+    $oldPassword = [Environment]::GetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "Process")
+    try {
+        [Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY", $null, "Process")
+        [Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", $null, "Process")
+        return Start-Process -FilePath $Path -PassThru
+    } finally {
+        [Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY", $oldKey, "Process")
+        [Environment]::SetEnvironmentVariable("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", $oldPassword, "Process")
+    }
+}
 
 # tauri build 必须用 ProcessStartInfo 起，不能直接 `& $tauriCli build`。
 #
@@ -282,7 +385,7 @@ $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content $signKey -Raw).Trim()
 # `TAURI_SIGNING_PRIVATE_KEY_PASSWORD=`，于是不再走 prompt。
 # AGENTS.md 里曾写「$env:X = "" 仍会把空串传给子进程」，那条结论是错的，已更正。
 function Invoke-TauriBuild {
-    param([string]$Cli, [string]$WorkDir, [string]$KeyContent)
+    param([string]$Cli, [string]$WorkDir, [string]$KeyContent, [string]$KeyPassword)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "cmd.exe"
     $psi.Arguments = '/c "' + $Cli + '" build'
@@ -290,8 +393,14 @@ function Invoke-TauriBuild {
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
-    $psi.EnvironmentVariables["TAURI_SIGNING_PRIVATE_KEY"] = $KeyContent
-    $psi.EnvironmentVariables["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = ""
+    if ([string]::IsNullOrWhiteSpace($KeyContent)) {
+        [void]$psi.EnvironmentVariables.Remove("TAURI_SIGNING_PRIVATE_KEY")
+    } else {
+        $psi.EnvironmentVariables["TAURI_SIGNING_PRIVATE_KEY"] = $KeyContent
+    }
+    # 空口令也要显式传给子进程，避免 Tauri 进入交互式 rpassword 提示；
+    # 有口令时只从环境变量读取，绝不把口令写入项目或日志。
+    $psi.EnvironmentVariables["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = if ($null -eq $KeyPassword) { "" } else { $KeyPassword }
     $proc = [System.Diagnostics.Process]::Start($psi)
     # 两个流都要异步读：只读一个的话，另一个管道写满就死锁（tauri 输出量很大）
     $so = $proc.StandardOutput.ReadToEndAsync()
@@ -301,45 +410,61 @@ function Invoke-TauriBuild {
     Write-Host $text
     return @{ Exit = $proc.ExitCode; Output = $text }
 }
-Push-Location $Root
 try {
-    # 必须在仓库根目录跑：tauri CLI 靠「当前目录或其子目录里有 tauri.conf.json」
-    # 定位工程。此前 Push-Location frontend 后再跑，src-tauri 是 frontend 的兄弟
-    # 目录而非子目录 → panic「Couldn't recognize the current folder as a Tauri project」。
-    # CLI 本体装在 frontend/node_modules，所以用显式路径调用而不是 npx。
-    $tauriCli = Join-Path $Root "frontend\node_modules\.bin\tauri.cmd"
-    if (-not (Test-Path $tauriCli)) {
-        Pop-Location; Restore-Version
-        Write-Error "找不到 tauri CLI: $tauriCli（先在 frontend 下 npm install）"; exit 1
-    }
-    $oldEAP2 = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"   # tauri CLI 的 Info 日志走 stderr，Stop 下会误判失败
-    $r1 = Invoke-TauriBuild -Cli $tauriCli -WorkDir $Root -KeyContent $env:TAURI_SIGNING_PRIVATE_KEY
-    $tauriExit = $r1.Exit
-    $tauriOut = $r1.Output
-    $ErrorActionPreference = $oldEAP2
-    if ($tauriExit -ne 0) {
-        # 判断是否 exe 文件锁。匹配串必须覆盖中文系统的报错：实测 Windows 中文版
-        # 报的是「另一个程序正在使用此文件，进程无法访问」(os error 32)，
-        # 原来只匹配英文 failed to remove / Access denied，中文机器上直接被当成
-        # 「非文件锁原因」而放弃重试，整次打包白跑。
-        # 触发场景很常见：上一轮构建产物被直接运行（进程镜像就在 target\release 下），
-        # 于是新一轮 tauri build 覆盖 resources\engine\MaskitEngine.exe 时必然撞锁。
-        if ($tauriOut -match "failed to remove.*(Maskit|llm-shield)\.exe|拒绝访问|Access denied|os error 32|另一个程序正在使用此文件|being used by another process") {
-            Write-Host "exe 文件被占用，杀进程后重试 tauri build..." -ForegroundColor Yellow
-            Stop-ShieldProcesses
-            $oldEAPr = $ErrorActionPreference
-            $ErrorActionPreference = "Continue"
-            $r2 = Invoke-TauriBuild -Cli $tauriCli -WorkDir $Root -KeyContent $env:TAURI_SIGNING_PRIVATE_KEY
-            $tauriExit2 = $r2.Exit
-            $ErrorActionPreference = $oldEAPr
-            if ($tauriExit2 -ne 0) { Pop-Location; Restore-Version; Write-Error "Tauri 打包失败（重试后仍失败）"; exit 1 }
-        } else {
-            Pop-Location; Restore-Version; Write-Error "Tauri 打包失败（非文件锁原因）"; exit 1
+    Push-Location $Root
+    try {
+        # 必须在仓库根目录跑：tauri CLI 靠「当前目录或其子目录里有 tauri.conf.json」
+        # 定位工程。此前 Push-Location frontend 后再跑，src-tauri 是 frontend 的兄弟
+        # 目录而非子目录 → panic「Couldn't recognize the current folder as a Tauri project」。
+        # CLI 本体装在 frontend/node_modules，所以用显式路径调用而不是 npx。
+        $tauriCli = Join-Path $Root "frontend\node_modules\.bin\tauri.cmd"
+        if (-not (Test-Path $tauriCli)) {
+            Restore-Version
+            Write-Error "找不到 tauri CLI: $tauriCli（先在 frontend 下 npm install）"; exit 1
         }
-    }
-} finally { Pop-Location }
-Write-Host "Tauri 打包完成" -ForegroundColor Green
+        $oldEAP2 = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"   # tauri CLI 的 Info 日志走 stderr，Stop 下会误判失败
+        $buildKey = if ($unsignedBuild) { "" } else { $signKeyContent }
+        $r1 = Invoke-TauriBuild -Cli $tauriCli -WorkDir $Root -KeyContent $buildKey -KeyPassword $signKeyPassword
+        $tauriExit = $r1.Exit
+        $tauriOut = $r1.Output
+        $ErrorActionPreference = $oldEAP2
+        if ($tauriExit -ne 0) {
+            # 判断是否 exe 文件锁。匹配串必须覆盖中文系统的报错：实测 Windows 中文版
+            # 报的是「另一个程序正在使用此文件，进程无法访问」(os error 32)，
+            # 原来只匹配英文 failed to remove / Access denied，中文机器上直接被当成
+            # 「非文件锁原因」而放弃重试，整次打包白跑。
+            # 触发场景很常见：上一轮构建产物被直接运行（进程镜像就在 target\release 下），
+            # 于是新一轮 tauri build 覆盖 resources\engine\MaskitEngine.exe 时必然撞锁。
+            if ($tauriOut -match "failed to remove.*(Maskit|llm-shield)\.exe|拒绝访问|Access denied|os error 32|另一个程序正在使用此文件|being used by another process") {
+                Write-Host "exe 文件被占用，杀进程后重试 tauri build..." -ForegroundColor Yellow
+                Stop-ShieldProcesses
+                $oldEAPr = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $r2 = Invoke-TauriBuild -Cli $tauriCli -WorkDir $Root -KeyContent $buildKey -KeyPassword $signKeyPassword
+                $tauriExit2 = $r2.Exit
+                $ErrorActionPreference = $oldEAPr
+                if ($tauriExit2 -ne 0) { Restore-Version; Write-Error "Tauri 打包失败（重试后仍失败）"; exit 1 }
+            } else {
+                Restore-Version; Write-Error "Tauri 打包失败（非文件锁原因）"; exit 1
+            }
+        }
+    } finally { Pop-Location }
+    Write-Host "Tauri 打包完成" -ForegroundColor Green
+} finally {
+    Restore-UpdaterConfig
+    # 无论 tauri 成功、失败还是中途 exit，尽快丢弃内存中的私钥副本。
+    $signKeyContent = $null
+    $signKeyPassword = $null
+    $buildKey = $null
+    Remove-Variable -Name signKeyContent -ErrorAction SilentlyContinue
+    Remove-Variable -Name signKeyPassword -ErrorAction SilentlyContinue
+    Remove-Variable -Name buildKey -ErrorAction SilentlyContinue
+}
+
+# unsigned 覆盖只应存在于 tauri build 生命周期内；后续资源替换/验证失败时
+# 也不能把 createUpdaterArtifacts=false 留在工作区。
+Restore-UpdaterConfig
 
 # 7. 杀进程 + 替换引擎资源（构建已全部完成，现在几秒内完成替换）
 Write-Host "停旧进程，更新引擎资源..." -ForegroundColor Cyan
@@ -373,8 +498,14 @@ if ($ReleaseOnly) {
     $bundle = "src-tauri\target\release\bundle\nsis\Maskit_${newVer}_x64-setup.exe"
     if (-not (Test-Path $bundle)) { Restore-Version; Write-Error "安装包未生成: $bundle"; exit 1 }
     $sig = "$bundle.sig"
-    if (-not (Test-Path $sig)) { Restore-Version; Write-Error "更新签名未生成: $sig（updater 会拒绝该版本）"; exit 1 }
-    Write-Host "`n完成: 数据面具 Maskit v$newVer 已构建（未安装、未启动、未触碰运行中的实例）" -ForegroundColor Cyan
+    if (-not $unsignedBuild -and -not (Test-Path $sig)) {
+        Restore-Version; Write-Error "更新签名未生成: $sig（signed 包不能缺少 updater 签名）"; exit 1
+    }
+    if ($unsignedBuild -and (Test-Path $sig)) {
+        Restore-Version; Write-Error "unsigned 构建意外生成了 updater 签名: $sig"; exit 1
+    }
+    $modeLabel = if ($unsignedBuild) { "UNSIGNED（仅手工安装，无自动更新）" } else { "SIGNED" }
+    Write-Host "`n完成: 数据面具 Maskit v$newVer [$modeLabel] 已构建（未安装、未启动、未触碰运行中的实例）" -ForegroundColor Cyan
     Write-Host "安装包: $bundle" -ForegroundColor Cyan
     Write-Host "下一步: git tag v$newVer && git push --tags（CI 建 Release 草稿）→ 上传安装包与 .sig → 发布" -ForegroundColor Yellow
     exit 0
@@ -415,7 +546,7 @@ if (-not $verifyOk) {
         Move-Item $engineBackup $relEngine
         try {
             # 用独立进程组启动：不挂在本脚本的进程树上，脚本退出后实例继续存活
-            Start-Process -FilePath (Join-Path $Root $exe) | Out-Null
+            Start-WithoutSigningEnvironment -Path (Join-Path $Root $exe) | Out-Null
             Write-Host "已重新拉起上一个版本（未验证，请手动确认）" -ForegroundColor Yellow
         } catch {
             Write-Host "旧版本拉起失败，请手动启动: $exe" -ForegroundColor Red
@@ -430,7 +561,7 @@ if (-not $verifyOk) {
 # 验证通过：备份可以丢了；实例改用独立进程组重启，避免脚本退出时被进程树回收
 if (Test-Path $engineBackup) { Remove-Item -Recurse -Force $engineBackup }
 if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; Start-Sleep 2 }
-Start-Process -FilePath (Join-Path $Root $exe) | Out-Null
+Start-WithoutSigningEnvironment -Path (Join-Path $Root $exe) | Out-Null
 Write-Host "已以独立进程启动 v$newVer（脚本退出后继续运行）" -ForegroundColor Green
 
 Write-Host "`n完成: 数据面具 Maskit v$newVer（Tauri 壳 + 引擎 sidecar）已构建" -ForegroundColor Cyan

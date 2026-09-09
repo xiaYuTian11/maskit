@@ -18,12 +18,25 @@ venv/
 .venv-test/
 build/
 dist/
+dist_releases/
 dist_engine/
 build_engine/
 build_temp/
 *.spec.bak
 proxy_token
 _smoke_data/
+ai-coding/
+frontend/.playwright-cli/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.tmp
+*.temp
+.turbo/
 # 引擎运行时在数据目录生成的文件（开发态数据目录 = engine/）
 engine/config.json
 config.json.bak-*
@@ -31,12 +44,12 @@ model_prices_cache.json
 diagnostics-*.json
 shield-env-backup.json
 debug-*.log
-.pytest_cache/
 
 # Node / Frontend
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+frontend/.vite/
 *.local
 
 # Tauri / Rust

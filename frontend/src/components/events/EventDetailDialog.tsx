@@ -279,7 +279,7 @@ export function EventDetailDialog({
                                 <span className="w-10 shrink-0 text-muted-foreground">{t('detail.hash')}</span>
                                 <span className="break-all text-muted-foreground">{item.hash}</span>
                                 {item.length != null && (
-                                  <span className="text-muted-foreground">（len={item.length}）</span>
+                                  <span className="text-muted-foreground">{tf('detail.length', { n: item.length })}</span>
                                 )}
                               </div>
                             )}

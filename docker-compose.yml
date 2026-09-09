@@ -7,11 +7,13 @@ services:
     container_name: maskit
     restart: unless-stopped
     ports:
-      - "5801:5801"         # Web 控制台 (http://<host>:5801/?token=<MASKIT_PANEL_TOKEN>)
-      - "18701:18701"       # OpenAI 反向代理通道
-      - "18702:18702"       # DeepSeek 反向代理通道
-      - "18703:18703"       # Anthropic 反向代理通道
-      - "18704-18710:18704-18710" # 其他自定义上游端口段
+      # 默认只在本机开放；公网/局域网部署必须显式 MASKIT_BIND_HOST=0.0.0.0，
+      # 并同时设置固定的 MASKIT_PANEL_TOKEN 或 token file。
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_PANEL_HOST_PORT:-5801}:5801"         # Web 控制台
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_OPENAI_HOST_PORT:-18701}:18701"       # OpenAI 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_DEEPSEEK_HOST_PORT:-18702}:18702"     # DeepSeek 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_ANTHROPIC_HOST_PORT:-18703}:18703"   # Anthropic 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_CUSTOM_HOST_START:-18704}-${MASKIT_CUSTOM_HOST_END:-18710}:18704-18710" # 自定义上游端口段
     volumes:
       # 命名卷由 Docker 管理权限（容器以 uid 10001 非 root 运行）。
       # 想直接看文件可改成 bind mount：./maskit_data:/data，并先 chown -R 10001 ./maskit_data
@@ -21,6 +23,11 @@ services:
       - PYTHONUNBUFFERED=1
       # 面板登录令牌（≥16 位 ASCII）。不设则每次启动随机生成并打印到 docker logs。
       - MASKIT_PANEL_TOKEN=${MASKIT_PANEL_TOKEN:-}
+      # 推荐 Docker secret 文件，优先级高于 MASKIT_PANEL_TOKEN；例如：
+      # MASKIT_PANEL_TOKEN_FILE=/run/secrets/maskit_panel_token
+      - MASKIT_PANEL_TOKEN_FILE=${MASKIT_PANEL_TOKEN_FILE:-}
+      # 仅在可信 HTTPS 反向代理覆盖单跳转发头时设为 1。
+      - MASKIT_TRUST_PROXY=${MASKIT_TRUST_PROXY:-0}
 
 volumes:
   maskit_data:

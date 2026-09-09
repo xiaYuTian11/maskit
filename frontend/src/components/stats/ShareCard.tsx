@@ -76,7 +76,7 @@ export function ShareCard() {
     const cv = canvasRef.current
     if (!cv) return
     draw(cv, data, days, t, tf)
-  }, [open, data, days])
+  }, [open, data, days, t, tf])
 
   const download = () => {
     const cv = canvasRef.current
@@ -162,8 +162,7 @@ export function ShareCard() {
 
 /** 卡片绘制。逻辑集中在这里，改版式不影响上面的数据与交互。 */
 function draw(cv: HTMLCanvasElement, d: Highlights, days: number, t: (k: string) => string, tf: (k: string, v?: Record<string, string | number>) => string) {
-  // H=660 不是随手定的：6 条柱最后一条底边在 588，页脚占最后 56px，
-  // H=620 时页脚顶在 564 会把最后一条压掉（实测截图确认）。留 16px 余量。
+  // 画布高度为 660：为 6 条柱和页脚各留出稳定的垂直空间，避免窄视口裁切。
   const W = 1000, H = 660
   // devicePixelRatio 放大再缩回，否则在高分屏上导出的图是糊的
   const dpr = Math.min(window.devicePixelRatio || 1, 2)

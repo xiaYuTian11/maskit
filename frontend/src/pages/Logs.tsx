@@ -108,7 +108,7 @@ export default function LogsPage() {
   const { hidden } = useVisibility()
   // 空串是 Radix Select 的保留值（它把 value === '' 当成「未选择，显示 placeholder」），
   // 用它当「全部」这个真实选项会跟组件语义打架：官方文档明确要求 SelectItem 的 value
-  // 不能是空串。用哨兵值把「全部」和「未选择」区分开（2026-08-17 外部审计 P0-07）。
+  // 不能是空串。用哨兵值把「全部」和「未选择」区分开，符合 Radix Select 约束。
   const [filterType, setFilterType] = useState<string>(FILTER_ALL)
   const [sensitive, setSensitive] = useState(false)
   const [q, setQ] = useState('')
@@ -485,7 +485,7 @@ export default function LogsPage() {
               <div className="flex items-center gap-1.5"><Badge variant="outline">{t('logs.filterMissed')}</Badge>{t('logs.legendSkip')}</div>
               <div className="flex items-center gap-1.5"><Badge className="bg-amber-500/10 text-amber-600 hover:bg-amber-500/10 dark:text-amber-400">{t('logs.filterScanWarn')}</Badge>{t('logs.legendScanWarn')}</div>
               <div className="flex items-center gap-1.5"><Badge className="bg-red-500/10 text-red-600 hover:bg-red-500/10 dark:text-red-400">{t('logs.filterBlocked')}</Badge>{t('logs.legendBlock')}</div>
-              <div className="flex items-center gap-1.5"><Badge className="bg-amber-500/15 text-amber-600 hover:bg-amber-500/15 dark:text-amber-400">POISON</Badge>{t('logs.legendPoison')}</div>
+              <div className="flex items-center gap-1.5"><Badge className="bg-amber-500/15 text-amber-600 hover:bg-amber-500/15 dark:text-amber-400">{t('logs.poisonBadge')}</Badge>{t('logs.legendPoison')}</div>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

@@ -10,13 +10,10 @@
 ; 避免桌面出现两个图标。
 
 !macro NSIS_HOOK_PREINSTALL
-  ; 安装/覆盖安装前，强制终止正在运行的 Maskit 壳和引擎进程，防止文件被锁导致"无法打开要写入的文件"
-  nsExec::Exec 'taskkill /F /IM Maskit.exe'
-  Pop $0
-  nsExec::Exec 'taskkill /F /IM MaskitEngine.exe'
-  Pop $0
-  nsExec::Exec 'taskkill /F /IM mitmdump.exe'
-  Pop $0
+  ; 只终止本安装目录下的进程。按镜像名 taskkill 会误杀用户正在使用的另一份
+  ; Maskit，甚至会杀掉第三方 mitmdump；PowerShell 按 ExecutablePath/CommandLine
+  ; 归属过滤后再递归收集子进程，升级时不会中断其它安装或开发实例。
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = [IO.Path]::GetFullPath($$args[0]).TrimEnd(\"\\\") + \"\\\"; $$all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue); $$ids = New-Object System.Collections.Generic.HashSet[int]; foreach ($$p in $$all) { $$path = $$p.ExecutablePath; $$cmd = $$p.CommandLine; if (($$path -and $$path.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase)) -or ($$cmd -and $$cmd.IndexOf($$root, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { [void]$$ids.Add([int]$$p.ProcessId) } }; $$changed = $$true; while ($$changed) { $$changed = $$false; foreach ($$p in $$all) { if ($$ids.Contains([int]$$p.ParentProcessId) -and -not $$ids.Contains([int]$$p.ProcessId)) { [void]$$ids.Add([int]$$p.ProcessId); $$changed = $$true } } }; foreach ($$id in $$ids) { Stop-Process -Id $$id -Force -ErrorAction SilentlyContinue }" -- "$INSTDIR"'
   Sleep 500
 !macroend
 
@@ -48,13 +45,8 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; 卸载前同样强制终止运行中的进程，释放文件锁
-  nsExec::Exec 'taskkill /F /IM Maskit.exe'
-  Pop $0
-  nsExec::Exec 'taskkill /F /IM MaskitEngine.exe'
-  Pop $0
-  nsExec::Exec 'taskkill /F /IM mitmdump.exe'
-  Pop $0
+  ; 卸载前使用与安装相同的目录归属过滤，绝不按全局镜像名杀进程。
+  nsExec::ExecToLog '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = [IO.Path]::GetFullPath($$args[0]).TrimEnd(\"\\\") + \"\\\"; $$all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue); $$ids = New-Object System.Collections.Generic.HashSet[int]; foreach ($$p in $$all) { $$path = $$p.ExecutablePath; $$cmd = $$p.CommandLine; if (($$path -and $$path.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase)) -or ($$cmd -and $$cmd.IndexOf($$root, [StringComparison]::OrdinalIgnoreCase) -ge 0)) { [void]$$ids.Add([int]$$p.ProcessId) } }; $$changed = $$true; while ($$changed) { $$changed = $$false; foreach ($$p in $$all) { if ($$ids.Contains([int]$$p.ParentProcessId) -and -not $$ids.Contains([int]$$p.ProcessId)) { [void]$$ids.Add([int]$$p.ProcessId); $$changed = $$true } } }; foreach ($$id in $$ids) { Stop-Process -Id $$id -Force -ErrorAction SilentlyContinue }" -- "$INSTDIR"'
   Sleep 500
 
   Delete "$DESKTOP\Data Maskit.lnk"

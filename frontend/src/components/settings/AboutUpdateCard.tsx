@@ -129,9 +129,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { v
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
               {/* 总大小未知时用**不确定态动画**，不能给个静态宽度。
-                  原来写死 '30%'，用户看到的是「进度条先跳到中间，停一会又从零开始」——
-                  那 30% 不是进度，是占位符，可它长得跟进度一模一样
-                  （2026-08-17 用户实测反馈）。 */}
+                  总大小未知时不能伪造固定百分比；不确定态应使用独立动画，避免误导进度。 */}
               {pct != null ? (
                 <div
                   className="h-full rounded-full bg-primary transition-[width] duration-300"

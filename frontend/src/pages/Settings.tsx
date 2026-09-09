@@ -210,7 +210,7 @@ function UpstreamForm({
           </div>
           <div>
             <Label className="text-xs">{t('settings.upstream.targetBaseUrl')}</Label>
-            <Input className="mt-1 h-8 font-mono text-xs" value={form.target} onChange={(e) => set('target', e.target.value)} placeholder="https://api.openai.com" />
+            <Input className="mt-1 h-8 font-mono text-xs" value={form.target} onChange={(e) => set('target', e.target.value)} placeholder={t('settings.upstream.targetPh')} />
             <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.upstream.targetHint')}</p>
           </div>
 
@@ -221,7 +221,7 @@ function UpstreamForm({
               {(form.paths ?? []).map((p) => (
                 <span key={p} className="group flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-[11px]">
                   {p}
-                  <button className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => togglePath(p)}>×</button>
+                  <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => togglePath(p)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                 </span>
               ))}
               {presetPaths.map((p) => (
@@ -236,7 +236,7 @@ function UpstreamForm({
               ))}
             </div>
             <div className="mt-1.5 flex items-center gap-1.5">
-              <Input className="h-7 w-52 font-mono text-xs" value={newPath} onChange={(e) => setNewPath(e.target.value)} placeholder="/v1/custom/path" onKeyDown={(e) => {
+              <Input className="h-7 w-52 font-mono text-xs" value={newPath} onChange={(e) => setNewPath(e.target.value)} placeholder={t('settings.upstream.pathPh')} onKeyDown={(e) => {
                 if (e.key === 'Enter' && newPath.trim().startsWith('/')) {
                   togglePath(newPath.trim()); setNewPath('')
                 }
@@ -253,7 +253,7 @@ function UpstreamForm({
                 <div key={k} className="flex items-center gap-1.5">
                   <Input className="h-7 w-36 font-mono text-[11px]" value={k} readOnly />
                   <Input className="h-7 flex-1 font-mono text-[11px]" value={v} onChange={(e) => setHeader(k, e.target.value)} />
-                  <button className="shrink-0 text-muted-foreground opacity-60 hover:text-red-500" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')}>×</button>
+                  <button type="button" className="shrink-0 text-muted-foreground opacity-60 hover:text-red-500" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                 </div>
               ))}
               {presetHeaders.map(([k, v]) => (
@@ -279,7 +279,7 @@ function UpstreamForm({
           {captureMode !== 'reverse' && (
             <div>
               <Label className="text-xs">{t('settings.upstream.basePath')}</Label>
-              <Input className="mt-1 h-8 font-mono text-xs" value={form.base_path ?? ''} onChange={(e) => set('base_path', e.target.value)} placeholder="/openai" />
+              <Input className="mt-1 h-8 font-mono text-xs" value={form.base_path ?? ''} onChange={(e) => set('base_path', e.target.value)} placeholder={t('settings.upstream.basePathPh')} />
             </div>
           )}
 
@@ -299,9 +299,7 @@ function UpstreamForm({
 
 // ========== 配置备份与回滚 ==========
 /**
- * 备份此前只躺在数据目录里，用户在 UI 上看不到也不知道存在——2026-08-14 配置被
- * 陈旧快照覆盖时，用户第一反应是「代理坏了」，实际 9 个客户端 + 47 个词一直在
- * 备份里。这张卡把备份摊开：时间 + 结构摘要 + 一键回滚。
+ * 配置备份在数据目录中自动生成；此卡展示时间、结构摘要并提供一键回滚。
  */
 /** 开关行：label + ? 问号 Tooltip 说明 + Switch（全局统一样式） */
 function SettingToggle({ label, desc, checked, onChange }: { label: string; desc: string; checked: boolean; onChange: (v: boolean) => void }) {
@@ -380,7 +378,7 @@ function ConfigBackupCard() {
         )}
         <div className="space-y-1.5">
           {backups.map((b) => {
-            // 结构比当前「多」的备份高亮：这类通常就是事故前的完整配置
+            // 结构比当前「多」的备份高亮，方便识别可能包含更多配置的版本。
             const richer = (b.upstreams ?? 0) > (cur.upstreams ?? 0) || (b.words ?? 0) > (cur.words ?? 0)
             return (
               <div
@@ -451,8 +449,8 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   // 侧边栏跳 /settings?tab=xxx 时同步 tab（defaultValue 只首次生效，已挂载后要受控切换）
   // 独立页模式不监听 searchParams（URL 保持 #/words / #/clients）
   // 注意：依赖必须是字符串值 searchParams.get('tab')，不能是 searchParams 对象——
-  // HashRouter 下 useSearchParams 每次渲染可能返回新引用，依赖对象会让 effect 每次
-  // 跑、把用户刚点的 tab 重置回 advanced（曾导致系统安全 tab 点不进去）。
+  // HashRouter 下 useSearchParams 每次渲染可能返回新引用；依赖对象会让 effect 每次
+  // 执行，因此只依赖字符串参数，避免覆盖用户当前选择。
   const tabParam = searchParams.get('tab')
   // 顶栏「更新到 vX」跳转时带 install=1，关于页自动开始下载
   const autoInstallUpdate = searchParams.get('install') === '1'
@@ -553,7 +551,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     queryFn: getAuditJob,
     refetchInterval: hidden ? false : 1200,
   })
-  // 版本号取引擎实测值，不写死在前端（写死必然与实际产物脱节）
+  // 版本号取引擎运行时值，不写死在前端，避免与实际产物脱节。
   const { data: status } = useQuery({ queryKey: ['proxyStatus'], queryFn: getStatus, refetchInterval: hidden ? false : 10000 })
   const [auditReport, setAuditReport] = useState<string | null>(null)
   const auditRunning = auditJob?.running ?? false
@@ -790,7 +788,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   }
 
   // 整词匹配开关（sensitive_word_whole: [words]）：开启后该词两侧加边界，
-  // 避免「机要」打中「机要害」（审计规则专项 P2）
+  // 避免短词子串误命中更长的词。
   const wordWhole = (cfg?.sensitive_word_whole as string[]) ?? []
   const toggleWordWhole = (word: string) => {
     if (!cfg) return
@@ -819,7 +817,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             它不只是坏，而是多余：本页每个开关都在 onChange 里即时保存，
             文本框按 Enter 提交，压根没有「待保存」的本地状态。
             留着它反而制造「我的改动还没存」的错觉，点一下又什么都没发生。
-            换成如实说明当前行为（2026-08-17 外部审计 P0-07）。 */}
+            改为如实说明当前行为，避免让用户误以为存在待提交状态。 */}
         <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           {saving
             ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />{t('settings.saving')}</>
@@ -836,8 +834,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             <TabsTrigger value="tools">{t('settings.tab.tools')}</TabsTrigger>
             {/* 「关于」此前只有 TabsContent 没有 TabsTrigger：内容存在但点不进去，
                 只能靠 ?tab=about 这个没人知道的 URL 参数进入，等于授权激活、
-                版本与更新日志三块功能对用户完全不可见（实测截图确认三个 tab
-                全部未选中、页面却渲染了 about 内容）。 */}
+                版本与更新日志必须有明确的「关于」入口，避免内容渲染后却没有可达标签。 */}
             <TabsTrigger value="about">{t('settings.tab.about')}</TabsTrigger>
           </TabsList>
         )}
@@ -873,7 +870,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </Select>
             <Input className="h-7 w-32 font-mono text-xs" placeholder={t('settings.clients.modelPh')} value={testModel} onChange={(e) => setTestModel(e.target.value)} />
             <Input className="h-7 w-40 font-mono text-xs" placeholder={t('settings.clients.apiKeyPh')} value={testApiKey} onChange={(e) => setTestApiKey(e.target.value)} />
-            <Input className="h-7 w-24 font-mono text-xs" placeholder="/v1" value={testPathPrefix} onChange={(e) => setTestPathPrefix(e.target.value)} />
+                  <Input className="h-7 w-24 font-mono text-xs" placeholder={t('settings.clients.pathPrefixPh')} value={testPathPrefix} onChange={(e) => setTestPathPrefix(e.target.value)} />
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" style={{ alignItems: 'stretch' }}>
@@ -911,7 +908,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   </div>
                   {/* Base URL 行：一键复制纯链接（不带'base URL'字样） */}
                   <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-2.5 py-1.5">
-                    <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Base URL</span>
+                    <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('settings.clients.baseUrl')}</span>
                     <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">{baseUrl}</code>
                     <Button
                       size="sm" variant="ghost" className="h-6 shrink-0 gap-1 px-2 text-[11px]"
@@ -957,7 +954,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     )}
                     {Object.keys(u.extra_headers ?? {}).length > 0 && (
                       <Badge variant="outline" className="font-mono text-[10px]" title={tf('settings.clients.injectedHeaders', { list: Object.keys(u.extra_headers ?? {}).join(', ') })}>
-                        Header {Object.keys(u.extra_headers ?? {}).length}
+                        {tf('settings.clients.headerCount', { n: Object.keys(u.extra_headers ?? {}).length })}
                       </Badge>
                     )}
                   </div>
@@ -1150,11 +1147,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                             {whole && !disabled && <span className="ml-0.5 text-[9px] font-bold">{t('settings.words.wholeBadge')}</span>}
                           </button>
                           <button
+                            type="button"
                             className="text-muted-foreground opacity-50 transition-opacity hover:text-red-500 group-hover:opacity-100"
                             onClick={() => removeWord(cat, w)}
                             title={t('settings.words.delTitle')}
+                            aria-label={t('settings.words.delTitle')}
                           >
-                            ×
+                            <X className="h-3 w-3" />
                           </button>
                         </span>
                       )
@@ -1281,7 +1280,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {secretPrefixes.map((p) => (
                   <span key={p} className="group inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
-                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => setSecret(secretPrefixes.filter((x) => x !== p), `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')}>×</button>
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => setSecret(secretPrefixes.filter((x) => x !== p), `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
                 <div className="flex items-center gap-1.5">
@@ -1322,10 +1321,10 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         {!embeddedTab && (
         <TabsContent value="advanced" className="space-y-4">
           {/*
-            目标域名 / 拦截路径只在「透传模式」下生效，反向代理模式（默认）走的是
+                  目标域名 / 拦截路径只在「透传模式」下生效，反向代理模式（默认）走的是
             另一条路：apply_reverse_routing 按入站端口匹配到客户端，再用该客户端自己的
             paths 白名单判断是否脱敏（transparent.py 反代分支根本不读 TARGET_DOMAINS）。
-            反代模式下把它们摆在设置里是「配了不生效」的假开关——用户在客户端配一遍、
+              反代模式下把它们摆在设置里会造成「配了不生效」的假开关——用户在客户端配一遍、
             这里再配一遍，还互相矛盾。所以按模式条件显示，而不是删（透传模式仍需要）。
           */}
           {(cfg?.capture_mode ?? 'reverse') === 'reverse' ? (
@@ -1379,10 +1378,10 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {((cfg?.target_domains as string[] | undefined) ?? []).map((d) => (
                   <span key={d} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {d}
-                    <button className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
                       const domains = (cfg?.target_domains as string[] | undefined) ?? []
                       save({ target_domains: domains.filter((x) => x !== d) }, tf('settings.toast.deleted', { name: d }))
-                    }}>×</button>
+                    }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
                 {((cfg?.target_domains as string[] | undefined) ?? []).length === 0 && (
@@ -1427,10 +1426,10 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {((cfg?.api_paths as string[] | undefined) ?? []).map((p) => (
                   <span key={p} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
-                    <button className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
                       const paths = (cfg?.api_paths as string[] | undefined) ?? []
                       save({ api_paths: paths.filter((x) => x !== p) }, tf('settings.toast.deleted', { name: p }))
-                    }}>×</button>
+                    }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
               </div>
@@ -1448,7 +1447,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <Label className="text-xs">{t('settings.advanced.captureMode')}</Label>
                 {/* reverse 模式是核心场景（客户端 base_url 指向本机端口），
                     锁定 reverse 隐藏选择器，避免误切到 explicit/local（需证书+管理员）
-                    未来需要这些模式时再恢复选择器 */}
+                    若未来启用这些模式，再恢复选择器 */}
                 <div className="mt-1 flex h-8 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground">
                   {t('settings.advanced.captureModeHint')}
                 </div>
@@ -1594,7 +1593,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <Input className="mt-1 h-8 w-44 text-xs" value={auditModel} onChange={(e) => setAuditModel(e.target.value)} placeholder={t('settings.advanced.modelPh')} />
                 </div>
                 <div>
-                  <Label className="flex items-center gap-1 text-xs">Profile
+                  <Label className="flex items-center gap-1 text-xs">{t('settings.advanced.profile')}
                     <TooltipProvider delayDuration={200}>
                       <Tooltip>
                         <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
@@ -1605,9 +1604,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <Select value={auditProfile} onValueChange={setAuditProfile}>
                     <SelectTrigger className="mt-1 h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="general">general</SelectItem>
-                      <SelectItem value="web3">web3</SelectItem>
-                      <SelectItem value="full">full</SelectItem>
+                      <SelectItem value="general">{t('settings.advanced.profile.general')}</SelectItem>
+                      <SelectItem value="web3">{t('settings.advanced.profile.web3')}</SelectItem>
+                      <SelectItem value="full">{t('settings.advanced.profile.full')}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -1798,13 +1797,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <Switch checked={!!cfg?.egress_proxy?.enabled} onCheckedChange={(v) => save({ egress_proxy: { ...(cfg?.egress_proxy ?? { enabled: false, url: '' }), enabled: v } })} />
                 {t('settings.advanced.egressHint')}
               </label>
-              {/* 非受控 + key：受控写法必须每次击键 setState，否则 React 回滚输入（曾导致地址完全打不进去）。
+              {/* 非受控 + key：避免每次击键触发保存，且在外部配置刷新后同步初值。
                   key 绑定已保存值 → 保存成功/外部刷新后重新挂载同步，中途击键不打断输入也不触发存盘。 */}
               <Input
                 key={cfg?.egress_proxy?.url ?? ''}
                 className="h-8 max-w-md font-mono text-xs"
                 defaultValue={cfg?.egress_proxy?.url ?? ''}
-                placeholder="http://127.0.0.1:7890"
+                placeholder={t('settings.advanced.egressPh')}
                 onBlur={(e) => {
                   const v = e.target.value
                   const cur = cfg?.egress_proxy ?? { enabled: false, url: '' }
@@ -1831,8 +1830,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     </Tooltip>
                   </TooltipProvider>
                 </Label>
-                {/* onBlur 存盘：onChange 每击键存一次会把中间值写进配置——输 900 的过程中
-                    TTL 会先被存成 9 秒，用户此时切走就停在 9 秒，token 映射秒过期、还原全失败。 */}
+                {/* onBlur 存盘：避免把输入过程中的中间值写进配置。 */}
                 <Input type="number" className="mt-1 h-8 text-xs"
                   key={cfg?.session_ttl ?? 600}
                   defaultValue={cfg?.session_ttl ?? 600}
@@ -1903,7 +1901,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 </div>
                 <div className="min-w-[160px] flex-1">
                   <Label className="text-xs">{t('settings.tools.apiKey')}</Label>
-                  <Input className="mt-1 h-8 font-mono text-xs" type="password" value={demoApiKey} onChange={(e) => setDemoApiKey(e.target.value)} placeholder="sk-..." />
+                  <Input className="mt-1 h-8 font-mono text-xs" type="password" value={demoApiKey} onChange={(e) => setDemoApiKey(e.target.value)} placeholder={t('settings.tools.apiKeyPh')} />
                 </div>
                 <div className="min-w-[150px]">
                   <Label className="text-xs">{t('logs.colModel')}</Label>
@@ -2016,9 +2014,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
         {!embeddedTab && (
         <TabsContent value="security" className="space-y-4">
-          {/* 配置备份与回滚（配置被覆盖时一键恢复，曾 9 客户端+47 词丢失） */}
+          {/* 配置备份与回滚 */}
           <ConfigBackupCard />
-          {/* 证书安装：reverse 模式不需要证书，隐藏避免误操作（审计第三批 P2：装根 CA 无二次确认）
+          {/* 证书安装：reverse 模式不需要证书，隐藏避免误操作。
               explicit/local 模式需要证书，未来如果启用这些模式再恢复此卡片 */}
           <Card className="border bg-card">
             <CardHeader>

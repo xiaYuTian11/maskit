@@ -21,18 +21,30 @@ function App() {
   useEffect(() => {
     if (!isTauri()) {
       // 浏览器模式：无壳层，引擎由外部 python panel.py 提供（vite dev 或 Docker）。
-      // token 来源优先级：URL ?token=（引擎启动日志给出的链接）→ 本 tab sessionStorage
-      // → 构建期 VITE_SHIELD_TOKEN（仅开发）。都没有则渲染 TokenGate 让用户粘贴。
+      // token 来源优先级：URL ?token=（兼容旧链接）→ URL #token=（不随 HTTP 请求发送）
+      // → 本 tab sessionStorage → 构建期 VITE_SHIELD_TOKEN（仅开发）。都没有则渲染 TokenGate。
       setEngineReady(true)
       const url = new URL(window.location.href)
       const fromUrl = (url.searchParams.get('token') || '').trim()
-      if (fromUrl) {
-        saveBrowserToken(fromUrl)
-        // 立刻从地址栏抹掉，避免 token 留在历史记录 / 被截图
+      const fragmentParams = new URLSearchParams(url.hash.startsWith('#') ? url.hash.slice(1) : '')
+      const fromFragment = (fragmentParams.get('token') || '').trim()
+      const fromLink = fromUrl || fromFragment
+      if (fromLink) {
+        saveBrowserToken(fromLink)
+        // 立刻从地址栏抹掉，避免 token 留在历史记录 / 被截图；fragment 方式
+        // 本来不会发给服务器，但仍不应长期留在浏览器历史中。
         url.searchParams.delete('token')
+        if (fromFragment) {
+          fragmentParams.delete('token')
+          const rest = fragmentParams.toString()
+          url.hash = rest ? `#${rest}` : ''
+        }
         window.history.replaceState(null, '', url.pathname + url.search + url.hash)
       }
-      const t = fromUrl || readBrowserToken() || import.meta.env.VITE_SHIELD_TOKEN || ''
+      // 仅开发构建允许用 VITE_SHIELD_TOKEN 便于本地联调；生产 bundle 不应
+      // 包含任何可能的面板令牌，即使构建机误配置了同名环境变量。
+      const devToken = import.meta.env.DEV ? (import.meta.env.VITE_SHIELD_TOKEN || '') : ''
+      const t = fromLink || readBrowserToken() || devToken
       if (t) setToken(t)
       return
     }

@@ -19,6 +19,18 @@ model_prices_cache.json
 diagnostics-*.json
 engine/config.json
 _smoke_data/
+ai-coding/
+frontend/.playwright-cli/
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.tmp
+*.temp
+.turbo/
 .claude/
 .pi/
 .pi-subagents/
@@ -34,3 +46,4 @@ tests/
 scripts/
 frontend/node_modules
 frontend/dist
+frontend/.vite

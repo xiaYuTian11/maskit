@@ -18,12 +18,71 @@ audit_response 钩子自动检测。本模块负责：
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
 import json
+import re
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit, unquote
 
 import audit_signals as sig
 from event_store import fetch_audit_events, append_audit_event
+
+
+_REPORT_CREDENTIAL_PATTERNS = (
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), r"\1 <redacted>"),
+    (re.compile(r"(?i)\b(?:sk|ah|gsk|xai|pk|rk|ghp|glpat)[-_][A-Za-z0-9._\-]{8,}"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35,}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])AKID[A-Za-z0-9]{13,32}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{50,}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])"), "<key>"),
+    (re.compile(r"(?i)\b(?:api[_-]?key|token|secret|password|passwd|pwd|access[_-]?key|private[_-]?key)([\"']?\s*[:=]\s*[\"']?)([^\s\"',;&]{4,})"), r"\1<redacted>"),
+    (re.compile(r"-----BEGIN[A-Z \-]*PRIVATE KEY-----[\s\S]*?-----END[A-Z \-]*PRIVATE KEY-----"), "<private-key>"),
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s:@/]+:)([^\s@/]{4,})(@)"), r"\1<redacted>\3"),
+)
+_REPORT_PII_PATTERNS = (
+    (re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"), "<phone>"),
+    (re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), "<email>"),
+)
+
+
+def _safe_report_text(value, limit=0):
+    """清洗报告中来自上游/异常的自由文本，防止报告成为第二个泄漏出口。"""
+    try:
+        out = str(value or "")
+        for pattern, replacement in _REPORT_CREDENTIAL_PATTERNS + _REPORT_PII_PATTERNS:
+            out = pattern.sub(replacement, out)
+        if limit and len(out) > limit:
+            out = out[:limit]
+        return out
+    except Exception:
+        return "<redacted>"
+
+
+def _safe_report_target(value):
+    """报告只保留 scheme/host/path，移除 URL userinfo、query 和 fragment。"""
+    try:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        parsed = urlsplit(raw)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+        if scheme not in {"http", "https"} or not host:
+            return _safe_report_text(raw, 300)
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+            port = parsed.port
+        except (UnicodeError, ValueError):
+            return "<redacted-target>"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if port:
+            host = f"{host}:{port}"
+        path = unquote(parsed.path or "")
+        return _safe_report_text(f"{scheme}://{host}{path}", 500)
+    except Exception:
+        return "<redacted-target>"
 
 # 探针 ID 前缀，便于按 probe_id 查
 PROBE_ID_PREFIX = "probe_"
@@ -104,8 +163,8 @@ def aggregate_matrix(step_findings, steps_expected=None):
 
     step_findings: {step_name: [finding, ...]} 各步检测结果。
         注意：key 存在但为空列表 = 该步已覆盖且无异常；key 缺失 = 该步零回执
-        （上游不可达/超时/未触发），必须与「无异常」区分——曾把「探测全部
-        失败」与「全部正常」同判 MEDIUM，报告完全无法区分（审计 P0-3）。
+        （上游不可达/超时/未触发），必须与「无异常」区分——避免把「探测全部
+        失败」与「全部正常」同判为同档风险，导致报告无法区分真实状态。
     steps_expected: 本次扫描计划中的 step 集合（panel 传实际 plan 的步骤，
         web3 未跑时不能算不完整）；缺省用 _ALL_STEPS。
     返回 {d1,d1i,..., severity, coverage, incomplete, summary}。
@@ -182,8 +241,7 @@ def aggregate_matrix(step_findings, steps_expected=None):
         severity = sig.CRITICAL
     elif incomplete:
         # 探针覆盖不完整：上游不可达/超时/未触发时各维 d*i 会整体置位，
-        # 与「全部正常」同判 MEDIUM——必须显式标 INCONCLUSIVE，
-        # 报告横幅警示，不能把「没测到」包装成「有/无风险」。（审计 P0-3）
+        # 必须显式标 INCONCLUSIVE，报告横幅警示，不能把「没测到」包装成「有/无风险」。
         severity = "INCONCLUSIVE"
     elif d3 or d4 or d5 or d6:
         severity = sig.HIGH
@@ -200,8 +258,7 @@ def aggregate_matrix(step_findings, steps_expected=None):
         # 命令观察不能抬高安全报告（2026-08-18）。
         severity = sig.MEDIUM
     elif d1i or d3i or d4i or d5i or d6i:
-        # 全部步骤已覆盖且零异常 → 健康。曾与「探测全失败」同档 MEDIUM，
-        # 引入 coverage 后按真实语义归 LOW。（审计 P0-3）
+        # 全部步骤已覆盖且零异常 → 健康。引入 coverage 后按真实语义归 LOW。
         severity = sig.LOW
     else:
         severity = sig.LOW
@@ -230,8 +287,8 @@ def render_markdown_report(target, model, matrix, step_findings, generated_at=No
     lines.append("# 数据面具 Maskit — API 中转链路安全审计报告")
     lines.append("")
     lines.append(f"**Generated**: {ts}")
-    lines.append(f"**Target**: `{target}`")
-    lines.append(f"**Model**: `{model}`")
+    lines.append(f"**Target**: `{_safe_report_target(target)}`")
+    lines.append(f"**Model**: `{_safe_report_text(model, 160)}`")
     lines.append("")
     lines.append("## Risk Summary")
     lines.append("")
@@ -270,7 +327,10 @@ def render_markdown_report(target, model, matrix, step_findings, generated_at=No
             lines.append("| Severity | Signal | Evidence |")
             lines.append("|---|---|---|")
             for f in findings:
-                lines.append(f"| {f.get('severity', '')} | {f.get('signal', '')} | {str(f.get('evidence', '')).replace('|', '\\|')[:120]} |")
+                severity = _safe_report_text(f.get("severity", ""), 32)
+                signal_name = _safe_report_text(f.get("signal", ""), 80)
+                evidence = _safe_report_text(f.get("evidence", ""), 120).replace("|", "\\|").replace("\n", " ")
+                lines.append(f"| {severity} | {signal_name} | {evidence} |")
         lines.append("")
     lines.append("---")
     lines.append("*由 数据面具 Maskit 审计引擎生成*")
@@ -281,7 +341,8 @@ def save_report(content, data_root, generated_at=None):
     """保存报告到 data_root/audit-YYYYMMDD-HHMMSS.md。返回路径。"""
     ts = generated_at or time.strftime("%Y%m%d-%H%M%S")
     p = Path(data_root) / f"audit-{ts}.md"
-    p.write_text(content, encoding="utf-8")
+    # 再过一遍报告正文，防止未来新增渲染分支忘记调用清洗函数。
+    p.write_text(_safe_report_text(content), encoding="utf-8")
     return str(p)
 
 
@@ -341,8 +402,7 @@ def build_probe_plan(upstream_name, model, profile="general"):
 
     # Step 9: error triggers（7 个）
     # request_body 原样保留（gen_error_triggers 返回 str 或畸形字符串），
-    # 不做 json.loads：曾把畸形 JSON 字符串再序列化成合法 JSON 字符串字面量，
-    # malformed_json 探针因此永远发的是合法请求，探测无效（审计 P0-4）。
+    # 不做 json.loads：避免把畸形 JSON 字符串再序列化成合法 JSON 字符串字面量导致探测无效。
     # panel 发送分支按类型处理：dict→json.dumps；str→原样 encode 发送。
     for trig_id, body, hdrs in gen_error_triggers():
         plan.append({
@@ -393,7 +453,7 @@ def collect_findings_by_probe(probe_ids):
             out[pid].append({
                 "signal": ev.get("signal_type"),
                 "severity": ev.get("severity"),
-                "evidence": ev.get("evidence"),
+                "evidence": _safe_report_text(ev.get("evidence"), 500),
                 "kind": "",
             })
     return out
@@ -405,7 +465,7 @@ def aggregate_step_findings(plan, findings_by_probe, sent_probe_ids=None):
     sent_probe_ids: panel 实际发送成功（或收到 HTTPError）的 probe_id 集合。
         发送失败（上游不可达/超时）的探针不建 key——aggregate_matrix 据此判定
         覆盖不完整（INCONCLUSIVE），否则「探测全失败」与「全部正常」在数据层
-        （audit_events 仅命中才落库）无法区分（审计 P0-3）。
+        （audit_events 仅命中才落库）无法区分。
         为 None 时向后兼容：所有 plan step 都建 key。
     """
     by_step = {}

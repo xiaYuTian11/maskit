@@ -216,7 +216,7 @@ _RULE_MARKERS = {
     # 它整条是小写键名，不含 AK/LTAI/AKID 任何一个，不加就会被预检直接跳过。
     "ACCESS_KEY": ("AK", "LTAI", "AKID", "aws", "AWS"),
     "JWT": ("eyJ",),             # JWT 头固定
-    "TOKEN": ("Bearer", "bearer"),  # (?i)Bearer\s+ 值
+    "TOKEN": ("Bearer", "bearer"),  # (?i)\bBearer\s+ 值
     # 规则要求 \s*[:=：＝]\s*。全角冒号/等号必须一并列出：预检命不中就整条规则跳过，
     # 中文用户写的「令牌：xxx」会连正则都跑不到（与 CGNAT 那次同一个坑）。
     "SECRET": ("=", ":", "：", "＝"),

@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '1.0.0'
+__version__ = '0.2.0'
 import json
 import copy
 import hashlib
@@ -30,7 +30,7 @@ import threading
 import webbrowser
 from pathlib import Path
 from collections import deque
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, unquote
 from flask import Flask, request, jsonify, make_response, send_file
 from shield_defaults import (
     DEFAULT_DOMAINS,
@@ -190,6 +190,9 @@ PANEL_HOST = os.environ.get("MASKIT_PANEL_HOST", "127.0.0.1").strip() or "127.0.
 # 远程模式 = 监听地址不是回环：Host 校验放开、Origin 改为同源校验，
 # X-Shield-Token 仍是唯一主防线（面板可改上游/注入头，绝不可免 token）。
 REMOTE_MODE = PANEL_HOST not in {"127.0.0.1", "localhost", "::1"}
+# 反代 HTTPS 终止时显式信任单跳 X-Forwarded-*。默认关闭，避免直接暴露面板时
+# 客户端伪造转发头绕过 Origin 同源校验；启用者必须确保前置代理覆盖而非追加这些头。
+TRUST_PROXY_ENV = "MASKIT_TRUST_PROXY"
 # 反代/兜底端口监听地址：与面板一样，Docker 用 MASKIT_LISTEN_HOST=0.0.0.0 对外
 LISTEN_HOST = os.environ.get("MASKIT_LISTEN_HOST", "127.0.0.1").strip() or "127.0.0.1"
 # API token 每次启动随机；远程模式下用户无法读容器内 proxy_token 文件，
@@ -212,6 +215,24 @@ MAX_PREFIX_LEN = 32
 MIN_TTL = 10
 MAX_TTL = 86400
 
+
+def _safe_public_text(value, limit=0):
+    """返回可展示的错误/诊断文本，避免把凭据、PII 或本机路径带出接口。
+
+    `_scrub_text` 在本文件后部定义，但请求只会在模块初始化完成后进入 Flask；
+    通过运行时查找既避免重复维护脱敏规则，也让早期启动异常有保守兜底。
+    """
+    try:
+        scrub = globals().get("_scrub_text")
+        if callable(scrub):
+            return scrub(value, limit)
+        text = str(value)
+        if limit and len(text) > limit:
+            text = text[-limit:]
+        return text
+    except Exception:
+        return "<redacted>"
+
 app = Flask(__name__, static_folder=None)
 
 
@@ -222,12 +243,16 @@ def _api_error_handler(e):
     try:
         from werkzeug.exceptions import HTTPException
         if isinstance(e, HTTPException):
-            return jsonify({"ok": False, "error": str(e.description) or e.name}), e.code
+            return jsonify({
+                "ok": False,
+                "error": _safe_public_text(e.description or e.name, 300),
+            }), e.code
     except Exception:
         pass
     if request.path.startswith("/api/"):
-        _emit_log(f"[panel] API 异常: {e}")
-        return jsonify({"ok": False, "error": str(e)[:300]}), 500
+        safe_error = _safe_public_text(e, 300)
+        _emit_log(f"[panel] API 异常: {safe_error}")
+        return jsonify({"ok": False, "error": safe_error}), 500
     return e
 
 
@@ -239,6 +264,69 @@ def _host_ok():
     return host in {"127.0.0.1", "localhost"}
 
 
+def _trust_proxy_enabled():
+    """是否由部署者明确授权读取单跳 X-Forwarded-* 头。"""
+    return os.environ.get(TRUST_PROXY_ENV, "").strip() == "1"
+
+
+def _forwarded_single_value(name):
+    """读取一个严格的单跳转发头；缺失、空值或多值一律返回 None。"""
+    raw = request.headers.get(name, "").strip()
+    if not raw or "," in raw:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch.isspace() for ch in raw):
+        return None
+    return raw
+
+
+def _valid_forwarded_host(value):
+    """验证 X-Forwarded-Host 只包含一个 host[:port]，不含 userinfo/path。"""
+    if not value:
+        return False
+    try:
+        parsed = urlsplit("//" + value)
+        if parsed.username or parsed.password or parsed.path not in ("", "/"):
+            return False
+        if parsed.query or parsed.fragment or not parsed.hostname:
+            return False
+        parsed.port  # 触发非法端口 ValueError
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _effective_request_origin():
+    """返回当前请求对外可见的 scheme/host（默认使用 Flask 原值）。"""
+    scheme = (request.scheme or "http").lower()
+    host = request.host
+    if not _trust_proxy_enabled():
+        return scheme, host
+    forwarded_proto = _forwarded_single_value("X-Forwarded-Proto")
+    forwarded_host = _forwarded_single_value("X-Forwarded-Host")
+    if forwarded_proto and forwarded_proto.lower() in {"http", "https"}:
+        scheme = forwarded_proto.lower()
+    if forwarded_host and _valid_forwarded_host(forwarded_host):
+        host = forwarded_host
+    return scheme, host
+
+
+def _normalize_origin(value):
+    """规范化 Origin，拒绝路径/query/userinfo，并折叠默认端口。"""
+    try:
+        parsed = urlsplit(str(value or "").strip())
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or parsed.username or parsed.password:
+            return None
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment or not parsed.hostname:
+            return None
+        port = parsed.port
+        if port is None:
+            port = 80 if scheme == "http" else 443
+        return scheme, parsed.hostname.lower(), port
+    except (TypeError, ValueError):
+        return None
+
+
 def _origin_ok():
     origin = request.headers.get("Origin")
     if not origin:
@@ -246,7 +334,8 @@ def _origin_ok():
     # 远程模式：SPA 与 API 同源托管，Origin 必须等于本次请求的 scheme://host，
     # 拒绝任何外站页面借用户浏览器发起的跨源调用（token 在内存里，但 CSRF 面仍要关死）。
     if REMOTE_MODE:
-        return origin.lower() == f"{request.scheme}://{request.host}".lower()
+        scheme, host = _effective_request_origin()
+        return _normalize_origin(origin) == _normalize_origin(f"{scheme}://{host}")
     # 放行面：本地面板同源 + Tauri 壳页面（tauri://localhost / http://tauri.localhost）。
     # Tauri 壳的 fetch 经 Rust reqwest 代发（tauri-plugin-http），WebView2 会对跨域
     # 请求自动附加 Origin: tauri://localhost（Request 构造时带入，JS 无法覆盖）——
@@ -412,7 +501,7 @@ def _emit_log(line: str):
             events.append(ev)
 
 
-# tail 通道脱敏白名单（审计 P0-2）：log_buf 保留 SHIELD 行原文供本地排障
+# tail 通道脱敏白名单：log_buf 保留 SHIELD 行原文供本地排障
 # （800 行环形缓冲不外传），但 /api/logs 会把 tail 回传给前端直接 textContent
 # 展示——original/dialog/req_preview 等明文不能经此通道泄漏（与「明文只进详情
 # 弹窗」约束一致）。白名单外字段一律剔除；非 SHIELD 行（mitmdump 连接日志、
@@ -464,7 +553,7 @@ def prune_event_log(now=None, retention_days=None):
             pass
         return result
     except Exception as e:
-        return {"ok": False, "error": str(e), "removed": 0}
+        return {"ok": False, "error": _safe_public_text(e, 240), "removed": 0}
 
 
 def preload_events(limit=800):
@@ -473,7 +562,7 @@ def preload_events(limit=800):
         result = import_legacy_jsonl_once()
         return {"ok": bool(result.get("ok")), "loaded": int(result.get("imported", 0) or 0)}
     except Exception as e:
-        return {"ok": False, "error": str(e), "loaded": 0}
+        return {"ok": False, "error": _safe_public_text(e, 240), "loaded": 0}
 
 
 def clear_logs():
@@ -483,7 +572,7 @@ def clear_logs():
     try:
         return clear_events()
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": _safe_public_text(e, 240)}
 
 
 # ========== 命令行客户端环境变量 + Windows 当前用户系统代理 ==========
@@ -739,7 +828,9 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
     proxy_parsed = urlparse(proxy_url) if proxy_url else None
     proxy_host = proxy_parsed.hostname if proxy_parsed else None
     proxy_port = proxy_parsed.port or (443 if proxy_parsed.scheme == "https" else 80) if proxy_parsed else None
-    up_val = str(upstream_name or "").strip() or target
+    # 事件库里的 upstream 会出现在日志/诊断导出；不要把配置 URL 的 userinfo/query
+    # 当作展示值写进去（实际连接仍使用上面的 parsed target）。
+    up_val = _safe_upstream_display(upstream_name) or _safe_target(target)
 
     class PT(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -907,14 +998,14 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
                         "path": self.path.split("?")[0], "status": 502, "http_status": 502,
                         "upstream": up_val, "model": req_model or None,
                         "client": client_str, "client_host": client_host, "client_port": client_port,
-                        "msg": f"passthrough: {type(e).__name__}: {str(e)[:120]}",
+                        "msg": f"passthrough: {type(e).__name__}: {_safe_public_text(e, 120)}",
                         "upstream_ms": round((time.perf_counter() - _fwd_t0) * 1000, 1),
                         "passthrough": True,
                     })
                 except Exception:
                     pass
                 try:
-                    self.send_error(502, f"透传转发失败: {e}")
+                    self.send_error(502, "透传转发失败，请查看面板日志")
                 except Exception:
                     pass
             finally:
@@ -1033,10 +1124,10 @@ def _make_error_handler(upstream_name=None):
                 try:
                     enqueue_event({
                         "ts": now, "type": "BLOCK",
-                        "host": self.headers.get("Host", "") or "",
+                        "host": _safe_public_text(self.headers.get("Host", "") or "", 255),
                         "method": self.command, "path": self.path.split("?")[0],
                         "status": 503, "http_status": 503, "reason": "shield_unavailable",
-                        "upstream": upstream_name or "",
+                         "upstream": _safe_upstream_display(upstream_name),
                         "model": req_model or None,
                         "client": client_str,
                         "client_host": client_host,
@@ -1217,6 +1308,98 @@ def _port_listen(port):
 _netstat_cache = {"ts": 0.0, "data": {}}
 
 
+def _posix_listening_port_pids(wanted):
+    """读取 POSIX 监听 socket，并尽量映射到进程 PID。
+
+    Docker 基础镜像通常没有 `netstat`/`ss`/`lsof`，仅用 TCP connect 探测虽然
+    能知道端口存活，却无法清理崩溃残留。Linux 优先读 procfs（无额外依赖），
+    macOS/无 procfs 环境再回退到 lsof/ss；映射失败时保留空 PID 集合，调用方
+    仍可使用端口存在性，而不会误杀 PID 1 或其他进程。
+    """
+    wanted = {int(p) for p in wanted if int(p) > 0}
+    found = {}
+    socket_inodes = {}
+    proc_net = Path("/proc/net")
+    if proc_net.is_dir():
+        for name in ("tcp", "tcp6"):
+            path = proc_net / name
+            try:
+                rows = path.read_text(encoding="ascii", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for row in rows[1:]:
+                parts = row.split()
+                # local_address, state, inode are fields 1, 3, 9 in procfs.
+                if len(parts) < 10 or parts[3].upper() != "0A":
+                    continue
+                try:
+                    port = int(parts[1].rsplit(":", 1)[1], 16)
+                    inode = parts[9]
+                except (ValueError, IndexError):
+                    continue
+                if port in wanted and inode:
+                    socket_inodes.setdefault(port, set()).add(inode)
+        for port in socket_inodes:
+            found[port] = set()
+        if socket_inodes:
+            proc_root = Path("/proc")
+            try:
+                proc_dirs = list(proc_root.iterdir())
+            except Exception:
+                proc_dirs = []
+            inode_to_port = {
+                inode: port for port, inodes in socket_inodes.items() for inode in inodes
+            }
+            for proc_dir in proc_dirs:
+                if not proc_dir.name.isdigit():
+                    continue
+                try:
+                    fds = (proc_dir / "fd").iterdir()
+                    for fd in fds:
+                        try:
+                            link = os.readlink(fd)
+                        except (FileNotFoundError, PermissionError, OSError):
+                            continue
+                        if not link.startswith("socket:[") or not link.endswith("]"):
+                            continue
+                        port = inode_to_port.get(link[8:-1])
+                        if port is not None:
+                            found.setdefault(port, set()).add(int(proc_dir.name))
+                except (FileNotFoundError, PermissionError, NotADirectoryError, OSError):
+                    continue
+            return found
+
+    # macOS and stripped-down containers: use available userland tools, always argv-list
+    # invocation (no shell) so port values cannot become command syntax.
+    for command in ("lsof", "ss"):
+        for port in wanted:
+            try:
+                if command == "lsof":
+                    _rc, out = _run_console(
+                        ["lsof", "-nP", "-a", "-iTCP:" + str(port), "-sTCP:LISTEN", "-t"],
+                        timeout=min(_CMD_TIMEOUT, 5),
+                    )
+                    pids = {int(x) for x in (out or "").split() if x.isdigit()}
+                else:
+                    _rc, out = _run_console(["ss", "-ltnpH"], timeout=min(_CMD_TIMEOUT, 5))
+                    pids = set()
+                    for line in (out or "").splitlines():
+                        if not re.search(rf":{port}(?:\s|$)", line):
+                            continue
+                        pids.update(int(x) for x in re.findall(r"pid=(\d+)", line))
+                # lsof exits 1/no output when the port is not listening; do not
+                # turn that into a false-positive empty PID set.
+                if pids:
+                    found[port] = pids
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+        if command == "lsof" and found and len(found) == len(wanted):
+            break
+        if command == "ss" and found:
+            break
+    return found
+
+
 def _harden_data_dir_acl():
     """收紧数据目录 ACL：仅当前用户 + SYSTEM + Administrators 可访问。"""
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
@@ -1256,7 +1439,7 @@ def _harden_data_dir_acl():
             _run_console(["icacls", str(DATA_ROOT), "/remove:g", sid], timeout=30)
         _emit_log(f"[panel] 数据目录 ACL 已收紧（仅 {principal} + SYSTEM + Administrators）")
     except Exception as e:
-        _emit_log(f"[panel] 数据目录 ACL 收紧异常: {e}")
+        _emit_log(f"[panel] 数据目录 ACL 收紧异常: {_safe_public_text(e, 240)}")
 
 
 def _listening_port_pids(ports, fresh=False):
@@ -1282,32 +1465,36 @@ def _listening_port_pids(ports, fresh=False):
     if not fresh and now - _netstat_cache["ts"] < 3.0 and _netstat_cache["data"]:
         cached = _netstat_cache["data"]
         return {port: pids for port, pids in cached.items() if port in wanted}
-    try:
-        _rc, out = _run_console(["netstat", "-ano", "-p", "tcp"], timeout=min(_CMD_TIMEOUT, 5))
-    except Exception:
-        out = ""
     found = {}
-    if out:
-        for line in out.splitlines():
-            if "LISTENING" not in line.upper() and "LISTEN" not in line.upper():
-                continue
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            try:
-                port = int(parts[1].rsplit(":", 1)[-1])
-                pid = int(parts[-1])
-            except Exception:
-                continue
-            found.setdefault(port, set()).add(pid)
-    # 非 win32 平台下（如 Linux/Docker）若 netstat 未查出，走 socket 连接探测补齐
-    if sys.platform != "win32" and not found:
-        for p in wanted:
+    if sys.platform != "win32":
+        found = _posix_listening_port_pids(wanted)
+    else:
+        try:
+            _rc, out = _run_console(["netstat", "-ano", "-p", "tcp"], timeout=min(_CMD_TIMEOUT, 5))
+        except Exception:
+            out = ""
+        if out:
+            for line in out.splitlines():
+                if "LISTENING" not in line.upper() and "LISTEN" not in line.upper():
+                    continue
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                try:
+                    port = int(parts[1].rsplit(":", 1)[-1])
+                    pid = int(parts[-1])
+                except Exception:
+                    continue
+                if port in wanted:
+                    found.setdefault(port, set()).add(pid)
+    # POSIX 工具不可用时，连接探测只补充端口存在性，不伪造 PID（PID 1 可能被误杀）。
+    if sys.platform != "win32":
+        for p in wanted - set(found):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(0.05)
                     if s.connect_ex(("127.0.0.1", p)) == 0:
-                        found[p] = {1}
+                        found[p] = set()
             except Exception:
                 pass
     _netstat_cache["ts"] = now
@@ -1344,6 +1531,28 @@ def _process_exists(pid):
         return False
     if pid <= 0:
         return False
+    if sys.platform != "win32":
+        # POSIX 没有 tasklist/Win32 API；kill(pid, 0) 只探测存在性，不发送信号。
+        # 权限不足同样说明进程存在。Linux zombie 已不再提供可用代理进程，视为不存在。
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        try:
+            stat = (Path("/proc") / str(pid) / "stat").read_text(
+                encoding="ascii", errors="ignore"
+            )
+            # comm 字段可含空格/括号，状态字段在最后一个 ')' 后的第一个字符。
+            state_field = stat.rsplit(")", 1)[-1].strip()
+            if state_field.startswith("Z"):
+                return False
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+        return True
     # 校验可执行名，防 PID 复用误判（PID 已回收给别的进程时旧 PID 会被误认为"还在运行"）
     try:
         _rc, out = _run_console(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
@@ -1366,10 +1575,36 @@ def _taskkill_pid(pid):
         pid = int(pid)
     except Exception:
         return False, "invalid pid"
+    if pid <= 0 or pid == os.getpid():
+        return False, "refusing to kill current/invalid pid"
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False, "process not found"
+        except PermissionError:
+            return False, "permission denied"
+        except OSError as e:
+            return False, f"terminate failed: {_safe_public_text(e, 160)}"
+        # 给 mitmdump 一个短暂的优雅退出窗口；卡死时升级 SIGKILL，避免端口长期占用。
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not _process_exists(pid):
+                return True, "terminated"
+            time.sleep(0.05)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True, "terminated"
+        except PermissionError:
+            return False, "permission denied"
+        except OSError as e:
+            return False, f"kill failed: {_safe_public_text(e, 160)}"
+        return (not _process_exists(pid)), "killed"
     try:
         _rc, out = _run_console(["taskkill", "/PID", str(pid), "/T", "/F"])
     except Exception as e:
-        return False, f"taskkill 超时或失败: {e}"[-300:]
+        return False, f"taskkill 超时或失败: {_safe_public_text(e, 260)}"[-300:]
     return _rc == 0, out.strip()[-300:]
 
 
@@ -1378,6 +1613,39 @@ def _read_pid_file():
         return int(PID_FILE.read_text(encoding="utf-8").strip())
     except Exception:
         return None
+
+
+def _read_process_cmdline(pid):
+    """读取进程命令行，供跨平台身份校验使用；失败返回空串。"""
+    try:
+        pid = int(pid)
+    except Exception:
+        return ""
+    if pid <= 0:
+        return ""
+    if sys.platform == "win32":
+        try:
+            _rc, out = _run_console(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+                timeout=min(_CMD_TIMEOUT, 8),
+            )
+            return out or ""
+        except Exception:
+            return ""
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    try:
+        raw = proc_cmdline.read_bytes()
+        if raw:
+            return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    # macOS 没有 procfs；ps 是系统自带且使用 argv 列表，不经过 shell。
+    try:
+        _rc, out = _run_console(["ps", "-p", str(pid), "-o", "command="], timeout=min(_CMD_TIMEOUT, 5))
+        return out or ""
+    except Exception:
+        return ""
 
 
 def _value_points_to_shield(value):
@@ -1575,7 +1843,7 @@ def recover_network():
         PID_FILE.unlink(missing_ok=True)
         steps.append({"name": "remove_pid_file", "ok": True, "detail": "ok"})
     except Exception as e:
-        steps.append({"name": "remove_pid_file", "ok": False, "detail": str(e)})
+        steps.append({"name": "remove_pid_file", "ok": False, "detail": _safe_public_text(e, 240)})
 
     system_proxy_shield, server = _system_proxy_points_to_shield()
     if ENV_BACKUP_PATH.exists():
@@ -1588,7 +1856,7 @@ def recover_network():
             _broadcast_proxy_change()
             steps.append({"name": "disable_shield_system_proxy", "ok": True, "detail": server})
         except Exception as e:
-            steps.append({"name": "disable_shield_system_proxy", "ok": False, "detail": str(e)})
+            steps.append({"name": "disable_shield_system_proxy", "ok": False, "detail": _safe_public_text(e, 240)})
     else:
         steps.append({"name": "system_proxy", "ok": True, "detail": "not pointing to Shield"})
 
@@ -1598,7 +1866,7 @@ def recover_network():
             _write_user_env(name, None)
             steps.append({"name": f"clear_user_env:{name}", "ok": True, "detail": "removed"})
         except Exception as e:
-            steps.append({"name": f"clear_user_env:{name}", "ok": False, "detail": str(e)})
+            steps.append({"name": f"clear_user_env:{name}", "ok": False, "detail": _safe_public_text(e, 240)})
     if env_hits:
         _broadcast_env_change()
     else:
@@ -1678,6 +1946,60 @@ def _child_env_for_mitmdump():
               "_PYI_PARENT_PROCESS_LEVEL", "PYTHONHOME"):
         env.pop(k, None)
     return env
+
+
+def _spawn_mitmdump_sidecar(args):
+    """启动一次短命 mitmdump sidecar（例如生成 CA），返回 Popen。
+
+    必须复用 `_mitmdump_argv0()`：源码态使用 PATH 中的 mitmdump，打包态则
+    让当前引擎 exe 进入 `--mitmdump` 分支；直接写裸命令会使干净安装包失效。
+    """
+    argv = _mitmdump_argv0() + list(args)
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": _child_env_for_mitmdump(),
+    }
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(argv, **kwargs)
+
+
+def _stop_sidecar_process(sidecar):
+    """有界停止证书生成 sidecar，不影响面板正在跟踪的代理进程。"""
+    if sidecar is None:
+        return
+    try:
+        if sidecar.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        if sys.platform != "win32":
+            pid = int(sidecar.pid)
+            pgid = os.getpgid(pid)
+            if pgid == pid and pgid != os.getpgrp():
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                sidecar.terminate()
+        else:
+            _taskkill_pid(sidecar.pid)
+    except Exception:
+        try:
+            sidecar.terminate()
+        except Exception:
+            pass
+    try:
+        sidecar.wait(timeout=3)
+    except Exception:
+        try:
+            sidecar.kill()
+        except Exception:
+            pass
 
 
 def _reader(stream):
@@ -1791,6 +2113,9 @@ def _start_proxy_locked():
             flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             if flags:
                 extra_kwargs["creationflags"] = flags
+        else:
+            # POSIX sidecar 建立独立 session，停止时可连同其可能拉起的子进程一起回收。
+            extra_kwargs["start_new_session"] = True
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              bufsize=1,
                              env=child_env,
@@ -1857,9 +2182,9 @@ def _start_proxy_locked():
     if capture_mode == "local":
         _emit_log(f"[panel] 启动本机透明捕获 pid={p.pid} mode=local")
     elif capture_mode == "reverse":
-        _emit_log(f"[panel] 启动反向代理 pid={p.pid} listen=127.0.0.1:{PROXY_PORT} upstreams={len(cfg.get('upstreams') or [])}")
+        _emit_log(f"[panel] 启动反向代理 pid={p.pid} listen={LISTEN_HOST} upstreams={len(cfg.get('upstreams') or [])}")
     else:
-        _emit_log(f"[panel] 启动显式代理 pid={p.pid} listen=127.0.0.1:{PROXY_PORT} upstream={up or 'direct'}")
+        _emit_log(f"[panel] 启动显式代理 pid={p.pid} listen={LISTEN_HOST}:{PROXY_PORT} upstream={_safe_target(up) if up else 'direct'}")
     return True, None
 
 
@@ -1875,27 +2200,63 @@ def start_proxy():
 
 
 def _kill_proxy_tree(pid):
-    """Windows 上 mitmdump 会再拉 python 子进程占端口；必须 /T 杀整棵树。"""
+    """停止 mitmdump 及其子进程，Windows/POSIX 均不留下占端口的孤儿。"""
     if not pid:
         return
     try:
         pid = int(pid)
     except Exception:
         return
-    # 先 taskkill /T /F（含子进程）
-    try:
-        _taskkill_pid(pid)
-    except Exception:
-        pass
-    # 兜底：再 terminate/kill 一次
-    try:
-        p = proc.get("p")
-        if p and p.pid == pid and p.poll() is None:
-            try:
+    p = proc.get("p")
+    if sys.platform == "win32":
+        # taskkill /T /F 会递归处理 mitmdump 拉起的 python 子进程。
+        try:
+            _taskkill_pid(pid)
+        except Exception:
+            pass
+        # 兜底：再 terminate/kill 一次
+        try:
+            if p and p.pid == pid and p.poll() is None:
                 p.kill()
-            except Exception:
-                pass
-    except Exception:
+        except Exception:
+            pass
+        return
+
+    # POSIX：启动时使用 start_new_session=True，优先终止独立进程组；
+    # 不满足该条件时只杀明确跟踪的 Popen 对象/单个 PID，避免误伤宿主进程组。
+    group_killed = False
+    try:
+        pgid = os.getpgid(pid)
+        own_pgid = os.getpgrp()
+        if pgid == pid and pgid != own_pgid:
+            os.killpg(pgid, signal.SIGTERM)
+            group_killed = True
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    if not group_killed:
+        try:
+            if p and getattr(p, "pid", None) == pid and p.poll() is None:
+                p.terminate()
+            else:
+                _taskkill_pid(pid)
+        except Exception:
+            pass
+    # 给优雅退出留短窗口，随后对仍存活的已跟踪进程升级 kill。
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            alive = p is not None and getattr(p, "pid", None) == pid and p.poll() is None
+            if not alive and not _process_exists(pid):
+                break
+        except Exception:
+            break
+        time.sleep(0.05)
+    try:
+        if p and getattr(p, "pid", None) == pid and p.poll() is None:
+            p.kill()
+        elif _process_exists(pid) and group_killed:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
         pass
 
 
@@ -1907,6 +2268,9 @@ def _is_mitmdump_pid(pid):
         return False
     if pid <= 0 or pid == os.getpid():
         return False
+    if sys.platform != "win32":
+        low = _read_process_cmdline(pid).lower()
+        return any(mark in low for mark in ("mitmdump", "mitmproxy.tools", "transparent.py"))
     try:
         _rc, out = _run_console(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
     except Exception:
@@ -1964,6 +2328,11 @@ def _is_shield_panel_pid(pid):
         return False
     if pid <= 0 or pid == os.getpid():
         return False
+    if sys.platform != "win32":
+        low = _read_process_cmdline(pid).lower()
+        if "mitmdump" in low or "mitmproxy.tools" in low or "transparent.py" in low:
+            return False
+        return any(mark in low for mark in ("panel.py", "engine_entry.py", "maskit", "llmshield"))
     try:
         _rc, out = _run_console(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -2035,7 +2404,7 @@ def _stop_proxy_locked():
             if p and p.poll() is None:
                 p.wait(timeout=2)
         except Exception as e:
-            _emit_log(f"[panel] 等待进程退出超时(忽略): {e}")
+            _emit_log(f"[panel] 等待进程退出超时(忽略): {_safe_public_text(e, 240)}")
     proc["p"] = None
     state["proxy_running"] = False
     state["proxy_pid"] = None
@@ -2418,7 +2787,7 @@ def _normalize_retention(raw):
 
     别改回 `max(1, min(90, ...))`：那样 PAID_QUOTA 里声明的 `None`（不限）
     在代码里结构上就兑现不了——付费用户填 365 会被静默压成 90，
-    而界面照样显示他填的值（2026-08-17 外部审计 P0-05）。
+    而界面照样显示他填的值。
 
     上限 3650 天（10 年）是实际意义上的不限，同时挡住负数与天文数字
     传进 SQLite 的时间戳运算。非法输入回落默认 7 天，不是回落 1 天——
@@ -3084,7 +3453,7 @@ def api_set_config():
     try:
         ports_before = set(_expected_listen_ports())
     except Exception as e:
-        _emit_log(f"[panel] 读取当前监听端口失败: {e}")
+        _emit_log(f"[panel] 读取当前监听端口失败: {_safe_public_text(e, 240)}")
         ports_before = set()
     try:
         incoming = request.get_json(force=True)
@@ -3101,7 +3470,7 @@ def api_set_config():
             incoming = merged
         cfg = save_config(incoming, warnings)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
     _emit_log("[panel] 配置已保存（词表/规则/域名等热重载即时生效）")
     for w in warnings:
         _emit_log(f"[panel] 配置调整：{w}")
@@ -3118,7 +3487,7 @@ def api_set_config():
                       f"自动重启代理使新端口生效")
             restarted = bool(_restart_proxy_locked("upstream 端口变化"))
     except Exception as e:
-        _emit_log(f"[panel] 端口变化检测失败: {e}")
+        _emit_log(f"[panel] 端口变化检测失败: {_safe_public_text(e, 240)}")
     # warnings 回传前端提示，避免用户输入被静默丢弃/改写却毫无解释
     return jsonify({"ok": True, "config": cfg, "warnings": warnings,
                     "proxy_restarted": restarted})
@@ -3154,7 +3523,7 @@ def api_config_backups():
                 "domains": shape.get("domains", 0),
             })
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
     current = _config_shape(_read_config_raw()) or {}
     return jsonify({"ok": True, "backups": items, "current": current})
 
@@ -3177,7 +3546,7 @@ def api_config_restore():
     try:
         data = json.loads(src.read_text(encoding="utf-8"))
     except Exception as e:
-        return jsonify({"ok": False, "error": f"备份内容损坏: {e}"}), 400
+        return jsonify({"ok": False, "error": f"备份内容损坏: {_safe_public_text(e, 240)}"}), 400
     warnings = []
     try:
         ports_before = set(_expected_listen_ports())
@@ -3188,7 +3557,7 @@ def api_config_restore():
         # 会被护栏挡下，用户永远滚不回去。备份机制本身是这里的安全网。
         cfg = save_config(data, warnings, allow_shrink=True)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
     _emit_log(f"[panel] 已从备份回滚配置: {name}")
     restarted = False
     try:
@@ -3219,14 +3588,24 @@ def api_status():
         if 0 < int(u.get("port") or 0) <= 65535
     }))
     upstream_ports = []
+    status_upstreams = []
     for u in cfg.get("upstreams") or []:
         port = int(u.get("port") or 0)
+        status_u = {
+            "name": u.get("name"),
+            "port": port,
+            "target": _safe_target(u.get("target")),
+            "base_path": u.get("base_path") or "",
+            "paths": [str(p).split("?", 1)[0].split("#", 1)[0] for p in (u.get("paths") or [])],
+            "use_proxy": bool(u.get("use_proxy")),
+        }
+        status_upstreams.append(status_u)
         upstream_ports.append({
             "name": u.get("name"),
             "port": port,
             "listening": bool(running and port in live_ports),
             "url": f"http://127.0.0.1:{port}" if port else "",
-            "target": u.get("target"),
+            "target": _safe_target(u.get("target")),
         })
     return jsonify({
         "version": __version__,
@@ -3239,11 +3618,11 @@ def api_status():
         # 当前兜底形态："" / "passthrough"（明文直连）/ "error"（503 占位监听）。
         # 与 stop_mode（用户配置的意图）区分：这个是**此刻实际生效**的状态。
         "fallback_mode": str(state.get("fallback_mode") or ""),
-        "upstream": state.get("upstream", ""),
+        "upstream": _safe_target(state.get("upstream", "")),
         "capture_mode": capture_mode,
         "proxy_port": PROXY_PORT,
         "proxy_url": f"http://127.0.0.1:{PROXY_PORT}",
-        "upstreams": cfg.get("upstreams", []),
+        "upstreams": status_upstreams,
         "upstream_ports": upstream_ports,
         "admin": is_admin(),
         "ca_cert_exists": CA_CERT.exists(),
@@ -3264,10 +3643,13 @@ def api_status():
         "stream_exclude_hosts": cfg.get("stream_exclude_hosts") or [],
         "stop_mode": str(cfg.get("stop_mode") or "passthrough"),
         # 出口代理配置 + 实际会走代理的客户端数（UI 用来提示「配了但没人用」）
-        "egress_proxy": cfg.get("egress_proxy") or {"enabled": False, "url": ""},
+        "egress_proxy": {
+            "enabled": bool((cfg.get("egress_proxy") or {}).get("enabled")),
+            "url": _safe_target((cfg.get("egress_proxy") or {}).get("url")),
+        },
         "model_prices": cfg.get("model_prices") or {},
         "price_sync_enabled": bool(cfg.get("price_sync_enabled", False)),
-        "price_sync_url": str(cfg.get("price_sync_url") or ""),
+        "price_sync_url": _safe_target(cfg.get("price_sync_url")),
         "price_sync_interval_days": max(1, min(90, int(cfg.get("price_sync_interval_days", 7) or 7))),
         "egress_proxy_users": [u.get("name") for u in (cfg.get("upstreams") or [])
                                if u.get("use_proxy")],
@@ -3432,11 +3814,11 @@ def _sync_prices_now(background=True):
                         })
                         break
                 except Exception as e:
-                    last_err = f"{url}: {str(e)[:120]}"
+                    last_err = f"{_safe_target(url)}: {_safe_public_text(e, 120)}"
             if prices is None:
                 _price_sync_state["last_error"] = last_err
         except Exception as e:
-            _price_sync_state["last_error"] = str(e)[:200]
+            _price_sync_state["last_error"] = _safe_public_text(e, 200)
         finally:
             _price_sync_state["syncing"] = False
 
@@ -3482,7 +3864,7 @@ def api_prices_status():
         state["builtin_count"] = len(MODEL_PRICES)
         return jsonify(state)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.post("/api/prices/sync")
@@ -3495,7 +3877,7 @@ def api_prices_sync():
             return jsonify({"ok": False, "error": state["last_error"], "state": state}), 502
         return jsonify({"ok": True, "state": state})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/prices/list")
@@ -3538,7 +3920,7 @@ def api_prices_list():
         models.sort(key=lambda x: x["model"])
         return jsonify({"ok": True, "count": len(models), "models": models})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/audit/job")
@@ -3582,7 +3964,7 @@ def api_audit_run():
                 target = u
                 break
         if not target:
-            return jsonify({"ok": False, "error": f"未找到 upstream: {upstream_name}"}), 400
+            return jsonify({"ok": False, "error": f"未找到 upstream: {_safe_public_text(upstream_name, 160)}"}), 400
         if not (proc["p"] and proc["p"].poll() is None):
             return jsonify({"ok": False, "error": "代理未运行，先启动代理"}), 400
         if not int(target.get("port") or 0):
@@ -3605,8 +3987,8 @@ def _audit_scan_worker(target, upstream_name, model, profile, cfg):
         result = _run_audit_scan(target, upstream_name, model, profile, cfg)
         audit_job["result"] = result
     except Exception as e:
-        audit_job["error"] = str(e)[:300]
-        _emit_log(f"[audit] 扫描失败: {str(e)[:200]}")
+        audit_job["error"] = _safe_public_text(e, 300)
+        _emit_log(f"[audit] 扫描失败: {_safe_public_text(e, 200)}")
     finally:
         audit_job["running"] = False
         audit_job["phase"] = "已完成" if not audit_job["error"] else "失败"
@@ -3634,7 +4016,7 @@ def _run_audit_scan(target, upstream_name, model, profile, cfg):
     audit_job["phase"] = "发送探针"
     floor = str(cfg.get("audit", {}).get("severity_floor") or "MEDIUM").upper()
     # 实际发送成功的探针集合：连发送都失败的（上游不可达/超时）不入 coverage，
-    # 供 aggregate_step_findings 判 INCONCLUSIVE（审计 P0-3）
+    # 供 aggregate_step_findings 判 INCONCLUSIVE
     sent_probe_ids = set()
     for item in plan:
         if audit_job.get("cancel"):
@@ -3643,7 +4025,7 @@ def _run_audit_scan(target, upstream_name, model, profile, cfg):
         body = item["request_body"]
         # canary nonce 通过 header 注入 transparent 钩子（不进 request body）；
         # 畸形 JSON 探针的 body 是原始非法 JSON 字符串，不能 json.dumps 再包裹——
-        # 曾把 "{not valid json" 序列化成合法 JSON 字符串字面量，探针失效（审计 P0-4）。
+        # 避免把 "{not valid json" 序列化成合法 JSON 字符串字面量导致探针失效。
         if isinstance(body, dict):
             canaries = body.pop("_audit_canaries", None) or []
             req_body = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -3682,7 +4064,7 @@ def _run_audit_scan(target, upstream_name, model, profile, cfg):
         except Exception as e:
             sent += 1
             sent_probe_ids.add(item["probe_id"])
-            _emit_log(f"[audit] 探针 {item['probe_id']} 请求异常（可能预期）: {str(e)[:120]}")
+            _emit_log(f"[audit] 探针 {item['probe_id']} 请求异常（可能预期）: {_safe_public_text(e, 120)}")
         # S3 tool-call echo 比对：expected vs actual（带 severity_floor 过滤，与 transparent 路径对齐）
         if item["step"] == "step8_toolcall" and item.get("meta", {}).get("expected") and actual_text:
             expected = item["meta"]["expected"]
@@ -3692,12 +4074,12 @@ def _run_audit_scan(target, upstream_name, model, profile, cfg):
                     continue
                 enqueue_audit_event({
                     "sid": item["probe_id"],
-                    "host": target.get("target", upstream_name),
+                    "host": _safe_target(target.get("target")) or _safe_upstream_display(upstream_name),
                     "method": "POST",
                     "path": path,
                     "signal_type": f.get("signal", "tool_call_rewrite"),
                     "severity": f.get("severity", "MEDIUM"),
-                    "evidence": f.get("evidence", ""),
+                    "evidence": _safe_public_text(f.get("evidence", ""), 500),
                     "probe_id": item["probe_id"],
                 })
         audit_job["done"] = sent
@@ -3723,12 +4105,17 @@ def _run_audit_scan(target, upstream_name, model, profile, cfg):
         prev_total = cur_total
     # 传入实际执行的 step 集合：web3 探针可选，缺省步骤集不适用；
     # sent_probe_ids 区分「发送失败无回执」与「正常无异常」——
-    # aggregate_matrix 据此算覆盖完整性（审计 P0-3：曾全部步骤无回执也被判 MEDIUM）
+    # aggregate_matrix 据此算覆盖完整性（避免全部步骤无回执时被误判为 MEDIUM）
     step_findings = audit_eng.aggregate_step_findings(plan, findings_by_probe, sent_probe_ids=sent_probe_ids)
     matrix = audit_eng.aggregate_matrix(step_findings, {p["step"] for p in plan})
     # 渲染报告
     audit_job["phase"] = "生成报告"
-    md = audit_eng.render_markdown_report(target.get("target", upstream_name), model, matrix, step_findings)
+    md = audit_eng.render_markdown_report(
+        _safe_target(target.get("target")) or _safe_upstream_display(upstream_name),
+        model,
+        matrix,
+        step_findings,
+    )
     report_path = audit_eng.save_report(md, str(DATA_ROOT))
     _emit_log(f"[audit] 扫描完成：{sent}/{len(plan)} 探针，风险等级 {matrix['severity']}")
     return {
@@ -3754,7 +4141,7 @@ def api_audit_report_latest():
     try:
         content = Path(p).read_text(encoding="utf-8")
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
     return jsonify({"ok": True, "path": p, "content": content})
 
 
@@ -3792,7 +4179,7 @@ def api_logs():
     # 默认显示全部事件（含 SKIP/PASS 噪声）。曾默认 '1' 隐藏，用户会误以为日志丢了。
     sensitive_only = request.args.get("sensitive", "0") != "0"
     query = request.args.get("q", "")
-    # 全文搜索开关（审计 P0-5）：默认只搜结构化列（host/path/method/status/type），
+    # 全文搜索开关：默认只搜结构化列（host/path/method/status/type），
     # payload LIKE 全表扫描仅在用户显式勾选「全文搜索（全库）」时启用。
     fulltext = request.args.get("fulltext", "0") != "0"
     ev = fetch_events(since=since, limit=limit, sensitive_only=sensitive_only,
@@ -3808,7 +4195,7 @@ def api_logs():
         for e in ev:
             d = {k: v for k, v in e.items() if k not in _HEAVY}
             # items[].original 是敏感明文：列表行只展示 label 徽章与打码 preview，
-            # 明细走 /api/logs/detail 回源全量（审计 P0-1：曾原样下发 items 数组）。
+            # 明细走 /api/logs/detail 回源全量，列表不直接下发 items 数组明文。
             its = d.get("items")
             if isinstance(its, list):
                 d["items"] = [
@@ -3839,7 +4226,7 @@ def api_logs():
         # 注意：内存 events 的 seq 与 SQLite 自增 id 不是同一命名空间，
         # 不能拿 since 去筛内存事件做兜底（会漏或重复），只回传原始日志尾巴。
         raw_tail = list(log_buf)[-200:]
-    # 锁外做脱敏（避免持锁解析 JSON）：SHIELD 行只回传白名单字段（审计 P0-2）
+    # 锁外做脱敏（避免持锁解析 JSON）：SHIELD 行只回传白名单字段
     tail = [_tail_line_sanitize(x) for x in raw_tail]
     try:
         retention = int(load_config().get("log_retention_days") or LOG_RETENTION_DAYS)
@@ -3896,7 +4283,7 @@ def api_stats_today():
                     pass
         return jsonify(today_stats())
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/stats/today/restore-items")
@@ -3914,7 +4301,7 @@ def api_stats_today_restore_items():
     try:
         return jsonify(fetch_restore_items(limit=limit))
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/stats/history")
@@ -3931,7 +4318,7 @@ def api_stats_history():
         granularity = request.args.get("granularity", "day")
         return jsonify(stats_history(days=days, granularity=granularity))
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/stats/highlights")
@@ -3962,7 +4349,7 @@ def api_stats_highlights():
             "daily": [{"label": r.get("label"), "mask_events": r.get("mask_events")} for r in rows],
         })
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/stats/models")
@@ -3990,14 +4377,14 @@ def api_stats_models():
             out.append(m)
         return jsonify({"ok": True, "days": days, "models": out})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/logs/export")
 def api_logs_export():
     """导出近期事件为 JSON。默认脱敏：items[].original（明文）一律剔除，
     只留 preview/length/hash/label/tok（与 README「日志不记录原始敏感值」的导出
-    口径一致，审计 P0-3）。凭据类本来就只有打码 preview，无明文可导。"""
+    口径一致）。凭据类本来就只有打码 preview，无明文可导。"""
     try:
         limit = int(request.args.get("limit", 2000))
     except Exception:
@@ -4005,7 +4392,7 @@ def api_logs_export():
     limit = max(1, min(limit, EXPORT_MAX))
     sensitive_only = request.args.get("sensitive", "0") != "0"
     query = request.args.get("q", "")
-    # 与 /api/logs 同口径：默认不扫 payload，仅在显式勾选全文搜索时启用（审计 P0-5）
+    # 与 /api/logs 同口径：默认不扫 payload，仅在显式勾选全文搜索时启用
     fulltext = request.args.get("fulltext", "0") != "0"
     ev = fetch_events(since=0, limit=limit, sensitive_only=sensitive_only,
                       query=query, fulltext=fulltext, max_limit=EXPORT_MAX)
@@ -4013,7 +4400,7 @@ def api_logs_export():
     # 5000，底层却砍到 1000，用户导出一整天的日志只拿到 1000 条还以为是全部。
     truncated = len(ev) >= limit
     # 导出清洗：字段白名单。RESTORE 事件的 dialog/resp_preview 是还原后的正文
-    # （含普通 PII 明文），只删 items[].original 挡不住（审计 SHIELD-EXPORT-001）。
+    # （含普通 PII 明文），只删 items[].original 无法完全拦截。
     # 正文类字段一律剔除，只保留元数据 + 打码 items。
     _EXPORT_KEEP_FIELDS = {
         "ts", "type", "sid", "host", "method", "path",
@@ -4096,7 +4483,7 @@ def api_demo_mask():
             "changed": masked != text,
         })
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.post("/api/upstream/test")
@@ -4113,8 +4500,15 @@ def api_upstream_test():
 
     data = request.get_json(force=True) or {}
     name = str(data.get("name") or "").strip()
-    port = int(data.get("port") or 0)
+    try:
+        port = int(data.get("port") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "端口必须是数字"}), 400
+    if port < 0 or port > 65535:
+        return jsonify({"ok": False, "error": "端口范围必须是 1-65535"}), 400
     mode = str(data.get("mode") or "port").strip().lower()
+    if mode not in {"port", "models", "chat"}:
+        return jsonify({"ok": False, "error": "不支持的测试模式"}), 400
     api_key = str(data.get("api_key") or data.get("apiKey") or "").strip()
     model = str(data.get("model") or "").strip()
     path_prefix = str(data.get("path_prefix") or "/v1").strip() or "/v1"
@@ -4164,8 +4558,8 @@ def api_upstream_test():
         "base_url": f"{base}{path_prefix}" if base else "",
         "proxy_running": running,
         "listening": listening,
-        "target": target.get("target"),
-        "paths": target.get("paths") or [],
+        "target": _safe_target(target.get("target")),
+        "paths": [str(p).split("?", 1)[0].split("#", 1)[0] for p in (target.get("paths") or [])],
         "mode": mode,
         "tips": tips,
     }
@@ -4197,9 +4591,10 @@ def api_upstream_test():
                 return resp.status, raw, dict(resp.headers.items())
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+            raw = _safe_public_text(raw, 4000)
             return int(e.code or 0), raw, {}
         except Exception as e:
-            return 0, str(e), {}
+            return 0, _safe_public_text(e, 500), {}
 
     # 按 upstream paths 猜前缀：含 /zen/go/v1 则用它
     paths = target.get("paths") or []
@@ -4210,7 +4605,7 @@ def api_upstream_test():
     if mode == "models":
         status, raw, _ = _http("GET", f"{base}{path_prefix}/models", timeout=30)
         result["http_status"] = status
-        result["raw_preview"] = (raw or "")[:800]
+        result["raw_preview"] = _safe_public_text(raw or "", 800)
         models = []
         try:
             j = json.loads(raw)
@@ -4281,8 +4676,8 @@ def api_upstream_test():
         status, raw, _ = _http("POST", chat_url, body=body, timeout=60)
         result["http_status"] = status
         result["model"] = model
-        result["chat_url"] = chat_url
-        result["raw_preview"] = (raw or "")[:1000]
+        result["chat_url"] = _safe_target(chat_url)
+        result["raw_preview"] = _safe_public_text(raw or "", 1000)
         result["ok"] = 200 <= status < 300
         # 从回复里抽一点文本
         reply = ""
@@ -4303,7 +4698,7 @@ def api_upstream_test():
                     reply = cont
         except Exception:
             pass
-        result["reply_preview"] = (reply or "")[:300]
+        result["reply_preview"] = _safe_public_text(reply or "", 300)
         if result["ok"]:
             tips.append("聊天测试成功。请到「实时日志」查看 MASK/RESTORE（含手机号/邮箱脱敏）")
             tips.append("若日志仍空：取消勾选「只看敏感请求」，或点刷新")
@@ -4328,9 +4723,10 @@ def api_open_data_dir():
             subprocess.Popen(["open", path])
         else:
             subprocess.Popen(["xdg-open", path])
-        return jsonify({"ok": True, "path": path})
+        return jsonify({"ok": True, "path": _safe_public_text(path, 240)})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "path": str(DATA_ROOT)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240),
+                        "path": _safe_public_text(DATA_ROOT, 240)}), 500
 
 
 @app.post("/api/open-url")
@@ -4342,7 +4738,7 @@ def api_open_url():
     try:
         data = request.get_json(force=True) or {}
         url = str(data.get("url") or "").strip()
-        if not (url.startswith("https://github.com/xiaYuTian11/maskit") or url.startswith("https://linux.do")):
+        if not _is_allowed_external_url(url):
             return jsonify({"ok": False, "error": "url 不在白名单"}), 400
         if os.name == "nt":
             os.startfile(url)  # type: ignore[attr-defined]
@@ -4352,7 +4748,7 @@ def api_open_url():
             subprocess.Popen(["xdg-open", url])
         return jsonify({"ok": True, "url": url})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.post("/api/logs/clear")
@@ -4372,30 +4768,45 @@ def api_restore():
 def api_cert():
     # 安全闸门：安装系统根 CA 是最敏感的一次性操作，必须显式 confirm=true
     # 防止前端误调用或脚本自动装证书（审计第三批 P2）
-    if request.get_json(silent=True) == {} or request.args.get("confirm", "") != "true":
-        body = request.get_json(silent=True) or {}
-        if not body.get("confirm"):
-            return jsonify({"ok": False, "error": "安装系统根 CA 需显式确认：传 confirm=true"}), 400
+    body = request.get_json(silent=True) or {}
+    confirmed = request.args.get("confirm", "").lower() == "true" or body.get("confirm") is True
+    if not confirmed:
+        return jsonify({"ok": False, "error": "安装系统根 CA 需显式确认：传 confirm=true"}), 400
     if not CA_CERT.exists():
-        # 起短命 mitmdump 真服务（随机端口不冲突）强制生成 CA
+        # 起短命 mitmdump sidecar 强制生成 CA。复用引擎入口，保证冻结包不依赖
+        # 安装机 PATH 中另有一个 mitmdump；同时不触碰正在运行的主代理句柄。
+        sidecar = None
         try:
-            p = subprocess.Popen(["mitmdump", "-p", "0", "-q", "--set", "connection_strategy=lazy"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 env=_child_env_for_mitmdump(),
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            for _ in range(20):
+            sidecar = _spawn_mitmdump_sidecar(
+                ["-p", "0", "-q", "--set", "connection_strategy=lazy"]
+            )
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline and not CA_CERT.exists():
                 time.sleep(0.2)
-                if CA_CERT.exists():
+                try:
+                    if sidecar.poll() is not None:
+                        break
+                except Exception:
                     break
-            p.terminate()
-            try:
-                p.wait(timeout=3)
-            except Exception:
-                p.kill()
+        except FileNotFoundError:
+            return jsonify({"ok": False, "error": "生成证书失败：未找到 mitmproxy sidecar，请先安装依赖"})
         except Exception as e:
-            return jsonify({"ok": False, "error": f"生成证书失败: {e}"})
+            return jsonify({"ok": False, "error": f"生成证书失败: {_safe_public_text(e, 240)}"})
+        finally:
+            _stop_sidecar_process(sidecar)
     if not CA_CERT.exists():
-        return jsonify({"ok": False, "error": f"未生成证书: {CA_CERT}"})
+        return jsonify({"ok": False, "error": f"未生成证书: {_safe_public_text(CA_CERT, 240)}"}), 500
+    if sys.platform != "win32":
+        # 不同 Linux 发行版/桌面环境的信任库位置不一致，不能盲写系统目录或
+        # 隐式 sudo。返回已生成证书和明确的手动安装提示，由用户选择信任范围。
+        scope = "manual"
+        return jsonify({
+            "ok": False,
+            "scope": scope,
+            "installed": False,
+            "path": str(CA_CERT),
+            "error": "已生成 mitmproxy CA；当前系统未自动修改信任库，请按系统文档手动安装",
+        })
     args = ["certutil"]
     scope = "LocalMachine" if is_admin() else "CurrentUser"
     if not is_admin():
@@ -4408,9 +4819,10 @@ def api_cert():
         _emit_log(f"[panel] 装证书({scope}): 超时")
         return jsonify({"ok": False, "scope": scope, "error": f"certutil 超时（>{_CMD_TIMEOUT}s），请手动双击 {CA_CERT} 安装"})
     except Exception as e:
-        return jsonify({"ok": False, "scope": scope, "error": f"certutil 执行失败: {e}"})
+        return jsonify({"ok": False, "scope": scope, "error": f"certutil 执行失败: {_safe_public_text(e, 240)}"})
+    safe_out = _safe_public_text(out, 500)
     _emit_log(f"[panel] 装证书({scope}): rc={rc}")
-    return jsonify({"ok": rc == 0, "scope": scope, "output": out[-500:]})
+    return jsonify({"ok": rc == 0, "scope": scope, "output": safe_out, "installed": rc == 0})
 
 
 WEB_DIST_DIR = Path(os.environ.get("MASKIT_WEB_DIST") or (_BUNDLE_ROOT / "web_dist"))
@@ -4624,6 +5036,12 @@ _SCRUB_CREDENTIAL_PATTERNS = [
     (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}"), r"\1 <redacted>"),
     # 常见 key 前缀（OpenAI sk-/中转 ah-/Groq gsk_/xAI xai- 等）
     (re.compile(r"(?i)\b(?:sk|ah|gsk|xai|pk|rk|ghp|glpat)[-_][A-Za-z0-9._\-]{8,}"), "<key>"),
+    # 厂商固定格式：即使没有 `key=` 前缀也要清洗（上游错误页/回显常是裸值）。
+    (re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35,}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])AKID[A-Za-z0-9]{13,32}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{50,}(?![A-Za-z0-9_-])"), "<key>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])"), "<key>"),
     (re.compile(r"(?i)\b(api[_-]?key|token|secret|password|passwd|pwd"
                 r"|access[_-]?key|private[_-]?key)([\"']?\s*[:=]\s*[\"']?)([^\s\"',;&]{4,})"),
      r"\1\2<redacted>"),
@@ -4687,10 +5105,10 @@ def _scrub_credentials_only(s):
 
 
 def _scrub_legacy_event(row):
-    """日志详情读侧凭据清洗（2026-08-17 外部审计 P0-04）。
+    """日志详情读侧凭据清洗。
 
     写侧从某个版本起就不再把凭据原文落库了，但**升级用户的历史库里还留着**——
-    实测生产库有 CONNSTR 5091 条、PRIVATE_KEY 468 条明文。
+    实测生产库有 CONNSTR、PRIVATE_KEY 等遗留明文。
     "新写入已修" 不等于安全：/api/logs/detail 是按 id 原样回源的，
     点开一条老记录照样把私钥整块渲染出来。
 
@@ -4727,16 +5145,93 @@ def _scrub_legacy_event(row):
 
 
 def _safe_target(url):
-    """上游地址只留 scheme+host+path，剥掉 userinfo 与 query。
-    绝大多数中转把 key 放请求头，但确实有把 key 塞进 query 的，不能赌。"""
+    """上游地址只留 scheme+host+path，剥掉 userinfo/query/fragment。
+
+    该函数用于诊断、日志和状态展示，不改变实际转发地址。即使用户把 key
+    放进 URL，也不会因为错误信息或健康检查而回显出去。
+    """
     try:
-        u = urlparse(str(url or ""))
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+            return "<redacted-target>"
+        u = urlsplit(raw)
+        scheme = (u.scheme or "").lower()
         host = u.hostname or ""
-        if u.port:
-            host = f"{host}:{u.port}"
-        return f"{u.scheme}://{host}{u.path}" if host else ""
+        if not scheme or not host or scheme not in {"http", "https"}:
+            return "<redacted-target>"
+        try:
+            port = u.port
+        except ValueError:
+            return "<redacted-target>"
+        # Normalize IDN for stable diagnostics, but never include userinfo.
+        try:
+            host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return "<redacted-target>"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if port:
+            host = f"{host}:{port}"
+        path = unquote(u.path or "")
+        path = _safe_public_text(path, 1024)
+        # A malformed path must not inject a second log/report line.
+        path = "".join(ch if ord(ch) >= 0x20 and ord(ch) != 0x7F else " " for ch in path)
+        return f"{scheme}://{host}{path}"
     except Exception:
-        return "<unparsable>"
+        return "<redacted-target>"
+
+
+def _safe_upstream_display(value):
+    """清洗 upstream 展示值；允许普通配置名称，同时剥掉 URL 凭据。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return _safe_target(text)
+    return _safe_public_text(text, 160)
+
+
+_ALLOWED_EXTERNAL_GITHUB_PATH = "/xiaYuTian11/maskit"
+
+
+def _is_allowed_external_url(url):
+    """校验面板可调用的外部浏览器 URL。
+
+    只接受 HTTPS、无 userinfo、默认/443 端口，并要求主机和路径边界精确匹配；
+    例如 `github.com/xiaYuTian11/maskit.evil`、账号密码和非 443 端口都会拒绝。
+    """
+    try:
+        raw = str(url or "").strip()
+        if not raw or any(ord(ch) < 0x20 or ord(ch) == 0x7F or ch == "\\" for ch in raw):
+            return False
+        parsed = urlsplit(raw)
+        if parsed.scheme.lower() != "https" or parsed.username or parsed.password:
+            return False
+        # 外部入口只打开固定文档/仓库路径；query/fragment 可能携带 token 或
+        # 把用户带到未审查的跳转参数，统一拒绝。
+        if parsed.query or parsed.fragment:
+            return False
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        if port not in (None, 443) or not parsed.hostname:
+            return False
+        host = parsed.hostname.lower()
+        if host not in {"github.com", "linux.do"}:
+            return False
+        path = unquote(parsed.path or "/")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+            return False
+        if host == "github.com":
+            return path == _ALLOWED_EXTERNAL_GITHUB_PATH or path.startswith(
+                _ALLOWED_EXTERNAL_GITHUB_PATH + "/"
+            )
+        return True
+    except Exception:
+        return False
 
 
 def _diagnostics_payload(error_limit=60):
@@ -4787,7 +5282,7 @@ def _diagnostics_payload(error_limit=60):
             for p in sorted(expected)
         ]
     except Exception as e:
-        out["ports"] = {"error": str(e)}
+        out["ports"] = {"error": _safe_public_text(e, 240)}
 
     out["upstreams"] = [
         {"name": u.get("name"), "port": u.get("port"),
@@ -4840,12 +5335,12 @@ def _diagnostics_payload(error_limit=60):
         out["recent_errors"] = rows
         out["recent_error_count"] = len(rows)
     except Exception as e:
-        out["recent_errors"] = {"error": str(e)}
+        out["recent_errors"] = {"error": _safe_public_text(e, 240)}
 
     try:
         out["stats_today"] = today_stats()
     except Exception as e:
-        out["stats_today"] = {"error": str(e)}
+        out["stats_today"] = {"error": _safe_public_text(e, 240)}
 
     # 崩溃现场：最近 3 份，各留尾部 6KB。这是 mitmdump 静默退出唯一的归因线索
     try:
@@ -4856,7 +5351,7 @@ def _diagnostics_payload(error_limit=60):
             for f in dumps
         ]
     except Exception as e:
-        out["crash_dumps"] = {"error": str(e)}
+        out["crash_dumps"] = {"error": _safe_public_text(e, 240)}
 
     out["log_tail"] = [_scrub_text(x, 600) for x in list(log_buf)[-200:]]
     return out
@@ -4871,7 +5366,7 @@ def api_diagnostics():
     except Exception as e:
         # 整包失败也要给出点东西，否则用户连「生成失败」都没法报
         payload = {"schema": 1, "generated_at": int(time.time()), "masked": True,
-                   "fatal": str(e), "app": {"version": __version__}}
+                   "fatal": _safe_public_text(e, 240), "app": {"version": __version__}}
     body = json.dumps(payload, ensure_ascii=False, indent=2)
     resp = make_response(body)
     resp.headers["Content-Type"] = "application/json; charset=utf-8"
@@ -4899,7 +5394,7 @@ def api_diagnostics_save():
             pass
         return jsonify({"ok": True, "path": str(path), "size": path.stat().st_size})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 def start_panel_server(open_browser_on_start=True):

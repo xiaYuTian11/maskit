@@ -5,7 +5,7 @@
 <h1 align="center">Data Maskit (数据面具)</h1>
 
 <p align="center">
-  <strong>专为大模型打造的本地隐私脱敏网关 · 请求自动占位打码 · 回复打字机无感还原 · 100% 本地运算零泄漏</strong>
+  <strong>专为大模型打造的本地隐私脱敏网关 · 请求自动占位打码 · 回复打字机无感还原 · 默认无遥测</strong>
 </p>
 
 <p align="center">
@@ -66,7 +66,7 @@
 
 ## ✨ 核心优势与特色
 
-- 🔒 **100% 纯本地运行，零遥测**：脱敏与还原完全在本地进程内完成，不上传任何日志，没有统计、崩溃上报或第三方 SDK。除转发到你自己配置的 LLM 上游外，唯一可选的出站是「模型价格目录同步」（默认关闭）与桌面版手动「检查更新」，全部列在 [SECURITY.md 出站清单](SECURITY.md#出站清单本项目承诺零遥测以下是全部主动出网点)。
+- 🔒 **本地处理，默认无遥测**：脱敏与还原完全在本地进程内完成，不上传日志、统计或崩溃报告，也不内置第三方追踪 SDK。请求仍会按你的配置转发到 LLM 上游；可选的价格目录同步默认关闭，桌面更新检查只在用户触发时运行，完整清单见 [SECURITY.md](SECURITY.md)。本地事件库可能保留普通 PII，发布前请阅读数据保留与信任边界说明。
 - ⚡ **毫秒级 SSE 流式接管（打字机体验）**：针对 OpenAI / Anthropic 的 `text/event-stream` 流式响应，逐事件还原下发，跨 chunk 占位符智能拼接缓冲，完全保留打字机般丝滑的输出体验。
 - 🔌 **反向代理多端口模式（免装 CA 根证书）**：为每个上游分配独立本地端口（如 `18701`），客户端只需将 `base_url` 指向本地端口，无需配置系统全局代理，无需往系统信任区导入 CA 根证书。
 - 🛡️ **原生透明直连兜底（未启动代理绝不断网）**：
@@ -77,7 +77,8 @@
   - 自定义词库：支持一键整分类启停禁用、整词匹配边界防御、正则表达式扩展。
 - 🌐 **两种部署形态**：
   - **Windows 桌面客户端**（Tauri 2 + React 19）：系统托盘常驻、引擎崩溃自愈、开机自启，顶栏一键中英双语切换；
-  - **Docker（amd64 / arm64）**：Linux 服务器 / NAS / macOS 上无头运行，内嵌同一套 Web 控制台，浏览器远程管理（令牌鉴权）。macOS / Linux 桌面版尚未提供。
+  - **Docker（amd64 / arm64）**：Linux 服务器 / NAS / macOS 上无头运行，内嵌同一套 Web 控制台，浏览器远程管理（令牌鉴权）。
+  - **桌面包**：Windows NSIS 是当前主发行形态；macOS DMG 与 Linux deb/AppImage 由 tag CI 构建，下载前请以对应 Release 资产的签名、公证和平台说明为准。
 
 ---
 
@@ -163,16 +164,17 @@ services:
     container_name: maskit
     restart: unless-stopped
     ports:
-      - "5801:5801"         # Web 管理控制台
-      - "18701:18701"       # OpenAI 反向代理通道
-      - "18702:18702"       # DeepSeek 反向代理通道
-      - "18703:18703"       # Anthropic 反向代理通道
-      - "18704-18710:18704-18710" # 自定义端口段
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_PANEL_HOST_PORT:-5801}:5801"         # Web 管理控制台
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_OPENAI_HOST_PORT:-18701}:18701"       # OpenAI 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_DEEPSEEK_HOST_PORT:-18702}:18702"     # DeepSeek 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_ANTHROPIC_HOST_PORT:-18703}:18703"   # Anthropic 反向代理通道
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_CUSTOM_HOST_START:-18704}-${MASKIT_CUSTOM_HOST_END:-18710}:18704-18710" # 自定义端口段
     volumes:
       - maskit_data:/data   # 持久化：词库、规则、配置、事件库
     environment:
       - TZ=Asia/Shanghai
-      - MASKIT_PANEL_TOKEN=change-me-to-a-long-random-string   # 控制台登录令牌，≥16 位
+      - MASKIT_PANEL_TOKEN=change-me-to-a-long-random-string   # 控制台登录令牌，≥16 位；生产建议用 token file
+      # - MASKIT_PANEL_TOKEN_FILE=/run/secrets/maskit_panel_token
 volumes:
   maskit_data:
 ```
@@ -182,16 +184,22 @@ docker compose up -d
 ```
 
 #### 2. 打开 Web 控制台
-浏览器访问 `http://<你的服务器IP>:5801/?token=<MASKIT_PANEL_TOKEN>`（或打开后在登录页粘贴令牌）。
-没设置 `MASKIT_PANEL_TOKEN` 时引擎每次启动生成随机令牌并打印到 `docker logs maskit`。
+浏览器打开 `http://<你的服务器IP>:5801/`，在登录页粘贴令牌。临时便利链接可使用 `/#token=<MASKIT_PANEL_TOKEN>`：fragment 不会随 HTTP 请求发送；旧版 `?token=` 仍兼容，但会进入访问日志和浏览器历史，不建议在反代环境使用。
+没设置固定令牌时，引擎每次启动生成随机令牌并打印到 `docker logs maskit`。生产环境建议使用 Docker secret，并把 `MASKIT_PANEL_TOKEN_FILE` 指向只读文件。
 
 > 5801 与 187xx 端口本身没有网络层隔离，请只暴露给可信网络（内网 / VPN / 反向代理加 TLS）。
+
+反向代理终止 HTTPS 时，在容器环境变量中设置 `MASKIT_TRUST_PROXY=1`，并确保代理覆盖（不是追加）单跳 `X-Forwarded-Proto` / `X-Forwarded-Host`；否则保持默认值，避免客户端伪造转发头。
 
 #### 3. Docker 容器后续升级
 ```bash
 docker compose pull && docker compose up -d
 ```
 数据在命名卷 `maskit_data` 中，升级无损。想直接看文件可改成 bind mount `./maskit_data:/data`（容器以 uid 10001 运行，需先 `chown -R 10001 ./maskit_data`）。
+
+### 从旧官网安装包迁移到 GitHub Release
+
+旧版本安装包内置的是旧更新地址，无法凭空发现 GitHub Release。第一次迁移请从 [GitHub Releases](https://github.com/xiaYuTian11/maskit/releases) 手动下载并安装新包，覆盖原安装目录即可；`%APPDATA%\Maskit` 中的配置、词库和事件库会保留。安装完成后，后续“检查更新”才会使用 GitHub Release。升级前建议先导出配置备份，回滚时重新安装上一版本即可。
 
 ---
 
@@ -223,11 +231,13 @@ python -m unittest discover -s tests
 python tests/smoke_stream.py
 ```
 
-首次运行会在 `engine/` 生成 `config.json`（已 gitignore），模板见 `engine/config.example.json`。Windows 安装包用 `.uild.ps1 -ReleaseOnly` 打包。贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+首次运行会在 `engine/` 生成 `config.json`（已 gitignore），模板见 `engine/config.example.json`。Windows 安装包用 `.\build.ps1 -ReleaseOnly` 打包。贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ---
 
 ## 💬 社区与交流
+
+平台限制、Docker/源码运行矩阵见 [平台与部署支持](docs/PLATFORM_SUPPORT.md)；维护者发版前按 [发布检查清单](docs/RELEASE_CHECKLIST.md) 验证。
 
 - 使用问题与想法：[GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions) 或 **[LINUX DO 社区](https://linux.do/)**；
 - Bug / 功能建议：[GitHub Issues](https://github.com/xiaYuTian11/maskit/issues)（有模板）；

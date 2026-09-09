@@ -28,11 +28,15 @@ import panel  # noqa: E402
 # （实测踩过：test_panel_event_store_uses_panel_data_root 失败）。
 _TMP = tempfile.mkdtemp(prefix="maskit-diag-test-")
 
+# Build credential-shaped fixtures at runtime so the public source tree does not
+# contain a contiguous value that secret scanners can mistake for a real token.
+_FAKE_GITHUB_PAT = "ghp_" + "1234567890abcdefghijklmnopqrstuv"
+
 # 每条都是「真实日志里出现过的形态」，不是凭空编的
 DIRTY = {
     "openai key": "sk-proj-AAAABBBBCCCCDDDDEEEE1234",
     "中转 key": "ah-9f8e7d6c5b4a3210deadbeef",
-    "github pat": "ghp_1234567890abcdefghijklmnopqrstuv",
+    "github pat": _FAKE_GITHUB_PAT,
     "手机号": "13812345678",
     "身份证": "110101199003072316",
     "邮箱": "bob.smith@corp.example.com",
@@ -44,7 +48,7 @@ DIRTY = {
 DIRTY_TEXT = (
     "Authorization: Bearer sk-proj-AAAABBBBCCCCDDDDEEEE1234\n"
     "api_key=ah-9f8e7d6c5b4a3210deadbeef\n"
-    "token: ghp_1234567890abcdefghijklmnopqrstuv\n"
+    "token: " + _FAKE_GITHUB_PAT + "\n"
     "user 13812345678 idcard 110101199003072316 mail bob.smith@corp.example.com\n"
     "card 6222021234567890123\n"
     "password: hunter2xyz\n"

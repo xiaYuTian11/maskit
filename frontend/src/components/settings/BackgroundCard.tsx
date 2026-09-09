@@ -81,11 +81,13 @@ export function BackgroundCard() {
         {/* 当前背景预览 */}
         {bgImage && (
           <div className="relative overflow-hidden rounded-lg border">
-            <img src={bgImage} alt="bg" className="h-28 w-full object-cover" />
+            <img src={bgImage} alt={t('settings.bg.previewAlt')} className="h-28 w-full object-cover" />
             <Button
               size="icon"
               variant="destructive"
               className="absolute right-2 top-2 h-7 w-7"
+              title={t('common.clear')}
+              aria-label={t('common.clear')}
               onClick={() => { applyImage(''); applyOpacity(0) }}
             >
               <X className="h-3.5 w-3.5" />
@@ -105,6 +107,7 @@ export function BackgroundCard() {
               min={0}
               max={100}
               value={opacity}
+              aria-label={t('settings.bg.opacity')}
               onChange={(e) => applyOpacity(Number(e.target.value))}
               className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
             />

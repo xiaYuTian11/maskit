@@ -219,7 +219,7 @@ export interface ShieldConfig {
   sensitive?: Record<string, string[]>
   sensitive_disabled?: string[]
   sensitive_word_disabled?: Record<string, string[]>
-  /** 整词匹配开关：开启后该词两侧加边界（审计规则专项 P2） */
+  /** 整词匹配开关：开启后该词两侧加边界。 */
   sensitive_word_whole?: string[]
   builtin_rules?: Record<string, boolean>
   secret_prefixes?: string[]

@@ -13,9 +13,11 @@ Tauri resources/engine/。
 from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 import os
+import sys
 from pathlib import Path
 
-ENGINE_DIR = Path(__file__).resolve().parent
+spec_dir = Path(globals().get("SPECPATH") or globals().get("__file__") or (Path.cwd() / "engine")).resolve()
+ENGINE_DIR = spec_dir if spec_dir.name == "engine" else (spec_dir / "engine")
 ROOT_DIR = ENGINE_DIR.parent
 
 # mitmproxy 动态 import 较多，必须收集全部子模块
@@ -38,6 +40,16 @@ hiddenimports = (
         'mitmproxy.tools.dump',
     ]
 )
+
+# PyInstaller expects the native icon format for each host. Linux does not need an
+# application icon for the sidecar; passing the Windows ICO there causes a noisy
+# conversion warning and can fail on builders without Pillow image plugins.
+if sys.platform == "win32":
+    bundle_icon = str(ROOT_DIR / "src-tauri/icons/icon.ico")
+elif sys.platform == "darwin":
+    bundle_icon = str(ROOT_DIR / "src-tauri/icons/icon.icns")
+else:
+    bundle_icon = None
 
 datas = (
     mitmproxy_data
@@ -90,9 +102,9 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=sys.platform == "win32",
     console=False,  # --windowed：sidecar 无窗口
-    icon=str(ROOT_DIR / 'src-tauri/icons/icon.ico'),
+    icon=bundle_icon,
 )
 
 coll = COLLECT(
@@ -101,7 +113,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=sys.platform == "win32",
     upx_exclude=[],
     name='MaskitEngine',
 )

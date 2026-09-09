@@ -5,7 +5,7 @@
 <h1 align="center">Data Maskit</h1>
 
 <p align="center">
-  <strong>Local LLM Privacy & Data Masking Gateway · Automatic Placeholder Masking · Typewriter Stream Restoration · 100% Local Processing</strong>
+  <strong>Local LLM Privacy & Data Masking Gateway · Automatic Placeholder Masking · Typewriter Stream Restoration · No Telemetry by Default</strong>
 </p>
 
 <p align="center">
@@ -68,7 +68,7 @@ When coding with **Cursor, Claude Code, Aider, ChatGPT, or AI coding assistants*
 
 ## ✨ Key Features & Highlights
 
-- 🔒 **100% Local Execution, Zero Telemetry**: Masking and restoration run strictly inside local processes. No analytics, no crash reporting, no third-party SDKs. Apart from forwarding to the LLM upstream you configure, the only optional outbound calls are the model-price catalog sync (off by default) and the manual "Check for updates" on desktop; all of them are listed in [SECURITY.md](SECURITY.md).
+- 🔒 **Local processing, no telemetry by default**: Masking and restoration run inside local processes. There is no analytics, crash reporting, or tracking SDK. Requests are still forwarded to the LLM upstreams you configure; price-catalog sync is off by default and desktop update checks run only when requested. See [SECURITY.md](SECURITY.md) for the complete outbound list. Ordinary PII may remain in the local event database, so read the retention and trust-boundary notes before deploying.
 - ⚡ **Millisecond SSE Stream Takeover (Typewriter Experience)**: Intercepts `text/event-stream` responses, restoring tokens chunk by chunk with automatic cross-chunk buffer reassembly.
 - 🔌 **Zero-Config Reverse Proxy (No CA Certificates Needed)**: Assigns dedicated local ports per upstream channel (e.g. `http://127.0.0.1:18701`). No system-wide root CA installation required.
 - 🛡️ **Native Fallback Passthrough (Never Breaks Your API)**:
@@ -79,7 +79,8 @@ When coding with **Cursor, Claude Code, Aider, ChatGPT, or AI coding assistants*
   - Custom: Category-level toggles, whole-word boundary defense, and custom regular expressions.
 - 🌐 **Two Deployment Modes**:
   - **Windows desktop app** (Tauri 2 + React 19): system tray, engine crash self-healing, auto-start, one-click bilingual switching;
-  - **Docker (amd64 / arm64)**: headless on Linux servers / NAS / macOS with the same embedded Web console, token-protected remote access. Native macOS / Linux desktop builds are not available yet.
+  - **Desktop bundles**: Windows NSIS is the primary distribution; macOS DMG and Linux deb/AppImage are built by the tag workflow. Check the signing, notarization, and platform notes attached to each Release asset before installing.
+  - **Docker (amd64 / arm64)**: headless on Linux servers / NAS / macOS with the same embedded Web console and token-protected access.
 
 ---
 
@@ -157,16 +158,17 @@ services:
     container_name: maskit
     restart: unless-stopped
     ports:
-      - "5801:5801"         # Web console
-      - "18701:18701"       # OpenAI proxy
-      - "18702:18702"       # DeepSeek proxy
-      - "18703:18703"       # Anthropic proxy
-      - "18704-18710:18704-18710" # Custom port range
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_PANEL_HOST_PORT:-5801}:5801"         # Web console
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_OPENAI_HOST_PORT:-18701}:18701"       # OpenAI proxy
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_DEEPSEEK_HOST_PORT:-18702}:18702"     # DeepSeek proxy
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_ANTHROPIC_HOST_PORT:-18703}:18703"   # Anthropic proxy
+      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_CUSTOM_HOST_START:-18704}-${MASKIT_CUSTOM_HOST_END:-18710}:18704-18710" # custom range
     volumes:
       - maskit_data:/data   # Persistent state (words, rules, config, event DB)
     environment:
       - TZ=Asia/Shanghai
-      - MASKIT_PANEL_TOKEN=change-me-to-a-long-random-string   # console login token, >= 16 chars
+      - MASKIT_PANEL_TOKEN=change-me-to-a-long-random-string   # >=16 chars; use a secret file in production
+      # - MASKIT_PANEL_TOKEN_FILE=/run/secrets/maskit_panel_token
 volumes:
   maskit_data:
 ```
@@ -175,15 +177,21 @@ Run with:
 ```bash
 docker compose up -d
 ```
-Then open `http://<Server_IP>:5801/?token=<MASKIT_PANEL_TOKEN>` (or paste the token on the sign-in page). If `MASKIT_PANEL_TOKEN` is not set, a random token is generated on every start and printed to `docker logs maskit`.
+Open `http://<Server_IP>:5801/` and paste the token on the sign-in page. For a temporary convenience link use `/#token=<MASKIT_PANEL_TOKEN>`: a fragment is not sent in HTTP requests. The legacy `?token=` form remains compatible but is recorded in access logs and browser history. If no fixed token is configured, a random token is generated on every start and printed to `docker logs maskit`; production deployments should use a Docker secret via `MASKIT_PANEL_TOKEN_FILE`.
 
 > Ports 5801 and 187xx have no network-level isolation; expose them only to trusted networks (LAN / VPN / reverse proxy with TLS).
+
+When a reverse proxy terminates HTTPS, set `MASKIT_TRUST_PROXY=1` and make sure it overwrites (rather than appends) the single-hop `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Leave it unset when the panel is directly exposed.
 
 **Updating**:
 ```bash
 docker compose pull && docker compose up -d
 ```
 Data lives in the named volume `maskit_data` and survives upgrades. Prefer a bind mount? Use `./maskit_data:/data` and run `chown -R 10001 ./maskit_data` first (the container runs as uid 10001).
+
+### Migrating an older installer from the former website
+
+The older installer points to the former update endpoint and cannot discover GitHub Releases by itself. For the first migration, download the new installer from [GitHub Releases](https://github.com/xiaYuTian11/maskit/releases) and install it over the existing directory; configuration, word lists, and events under `%APPDATA%\Maskit` are preserved. Subsequent update checks will use GitHub Releases. Export a configuration backup before upgrading so reinstalling the previous version remains a rollback option.
 
 ---
 
@@ -215,11 +223,13 @@ python -m unittest discover -s tests
 python tests/smoke_stream.py
 ```
 
-The first run creates `engine/config.json` (gitignored) from `engine/config.example.json`. Windows installers are built with `.uild.ps1 -ReleaseOnly`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The first run creates `engine/config.json` (gitignored) from `engine/config.example.json`. Windows installers are built with `.\build.ps1 -ReleaseOnly`. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
 ## 💬 Community
+
+See [platform and deployment support](docs/PLATFORM_SUPPORT.md) for the supported matrix, and use the [release checklist](docs/RELEASE_CHECKLIST.md) before publishing a tag.
 
 - Questions & ideas: [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions) or **[LINUX DO](https://linux.do/)**;
 - Bugs / feature requests: [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) (templates provided);

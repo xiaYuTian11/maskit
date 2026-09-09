@@ -13,6 +13,10 @@
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::path::Path;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -47,6 +51,76 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 #[cfg(not(windows))]
 fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
+}
+
+/// 终止由壳层自己拉起的引擎及其代理子进程。
+///
+/// Windows 用 taskkill 递归终止进程树；Unix 没有等价的跨发行版 Rust 标准库 API，
+/// 因此用系统自带的 `pgrep -P` 递归收集子孙进程，再自底向上发送 TERM/KILL，最后由
+/// Child::wait 回收僵尸。命令不存在时仍由调用方的 Child::kill 兜底，不把清理失败
+/// 静默成成功。
+fn terminate_process_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = no_window(&mut Command::new("taskkill"))
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    #[cfg(unix)]
+    {
+        fn descendants(root: u32) -> Vec<u32> {
+            let mut result = Vec::new();
+            let mut queue = vec![root];
+            while let Some(parent) = queue.pop() {
+                let parent_text = parent.to_string();
+                let output = Command::new("pgrep")
+                    .args(["-P", &parent_text])
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output();
+                let Ok(output) = output else { break };
+                for child in String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok())
+                {
+                    if child != root && !result.contains(&child) {
+                        result.push(child);
+                        queue.push(child);
+                    }
+                }
+            }
+            result
+        }
+
+        let mut pids = descendants(pid);
+        pids.reverse();
+        pids.push(pid);
+        for signal in ["-TERM", "-KILL"] {
+            for target in &pids {
+                let target_text = target.to_string();
+                let _ = no_window(&mut Command::new("kill"))
+                    .args([signal, &target_text])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// 仅对壳层持有的 Child 做强制清理；复用外部已监听引擎时 child 为 None，不能误杀它。
+fn kill_owned_child(child: &mut Child) {
+    let pid = child.id();
+    terminate_process_tree(pid);
+    // taskkill/kill 可能因权限或命令缺失失败，Child::kill 是最后一道兜底。
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // ========== 引擎进程状态 ==========
@@ -99,16 +173,20 @@ impl EngineManager {
             .path()
             .resource_dir()
             .map_err(|e| format!("资源目录不可用: {e}"))?;
-        // 新名优先、旧名兜底：更名版本与旧版本可能共存于同一台机器
-        // （开发树 target/release 还留着上一次构建的产物），少了旧名会「引擎缺失」。
-        const ENGINE_NAMES: [&str; 2] = ["MaskitEngine.exe", "LLMShieldEngine.exe"];
+        // 新名优先、旧名兜底：更名版本与旧版本可能共存于同一台机器。
+        // Unix 的 PyInstaller 产物没有 `.exe` 后缀；把 Windows 名称硬编码在这里会
+        // 让 macOS/Linux 构建成功但启动时永远报「引擎缺失」。
+        #[cfg(target_os = "windows")]
+        const ENGINE_NAMES: &[&str] = &["MaskitEngine.exe", "LLMShieldEngine.exe"];
+        #[cfg(not(target_os = "windows"))]
+        const ENGINE_NAMES: &[&str] = &["MaskitEngine", "LLMShieldEngine"];
         let mut candidates = Vec::new();
         for name in ENGINE_NAMES {
             candidates.push(res.join("engine").join(name));
             candidates.push(res.join("resources").join("engine").join(name));
             candidates.push(res.join(name));
         }
-        // 绝对兜底：exe 同目录
+        // 绝对兜底：壳程序同目录（开发树和部分 AppImage 布局会落在这里）。
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(dir) = exe_path.parent() {
                 for name in ENGINE_NAMES {
@@ -118,11 +196,31 @@ impl EngineManager {
             }
         }
         for c in candidates {
-            if c.exists() {
+            if c.is_file()
+                && {
+                    #[cfg(unix)]
+                    {
+                        c.metadata()
+                            .map(|m| m.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                }
+            {
                 return Ok(c);
             }
         }
-        Err(format!("引擎缺失（已探测 {res:?} 下 engine/ 与 resources/engine/）"))
+        #[cfg(unix)]
+        let detail = "文件不存在或缺少执行权限";
+        #[cfg(not(unix))]
+        let detail = "文件不存在";
+        Err(format!(
+            "引擎缺失（当前平台 {:?}，{detail}；已探测 {res:?} 下 engine/ 与 resources/engine/）",
+            std::env::consts::OS
+        ))
     }
 
     /// 拉起引擎（debug 构建不自动拉，dev 手动 `python panel.py --no-browser`；
@@ -275,7 +373,14 @@ impl EngineManager {
             let hung = if exited {
                 false
             } else {
-                let alive = self.state.lock().ok().and_then(|s| s.pid).is_some();
+                // 只有 child 由本壳持有时才允许 watchdog 判断假死并杀进程；
+                // 复用用户手动启动的外部引擎不能被壳误杀。
+                let alive = self
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.as_ref().map(|_| ()))
+                    .is_some();
                 if alive && !Self::port_ready() {
                     strikes += 1;
                     strikes >= HANG_STRIKES
@@ -291,17 +396,11 @@ impl EngineManager {
                 strikes = 0;
                 self.set_last_error("引擎端口无响应（疑似假死），正在强制重启");
                 // 假死进程不会自己退出，必须先杀进程树再重拉，否则新引擎抢不到 5801
-                let pid = self.state.lock().ok().and_then(|s| s.pid);
-                if let Some(pid) = pid {
-                    #[cfg(target_os = "windows")]
-                    let _ = no_window(&mut Command::new("taskkill"))
-                        .args(["/F", "/T", "/PID", &pid.to_string()])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                    #[cfg(not(target_os = "windows"))]
-                    let _ = pid; // macOS/Linux: 用 libc kill 或直接依赖引擎自退出
+                if let Ok(mut child) = self.child.lock() {
+                    if let Some(process) = child.as_mut() {
+                        kill_owned_child(process);
+                    }
+                    *child = None;
                 }
                 std::thread::sleep(Duration::from_millis(800));
             }
@@ -343,27 +442,31 @@ impl EngineManager {
         }
     }
 
-    /// 三段式退出：HTTP /api/proxy/stop 优雅停 → 3s 超时 → taskkill /T /F
+    /// 三段式退出：HTTP /api/proxy/stop 优雅停 → 3s 超时 → 终止自己持有的进程树。
     fn shutdown(&self) {
-        let pid = self.state.lock().ok().and_then(|s| s.pid);
-        if pid.is_none() {
+        let owned = self
+            .child
+            .lock()
+            .ok()
+            .and_then(|c| c.as_ref().map(|_| ()))
+            .is_some();
+        if !owned {
             return;
         }
         // 1) 优雅停：带 token 调引擎 stop（stop_mode 语义 + env 还原）
         let _ = Self::http_stop_graceful();
         // 2) 等 3s 让引擎 shutdown() 收尾（写线程/env 还原）
         std::thread::sleep(Duration::from_secs(3));
-        // 3) 强杀进程树（mitmdump 多代子进程）
-        if let Some(pid) = pid {
-            #[cfg(target_os = "windows")]
-            let _ = no_window(&mut Command::new("taskkill"))
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            #[cfg(not(target_os = "windows"))]
-            let _ = pid; // macOS/Linux 依赖引擎自退出（优雅停已发）
+        // 3) 强杀进程树（mitmdump 多代子进程）。只处理 child，不影响外部复用实例。
+        if let Ok(mut child) = self.child.lock() {
+            if let Some(process) = child.as_mut() {
+                kill_owned_child(process);
+            }
+            *child = None;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.pid = None;
+            state.ready = false;
         }
     }
 
@@ -411,9 +514,20 @@ fn app_handle() -> &'static AppHandle {
 /// / Linux `$XDG_DATA_HOME/maskit`（缺省 `~/.local/share/maskit`）。
 /// 两侧不一致会让壳读不到引擎写的 proxy_token，表现为「引擎起来了但面板 401」。
 fn data_root() -> Option<PathBuf> {
+    // 与 panel.py 保持一致：测试/隔离运行可显式指定数据根目录。
+    if let Ok(value) = std::env::var("LLM_SHIELD_DATA_DIR") {
+        if !value.trim().is_empty() {
+            return Some(PathBuf::from(value));
+        }
+    }
     #[cfg(target_os = "windows")]
     {
-        std::env::var("APPDATA").ok().map(|a| PathBuf::from(a).join("Maskit"))
+        std::env::var("APPDATA")
+            .ok()
+            .filter(|a| !a.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs_home().map(|h| h.join("AppData").join("Roaming")))
+            .map(|base| base.join("Maskit"))
     }
     #[cfg(target_os = "macos")]
     {
@@ -423,6 +537,7 @@ fn data_root() -> Option<PathBuf> {
     {
         std::env::var("XDG_DATA_HOME")
             .ok()
+            .filter(|v| !v.trim().is_empty())
             .map(PathBuf::from)
             .or_else(|| dirs_home().map(|h| h.join(".local").join("share")))
             .map(|b| b.join("maskit"))
@@ -432,9 +547,28 @@ fn data_root() -> Option<PathBuf> {
 /// 更名前的数据目录（1.5.66 及以前）。迁移失败（跨盘/占用）时壳仍要能读到 token，
 /// 所以候选路径里保留它作为回退，而不是直接假定迁移一定成功。
 fn legacy_data_root() -> Option<PathBuf> {
+    if let Ok(value) = std::env::var("LLM_SHIELD_DATA_DIR") {
+        if !value.trim().is_empty() {
+            // Legacy data lives beside the explicitly selected data root, matching the
+            // normal platform migration layout without escaping the user-selected parent.
+            if let Some(parent) = PathBuf::from(value).parent().map(PathBuf::from) {
+                #[cfg(target_os = "windows")]
+                return Some(parent.join("LLMShield"));
+                #[cfg(target_os = "macos")]
+                return Some(parent.join("LLMShield"));
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                return Some(parent.join("llmshield"));
+            }
+        }
+    }
     #[cfg(target_os = "windows")]
     {
-        std::env::var("APPDATA").ok().map(|a| PathBuf::from(a).join("LLMShield"))
+        std::env::var("APPDATA")
+            .ok()
+            .filter(|a| !a.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs_home().map(|h| h.join("AppData").join("Roaming")))
+            .map(|base| base.join("LLMShield"))
     }
     #[cfg(target_os = "macos")]
     {
@@ -442,13 +576,30 @@ fn legacy_data_root() -> Option<PathBuf> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        dirs_home().map(|h| h.join(".local").join("share").join("llmshield"))
+        std::env::var("XDG_DATA_HOME")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs_home().map(|h| h.join(".local").join("share")))
+            .map(|base| base.join("llmshield"))
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn dirs_home() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("USERPROFILE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(PathBuf::from)
+    }
 }
 
 /// proxy_token 候选路径：新数据目录 → 旧数据目录（迁移失败回退）→ 开发态项目根
@@ -473,8 +624,11 @@ fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// 探测监听指定端口的 PID（复用已有引擎时记录 pid，watchdog 存活校验依赖）
-/// 用 netstat -ano 解析（一次性快照，不逐端口探测）
+/// 探测监听指定端口的 PID（复用已有引擎时用于状态展示）。
+///
+/// 这里只记录外部进程的 PID，不把它当成壳层拥有的 Child；退出和 watchdog 永远只
+/// 终止 `child` 中自己拉起的进程。Unix 优先使用 lsof，精简 Linux 没有 lsof 时
+/// 回退到 ss；两者都不存在则返回 None，不影响正常启动。
 #[cfg(target_os = "windows")]
 fn pid_listening_on_port(port: u16) -> Option<u32> {
     let out = no_window(&mut Command::new("netstat"))
@@ -495,8 +649,52 @@ fn pid_listening_on_port(port: u16) -> Option<u32> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
-fn pid_listening_on_port(_port: u16) -> Option<u32> { None }
+#[cfg(unix)]
+fn pid_listening_on_port(port: u16) -> Option<u32> {
+    let spec = format!("-iTCP:{port}");
+    if let Ok(out) = Command::new("lsof")
+        .args(["-nP", &spec, "-sTCP:LISTEN", "-t"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if let Some(pid) = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<u32>().ok())
+        {
+            return Some(pid);
+        }
+    }
+
+    let out = Command::new("ss")
+        .args(["-ltnp"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let needle = format!(":{port}");
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.contains(&needle) {
+            continue;
+        }
+        if let Some(start) = line.find("pid=") {
+            let pid_text = &line[start + 4..];
+            if let Some(pid) = pid_text
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+fn pid_listening_on_port(_port: u16) -> Option<u32> {
+    None
+}
 
 /// 唤醒窗口并置顶（方案 §13.2）。
 /// Win11 的 Foreground Lock 会拒绝后台进程直接抢焦点——单 show()+set_focus() 经常只是
@@ -857,7 +1055,209 @@ fn autostart_target(value: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn heal_autostart() {}
+fn config_autostart_enabled() -> bool {
+    data_root()
+        .and_then(|r| std::fs::read_to_string(r.join("config.json")).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("autostart").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_AUTOSTART_LABEL: &str = "com.maskit.app";
+
+#[cfg(target_os = "macos")]
+fn autostart_path() -> Option<PathBuf> {
+    dirs_home().map(|h| h.join("Library").join("LaunchAgents").join(format!("{MACOS_AUTOSTART_LABEL}.plist")))
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_path() -> Option<PathBuf> {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| dirs_home().map(|h| h.join(".config")))?;
+    Some(base.join("autostart").join("maskit.desktop"))
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn autostart_path() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_domain() -> Result<String, String> {
+    let out = Command::new("id")
+        .arg("-u")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("读取当前用户 uid 失败: {e}"))?;
+    if !out.status.success() {
+        return Err("读取当前用户 uid 失败".into());
+    }
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if uid.is_empty() || !uid.chars().all(|c| c.is_ascii_digit()) {
+        return Err("当前用户 uid 无效".into());
+    }
+    Ok(format!("gui/{uid}"))
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_bootout(domain: &str, path: &str) -> Result<(), String> {
+    let out = Command::new("launchctl")
+        .args(["bootout", domain, path])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("调用 launchctl 失败: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // 未加载是幂等禁用的正常状态；其它错误必须反馈给前端，不能假报成功。
+    let detail = String::from_utf8_lossy(&out.stderr).trim().to_ascii_lowercase();
+    if detail.contains("could not find service")
+        || detail.contains("no such process")
+        || detail.contains("service could not be found")
+    {
+        Ok(())
+    } else if detail.is_empty() {
+        Err("launchctl 未能卸载开机自启服务".into())
+    } else {
+        Err(format!("launchctl 未能卸载开机自启服务: {detail}"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_set_autostart(enabled: bool) -> Result<bool, String> {
+    let path = autostart_path().ok_or("无法确定 LaunchAgent 路径")?;
+    let path_text = path.to_string_lossy().to_string();
+    let domain = launchctl_domain()?;
+
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| format!("读取应用路径失败: {e}"))?;
+        let escaped = xml_escape(&exe.to_string_lossy());
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>{MACOS_AUTOSTART_LABEL}</string>
+<key>ProgramArguments</key><array><string>{escaped}</string><string>--minimized</string></array>
+<key>RunAtLoad</key><true/>
+<key>ProcessType</key><string>Interactive</string>
+</dict></plist>
+"#
+        );
+        let parent = path.parent().ok_or("LaunchAgent 目录解析失败")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 LaunchAgent 目录失败: {e}"))?;
+        let tmp = path.with_extension("plist.tmp");
+        std::fs::write(&tmp, plist.as_bytes()).map_err(|e| format!("写入 LaunchAgent 失败: {e}"))?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("替换 LaunchAgent 文件失败: {e}"));
+        }
+        // 先卸载旧定义，兼容升级后 label 已存在的场景；服务未加载视为幂等成功，
+        // 其它错误必须返回，避免文件写好了但系统实际仍运行旧定义。
+        launchctl_bootout(&domain, &path_text)?;
+        let out = Command::new("launchctl")
+            .args(["bootstrap", &domain, &path_text])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("调用 launchctl 失败: {e}"))?;
+        if !out.status.success() {
+            let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                "launchctl 未能启用开机自启".into()
+            } else {
+                format!("launchctl 未能启用开机自启: {detail}")
+            });
+        }
+    } else {
+        launchctl_bootout(&domain, &path_text)?;
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|e| format!("删除 LaunchAgent 失败: {e}"))?;
+        }
+    }
+    Ok(enabled)
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_exec_path(path: &Path) -> String {
+    // Desktop Entry Exec 语法要求空格、反斜线和引号用反斜线转义。
+    let path_text = path.to_string_lossy();
+    let mut out = String::with_capacity(path_text.len() + 8);
+    for ch in path_text.chars() {
+        if matches!(ch, ' ' | '\t' | '\\' | '"' | '\'') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn linux_set_autostart(enabled: bool) -> Result<bool, String> {
+    let path = autostart_path().ok_or("无法确定 XDG autostart 路径")?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| format!("读取应用路径失败: {e}"))?;
+        let parent = path.parent().ok_or("XDG autostart 目录解析失败")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 XDG autostart 目录失败: {e}"))?;
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName=Data Maskit\nComment=Local privacy gateway\nExec={} --minimized\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            desktop_exec_path(&exe)
+        );
+        let tmp = path.with_extension("desktop.tmp");
+        std::fs::write(&tmp, desktop.as_bytes()).map_err(|e| format!("写入 XDG autostart 文件失败: {e}"))?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("替换 XDG autostart 文件失败: {e}"));
+        }
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("删除 XDG autostart 文件失败: {e}"))?;
+    }
+    Ok(enabled)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn unsupported_unix_autostart(_enabled: bool) -> Result<bool, String> {
+    Err(format!("当前平台 {} 暂不支持开机自启", std::env::consts::OS))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_autostart_unix(enabled: bool) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        return macos_set_autostart(enabled);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_set_autostart(enabled);
+    }
+    #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+    {
+        return unsupported_unix_autostart(enabled);
+    }
+    #[allow(unreachable_code)]
+    Err(format!("当前平台 {} 暂不支持开机自启", std::env::consts::OS))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn heal_autostart() {
+    // 配置开启时修复文件内容/应用路径；失败只记日志，不阻断主窗口和引擎启动。
+    if config_autostart_enabled() {
+        if let Err(e) = set_autostart_unix(true) {
+            log::warn!("[autostart] 自启自愈失败: {e}");
+        }
+    }
+}
 
 /// 开机自启（winreg 写壳 exe 路径 + --minimized；绕开引擎侧 sys.executable 指向 sidecar 的坑）
 #[tauri::command]
@@ -888,10 +1288,7 @@ async fn set_autostart(enabled: bool) -> Result<bool, String> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // macOS/Linux: 用 tauri-plugin-autostart 或 ~/.config/autostart 桌面文件
-        // 开源后跨平台时实现。当前非 Windows 直接返回成功（不阻塞功能）
-        let _ = enabled;
-        Ok(true)
+        set_autostart_unix(enabled)
     }
 }
 
@@ -1110,8 +1507,8 @@ mod autostart_tests {
     #[test]
     fn parses_quoted_path_with_args() {
         assert_eq!(
-            autostart_target(r#""D:\software\work\Maskit\Maskit.exe" --minimized"#).as_deref(),
-            Some(r"D:\software\work\Maskit\Maskit.exe")
+            autostart_target(r#""C:\Apps\Maskit\Maskit.exe" --minimized"#).as_deref(),
+            Some(r"C:\Apps\Maskit\Maskit.exe")
         );
     }
 
@@ -1136,8 +1533,8 @@ mod autostart_tests {
     #[test]
     fn handles_non_ascii_path() {
         assert_eq!(
-            autostart_target(r#""D:\程序\数据面具\Maskit.exe" --minimized"#).as_deref(),
-            Some(r"D:\程序\数据面具\Maskit.exe")
+            autostart_target(r#""C:\示例\数据面具\Maskit.exe" --minimized"#).as_deref(),
+            Some(r"C:\示例\数据面具\Maskit.exe")
         );
     }
 

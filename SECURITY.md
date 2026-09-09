@@ -51,7 +51,9 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 
 ### Docker / 远程访问模式
 
-`MASKIT_PANEL_HOST=0.0.0.0` 时面板进入远程模式：Host 校验放开、Origin 改为同源校验，**所有 `/api/*` 仍必须携带 `X-Shield-Token`**（来自 `MASKIT_PANEL_TOKEN`，或启动日志打印的随机值）。5801 与 187xx 端口只应暴露给可信网络，反代端口本身不做鉴权。
+`MASKIT_PANEL_HOST=0.0.0.0` 时面板进入远程模式：Host 校验放开、Origin 改为同源校验，**所有 `/api/*` 仍必须携带 `X-Shield-Token`**（来自 `MASKIT_PANEL_TOKEN`、`MASKIT_PANEL_TOKEN_FILE`，或启动日志打印的随机值）。5801 与 187xx 端口只应暴露给可信网络，反代端口本身不做鉴权，Compose 默认只绑定回环地址。
+
+如果 HTTPS 在可信反向代理处终止，请显式设置 `MASKIT_TRUST_PROXY=1`，并让代理覆盖单跳 `X-Forwarded-Proto` / `X-Forwarded-Host`；应用默认不信任这些头。浏览器登录推荐打开根路径后粘贴令牌，临时链接使用 `/#token=...`（fragment 不进访问日志）；`?token=...` 仅为旧版本兼容。
 
 ### 信任边界（明确不防什么）
 

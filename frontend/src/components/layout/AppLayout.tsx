@@ -166,10 +166,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   // 启动后延迟静默检查，之后每 6 小时复查一次。
   //
-  // 只查一次是不够的：这个程序常驻托盘，用户经常连开好几天。实测（2026-08-17）
-  // 顶栏挂着「更新到 v0.1.3」，而进设置页点检查拿到的是 v0.1.5——
-  // 顶栏那个数字是几天前开机那一刻的快照，之后发了两个版本它都不知道。
-  // 两处各查各的、结果还不一致，比不显示更糟：用户会怀疑到底哪个是真的。
+  // 常驻托盘可能连续运行数天；定期复查避免顶栏版本号停留在启动时的旧快照。
   //
   // 延迟 8 秒首查是为了不和启动时的引擎拉起抢资源；6 小时的周期与
   // 客户端策略拉取同频，不额外增加服务器压力。
@@ -198,7 +195,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   // 页面标题（从路由映射，i18n）
   // 必须用 useLocation() 而不是全局 window.location：应用跑在 HashRouter 下，
   // window.location.pathname 恒为 "/"，导致顶栏标题在任何页面都显示「控制台」
-  // （实测截图逐页确认）。useLocation 还能在路由变化时触发重渲染。
+  // useLocation 还能在路由变化时触发重渲染。
   const pageTitle = (() => {
     const p = routeLocation.pathname
     if (p === '/') return t('nav.dashboard')
@@ -406,7 +403,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
               size="sm"
               variant="ghost"
               onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-              title={lang === 'zh' ? 'Switch to English' : '切换为简体中文'}
+              title={lang === 'zh' ? t('layout.switchToEnglish') : t('layout.switchToChinese')}
               className="h-8 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
             >
               <Languages className="h-3.5 w-3.5" />

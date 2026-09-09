@@ -4,7 +4,18 @@
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-09
+## [0.2.0] - 2026-09-09
+
+发布增强与上线版本。
+
+### 优化与修复
+- 增强桌面壳跨平台进程清理与守护机制（Unix 自底向上树状进程终止）。
+- 增强面板安全边界校验（外部 URL 边界白名单、重定向凭据安全抹除）。
+- 完善前端 TypeScript strict 模式类型检查与代码健壮性。
+- 清理内部注释与代码规范，支持系统托盘本地化与平滑更新。
+- 完整支持客户端远程无缝升级链路。
+
+## [0.1.0] - 2026-09-09
 
 首个公开开源版本。
 
@@ -20,5 +31,6 @@
 - Docker 镜像（amd64 / arm64）内嵌 Web 控制台，远程访问需 `MASKIT_PANEL_TOKEN`。
 - 中英文界面一键切换、深浅主题。
 
-[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v1.0.0
+[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.0
+[0.1.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.1.0

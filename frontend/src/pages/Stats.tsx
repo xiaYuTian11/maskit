@@ -10,7 +10,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useVisibility } from '@/lib/useVisibility'
 import { getStatsHistory, getTodayStats, getStatsModels, getPriceSyncStatus, type StatsHistoryPoint } from '@/api/settings'
-import { BarChart3, TrendingUp, Coins, ShieldCheck, ShieldAlert, RotateCcw, Layers, Trophy, Tags } from 'lucide-react'
+import { BarChart3, TrendingUp, Coins, ShieldCheck, ShieldAlert, RotateCcw, Layers, Trophy, Tags, LockKeyhole } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CRED_LABELS, maskWord } from '@/lib/sensitive-word'
 import { useI18n } from '@/lib/i18n'
@@ -238,7 +238,7 @@ function ModelRanking() {
           <div className="mb-4 flex flex-wrap items-center gap-2">
             <span className="rounded-lg border bg-muted/30 px-2.5 py-1 text-xs text-muted-foreground">
               {tf('stats.modelSummary', { n: models.length, r: totalReq.toLocaleString() })}
-              Token {totalTokens.toLocaleString()}
+              {t('stats.tokens')} {totalTokens.toLocaleString()}
             </span>
             <span
               className={cn(
@@ -399,7 +399,7 @@ function Leaderboards({ days }: { days: number }) {
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {t('stats.count')}：<b className="font-mono tabular-nums text-foreground">{viewWord?.count?.toLocaleString()}</b>
               {viewWord?.cred && (
-                <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400">🔒 {t('stats.credLocked')}</span>
+                <span className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"><LockKeyhole className="h-3 w-3" />{t('stats.credLocked')}</span>
               )}
             </div>
           </div>
@@ -499,7 +499,7 @@ function RankCard({
                     {r.tag && (
                       <span className="shrink-0 rounded border px-1 text-[10px] text-muted-foreground">{r.tag}</span>
                     )}
-                    {r.cred && <span className="shrink-0 text-[10px]" title={t('stats.credHint')}>🔒</span>}
+                    {r.cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                   </span>
                   {/* 占比条：相对第一名，长度即相对量级，比纯数字更快看出梯度 */}
                   <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -747,7 +747,7 @@ function ChartTooltip({ point, xPct }: { point: StatsHistoryPoint; xPct: number 
         {(point.tokens_prompt ?? 0) > 0 && (
           <div className="flex items-center gap-2 border-t pt-1">
             <span className="h-2 w-2 rounded-full" style={{ background: TOKEN_COLOR }} />
-            <span className="text-muted-foreground">Token</span>
+            <span className="text-muted-foreground">{t('stats.tokens')}</span>
             <span className="ml-auto pl-3 font-mono tabular-nums text-foreground">{((point.tokens_prompt ?? 0) + (point.tokens_completion ?? 0)).toLocaleString()}</span>
           </div>
         )}

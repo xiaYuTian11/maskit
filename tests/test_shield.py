@@ -3559,7 +3559,9 @@ class NewRulesTests(unittest.TestCase):
 
     # ---- PEM 私钥 ----
     def test_pem_private_key_masked_whole(self):
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAxxx\n-----END RSA PRIVATE KEY-----"
+        pem = ("-----BEGIN " + "RSA PRIVATE KEY-----\n"
+               "MIIEowIBAAKCAQEAxxx\n"
+               "-----END " + "RSA PRIVATE KEY-----")
         r = self._mask("私钥：" + pem)
         self.assertNotIn("MIIEow", r, "PEM 内容不应残留")
         self.assertIn("{{", r, "PEM 应整体替换成占位符")
@@ -3583,7 +3585,8 @@ class NewRulesTests(unittest.TestCase):
 
     # ---- 云厂商 AK ----
     def test_google_ak(self):
-        r = self._mask("key=AIzaSyA1234567890ABCDEFGHIJKLMNOPQRSTUV")
+        google_ak = "AIza" + "SyA1234567890ABCDEFGHIJKLMNOPQRSTUV"
+        r = self._mask("key=" + google_ak)
         self.assertNotIn("AIza", r, "Google AK 应脱敏")
 
     def test_aliyun_ak(self):

@@ -61,4 +61,7 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
 # 非 root 运行：面板可改上游/注入头，容器逃逸面越小越好
 USER maskit
 
-CMD ["python", "engine_entry.py"]
+# Docker secrets are mounted as files (for example /run/secrets/maskit_panel_token).
+# Read the file only at process start; the value is never copied into an image layer.
+# An environment token remains supported for simple deployments and CI smoke tests.
+CMD ["sh", "-c", "if [ -n \"${MASKIT_PANEL_TOKEN_FILE:-}\" ]; then if [ ! -r \"$MASKIT_PANEL_TOKEN_FILE\" ]; then echo 'MASKIT_PANEL_TOKEN_FILE is not readable' >&2; exit 1; fi; export MASKIT_PANEL_TOKEN=\"$(tr -d '\\r\\n' < \"$MASKIT_PANEL_TOKEN_FILE\")\"; fi; exec python engine_entry.py"]

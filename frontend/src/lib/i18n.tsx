@@ -8,7 +8,7 @@
  *  - 未翻译的 key 原样返回（渐进替换，缺词不炸）
  *  - 后端返回的枚举/状态（事件类型等）由前端映射翻译（EventTypeIcon 内）
  */
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 export type Lang = 'zh' | 'en'
 
@@ -329,6 +329,7 @@ const zh: Record<string, string> = {
   'logs.legendScanWarn': '回复含外部 PII',
   'logs.legendBlock': 'fail-closed 拦截',
   'logs.legendPoison': '安全审计信号（非普通上游故障）',
+  'logs.poisonBadge': '投毒',
   'logs.statusNoRestore': '无需还原',
   'logs.statusNoSensitive': '无敏感',
   'logs.tailTitle': '引擎日志尾巴（{n} 行）',
@@ -424,6 +425,8 @@ const zh: Record<string, string> = {
   'layout.collapseSidebar': '展开侧边栏',
   'layout.expandSidebar': '收起侧边栏',
   'layout.toggleTheme': '切换深色模式',
+  'layout.switchToEnglish': '切换为 English',
+  'layout.switchToChinese': '切换为简体中文',
   'layout.engineErr': '引擎异常',
   'layout.slogan': '本地 AI 脱敏代理网关',
   'layout.connFail': '无法连接面板服务（{err}），正在自动重试…',
@@ -458,6 +461,7 @@ const zh: Record<string, string> = {
   'detail.itemNotRestored': '未在本轮响应中出现',
   'detail.chars': '字符',
   'detail.approxTokens': '约 {n} tokens',
+  'detail.length': '（长度 {n}）',
   'detail.original': '原文',
   'detail.preview': '预览',
   'detail.placeholder': '占位',
@@ -569,15 +573,18 @@ const zh: Record<string, string> = {
   'settings.upstream.portAuto': '自动分配',
   'settings.upstream.clientType': '客户端类型',
   'settings.upstream.targetBaseUrl': '目标网关 Base URL',
+  'settings.upstream.targetPh': 'https://api.openai.com',
   'settings.upstream.targetHint': '客户端实际连接的是「本地端口」（如 http://127.0.0.1:18710），Shield 把流量转发到这里的真实网关。',
   'settings.upstream.paths': '脱敏路径（多选，按类型预设可增删）',
   'settings.upstream.pathAdd': '添加',
+  'settings.upstream.pathPh': '/v1/custom/path',
   'settings.upstream.headers': '注入请求头 Header（可选，转发上游时附加）',
   'settings.upstream.headerNamePh': 'Header 名',
   'settings.upstream.headerValPh': '值',
   'settings.upstream.headerAdd': '+ 添加',
   'settings.upstream.headerHint': '示例：上游要求 x-api-key 但客户端没带时，在这里填上即可（仅存本机配置，不出网）。',
   'settings.upstream.basePath': 'Base Path（单端口前缀模式用，反向代理无需填）',
+  'settings.upstream.basePathPh': '/openai',
   'settings.upstream.useEgress': '经出口代理转发（egress_proxy）',
   'settings.upstream.cancel': '取消',
   'settings.upstream.save': '保存',
@@ -617,9 +624,12 @@ const zh: Record<string, string> = {
   'settings.clients.mode.models': 'Models',
   'settings.clients.mode.chat': '对话',
   'settings.clients.modelPh': '模型',
+  'settings.clients.pathPrefixPh': '/v1',
   'settings.clients.apiKeyPh': 'API Key（可选）',
   'settings.clients.egress': '出口代理',
   'settings.clients.supportPaths': '支持路径',
+  'settings.clients.baseUrl': 'Base URL',
+  'settings.clients.headerCount': '请求头 {n}',
   'settings.clients.routePrefix': '单端口前缀模式下拼接到 base_url 后',
   'settings.clients.noClients': '暂无客户端，点击「添加客户端」',
   'settings.clients.injectedHeaders': '注入请求头：{list}',
@@ -707,6 +717,10 @@ const zh: Record<string, string> = {
   'settings.advanced.model': '模型',
   'settings.advanced.modelPh': '默认 claude-3-5-sonnet',
   'settings.advanced.profileTooltip': '探针套餐：general=通用 S1-S8 基础检测（17 步）；web3=含区块链/合约场景的专项探针；full=全部探针（最耗时最费 token）。平时用 general 即可。',
+  'settings.advanced.profile': '探针配置',
+  'settings.advanced.profile.general': '通用',
+  'settings.advanced.profile.web3': 'Web3',
+  'settings.advanced.profile.full': '完整',
   'settings.advanced.runAudit': '运行审计',
   'settings.advanced.cancel': '取消',
   'settings.advanced.viewReport': '查看报告',
@@ -740,6 +754,7 @@ const zh: Record<string, string> = {
   'settings.advanced.egress': '出口代理（egress_proxy）',
   'settings.advanced.egressHint': '启用出口代理（仅支持 http/https CONNECT）',
   'settings.advanced.egressTip': 'socks5 不支持；需按客户端勾选「经出口代理」',
+  'settings.advanced.egressPh': 'http://127.0.0.1:7890',
   'settings.advanced.sessionDiag': '会话与诊断',
   'settings.advanced.sessionTtl': '会话 TTL（秒）',
   'settings.advanced.sessionTtlTooltip': '占位符 ↔ 原文映射的保留时长。超期后旧对话里的占位符无法还原（默认 600 秒 = 10 分钟）。改动即生效。',
@@ -755,9 +770,10 @@ const zh: Record<string, string> = {
   'settings.tools.client': '客户端',
   'settings.tools.chooseClient': '选择客户端',
   'settings.tools.apiKey': 'API Key（仅本次测试，不落盘）',
+  'settings.tools.apiKeyPh': 'sk-…',
   'settings.tools.model': '模型',
   'settings.tools.modelPh': '留空自动取',
-  'settings.tools.textPh': '输入含敏感信息的文本，如：我是张三，电话 13800138000，邮箱 zhang@example.com，API key 是 sk-abc1234567890',
+  'settings.tools.textPh': '输入含敏感信息的文本，如：我是示例用户，电话 13800138000，邮箱 user@example.invalid，API key 是 sk-test-00000000000000000000',
   'settings.tools.sendTest': '发送真实测试',
   'settings.tools.fillSample': '填入示例文本',
   'settings.tools.hint': '请求经 Shield 真实转发到上游并还原响应——输入里的敏感词会被替换成占位符，响应里模型复述的占位符会还原成真实值（可在日志页看到脱敏/还原记录）。',
@@ -783,6 +799,7 @@ const zh: Record<string, string> = {
   'settings.bg.tooLarge': '图片过大（限 2MB），请压缩后重试',
   'settings.bg.readFail': '图片读取失败',
   'settings.bg.saveFail': '保存失败（存储空间可能不足）',
+  'settings.bg.previewAlt': '当前背景预览',
   'settings.about.changelogUnavailable': '暂时获取不到更新日志（网络不通或服务器繁忙），不影响正常使用。',
   'settings.about.loading': '加载中…',
   'settings.security.auditProbe': '审计探针',
@@ -898,7 +915,7 @@ const zh: Record<string, string> = {
   'settings.advanced.selectedUpstream': '所选上游',
   'settings.priceList.countUnit': '{n} 个',
   'common.all': '全部',
-  'settings.tools.sampleText': '我的名字叫张三，电话 13800138000，邮箱 zhang@example.com，服务器 10.20.30.40 的 key 是 sk-abcdefghij1234567890',
+  'settings.tools.sampleText': '我的名字叫示例用户，电话 13800138000，邮箱 user@example.invalid，服务器 192.0.2.10 的 key 是 sk-test-00000000000000000000',
   'settings.tools.healthCheck': '运行健康检查',
   'settings.tools.recover': '一键恢复网络/代理',
   'stats.inputLabel': '输入',
@@ -1220,6 +1237,7 @@ const en: Record<string, string> = {
   'logs.legendScanWarn': 'Reply contains external PII',
   'logs.legendBlock': 'fail-closed block',
   'logs.legendPoison': 'Security audit signal, not an ordinary upstream error',
+  'logs.poisonBadge': 'Poison',
   'logs.statusNoRestore': 'No restore needed',
   'logs.statusNoSensitive': 'No sensitive data',
   'logs.tailTitle': 'Engine log tail ({n} lines)',
@@ -1313,6 +1331,8 @@ const en: Record<string, string> = {
   'layout.collapseSidebar': 'Expand sidebar',
   'layout.expandSidebar': 'Collapse sidebar',
   'layout.toggleTheme': 'Toggle dark mode',
+  'layout.switchToEnglish': 'Switch to English',
+  'layout.switchToChinese': 'Switch to Simplified Chinese',
   'layout.engineErr': 'Engine error',
   'layout.slogan': 'Local AI masking proxy gateway',
   'layout.connFail': 'Cannot reach panel service ({err}), retrying automatically…',
@@ -1347,6 +1367,7 @@ const en: Record<string, string> = {
   'detail.itemNotRestored': 'Not in response',
   'detail.chars': 'chars',
   'detail.approxTokens': '~{n} tokens',
+  'detail.length': '(length {n})',
   'detail.original': 'Original',
   'detail.preview': 'Preview',
   'detail.placeholder': 'Placeholder',
@@ -1459,15 +1480,18 @@ const en: Record<string, string> = {
   'settings.upstream.portAuto': 'Auto-assign',
   'settings.upstream.clientType': 'Client Type',
   'settings.upstream.targetBaseUrl': 'Target Gateway Base URL',
+  'settings.upstream.targetPh': 'https://api.openai.com',
   'settings.upstream.targetHint': 'Clients actually connect to the local port (e.g. http://127.0.0.1:18710); Shield forwards traffic to the real gateway here.',
   'settings.upstream.paths': 'Masking Paths (multi-select, presets per type)',
   'settings.upstream.pathAdd': 'Add',
+  'settings.upstream.pathPh': '/v1/custom/path',
   'settings.upstream.headers': 'Injected Request Headers (optional, attached when forwarding)',
   'settings.upstream.headerNamePh': 'Header name',
   'settings.upstream.headerValPh': 'Value',
   'settings.upstream.headerAdd': '+ Add',
   'settings.upstream.headerHint': 'Example: if the upstream requires x-api-key but your client does not send it, fill it in here (stored locally only, never sent out).',
   'settings.upstream.basePath': 'Base Path (single-port prefix mode; not needed in reverse mode)',
+  'settings.upstream.basePathPh': '/openai',
   'settings.upstream.useEgress': 'Route via egress proxy (egress_proxy)',
   'settings.upstream.cancel': 'Cancel',
   'settings.upstream.save': 'Save',
@@ -1506,9 +1530,12 @@ const en: Record<string, string> = {
   'settings.clients.mode.models': 'Models',
   'settings.clients.mode.chat': 'Chat',
   'settings.clients.modelPh': 'Model',
+  'settings.clients.pathPrefixPh': '/v1',
   'settings.clients.apiKeyPh': 'API Key (optional)',
   'settings.clients.egress': 'Egress',
   'settings.clients.supportPaths': 'Supported paths',
+  'settings.clients.baseUrl': 'Base URL',
+  'settings.clients.headerCount': 'Headers {n}',
   'settings.clients.routePrefix': 'Appended to base_url in single-port prefix mode',
   'settings.clients.noClients': 'No clients yet — click "Add Client"',
   'settings.clients.injectedHeaders': 'Injected headers: {list}',
@@ -1596,6 +1623,10 @@ const en: Record<string, string> = {
   'settings.advanced.model': 'Model',
   'settings.advanced.modelPh': 'default claude-3-5-sonnet',
   'settings.advanced.profileTooltip': 'Probe profile: general=standard S1-S8 checks (17 steps); web3=specialized blockchain/contract probes; full=all probes (slowest, most tokens). Use general normally.',
+  'settings.advanced.profile': 'Probe profile',
+  'settings.advanced.profile.general': 'General',
+  'settings.advanced.profile.web3': 'Web3',
+  'settings.advanced.profile.full': 'Full',
   'settings.advanced.runAudit': 'Run Audit',
   'settings.advanced.cancel': 'Cancel',
   'settings.advanced.viewReport': 'View Report',
@@ -1629,6 +1660,7 @@ const en: Record<string, string> = {
   'settings.advanced.egress': 'Egress Proxy (egress_proxy)',
   'settings.advanced.egressHint': 'Enable egress proxy (http/https CONNECT only)',
   'settings.advanced.egressTip': 'socks5 is not supported; enable "Route via egress proxy" per client',
+  'settings.advanced.egressPh': 'http://127.0.0.1:7890',
   'settings.advanced.sessionDiag': 'Session & Diagnostics',
   'settings.advanced.sessionTtl': 'Session TTL (seconds)',
   'settings.advanced.sessionTtlTooltip': 'How long placeholder↔original mappings are kept. After expiry, old placeholders cannot be restored (default 600s = 10 min). Takes effect immediately.',
@@ -1644,9 +1676,10 @@ const en: Record<string, string> = {
   'settings.tools.client': 'Client',
   'settings.tools.chooseClient': 'Choose client',
   'settings.tools.apiKey': 'API Key (this test only, not persisted)',
+  'settings.tools.apiKeyPh': 'sk-…',
   'settings.tools.model': 'Model',
   'settings.tools.modelPh': 'leave empty to auto-pick',
-  'settings.tools.textPh': 'Enter text containing sensitive info, e.g. My name is John, phone 13800138000, email zhang@example.com, API key sk-abc1234567890',
+  'settings.tools.textPh': 'Enter text containing sensitive info, e.g. Example User, phone 13800138000, email user@example.invalid, API key sk-test-00000000000000000000',
   'settings.tools.sendTest': 'Send Real Test',
   'settings.tools.fillSample': 'Fill Sample Text',
   'settings.tools.hint': 'The request is really forwarded through Shield to the upstream and the response is restored — sensitive words become placeholders, and placeholders echoed by the model are restored to real values (see mask/restore records in the Logs page).',
@@ -1672,6 +1705,7 @@ const en: Record<string, string> = {
   'settings.bg.tooLarge': 'Image too large (max 2MB), please compress and retry',
   'settings.bg.readFail': 'Failed to read image',
   'settings.bg.saveFail': 'Save failed (storage may be full)',
+  'settings.bg.previewAlt': 'Current background preview',
   'settings.about.changelogUnavailable': 'Could not fetch the changelog (network or server issue) — normal usage is unaffected.',
   'settings.about.loading': 'Loading…',
   'settings.security.auditProbe': 'Audit Probes',
@@ -1785,7 +1819,7 @@ const en: Record<string, string> = {
   'settings.advanced.selectedUpstream': 'the selected upstream',
   'settings.priceList.countUnit': '{n} models',
   'common.all': 'All',
-  'settings.tools.sampleText': 'My name is John Smith, phone 13800138000, email zhang@example.com, and the key for server 10.20.30.40 is sk-abcdefghij1234567890',
+  'settings.tools.sampleText': 'My name is Example User, phone 13800138000, email user@example.invalid, and the key for server 192.0.2.10 is sk-test-00000000000000000000',
   'settings.tools.healthCheck': 'Run health check',
   'settings.tools.recover': 'Restore network / proxy',
   'stats.inputLabel': 'Input',
@@ -1816,23 +1850,24 @@ const Ctx = createContext<I18nCtx>({ lang: 'zh', setLang: () => {}, t: (k) => k,
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>(detectLang)
-  const setLang = (l: Lang) => {
+  const setLang = useCallback((l: Lang) => {
     setLangState(l)
     try { localStorage.setItem(STORAGE_KEY, l) } catch { /* ignore */ }
-  }
+  }, [])
   useEffect(() => {
     document.documentElement.lang = lang
     // 非 React 场景（ErrorBoundary / ShareCard canvas / lib）用 tt()/ttf()，
     // 语言存在模块级变量里，这里是唯一同步点；漏掉则英文界面下这些地方恒显示中文
     setI18nLang(lang)
   }, [lang])
-  const t = (key: string) => DICTS[lang][key] ?? DICTS.zh[key] ?? key
-  const tf = (key: string, vars?: Record<string, string | number>) => {
+  const t = useCallback((key: string) => DICTS[lang][key] ?? DICTS.zh[key] ?? key, [lang])
+  const tf = useCallback((key: string, vars?: Record<string, string | number>) => {
     let s = t(key)
     if (vars) for (const [k, v] of Object.entries(vars)) s = s.split(`{${k}}`).join(String(v))
     return s
-  }
-  return <Ctx.Provider value={{ lang, setLang, t, tf }}>{children}</Ctx.Provider>
+  }, [t])
+  const value = useMemo(() => ({ lang, setLang, t, tf }), [lang, setLang, t, tf])
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
 
 export function useI18n() {
@@ -1840,7 +1875,9 @@ export function useI18n() {
 }
 
 /** 非 React 场景（如 lib 内）直接用：先调 initI18nStore 设置语言。 */
-let _storeLang: Lang = 'zh'
+// 先同步读取持久化语言，确保 ErrorBoundary、canvas 等非 React 渲染路径在
+// LanguageProvider 的首个 effect 运行前也不会短暂回退到中文。
+let _storeLang: Lang = detectLang()
 export function setI18nLang(l: Lang) { _storeLang = l }
 export function getI18nLang() { return _storeLang }
 export function tt(key: string): string {
