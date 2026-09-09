@@ -1,0 +1,53 @@
+name: Bug 报告 / Bug report
+description: 功能异常、脱敏漏检/误判、代理不通、界面错误
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。**请勿粘贴真实密钥、身份证号、内网地址等敏感信息**——用占位符或打码后的样例即可。
+        Please do not paste real API keys or personal data; redact or use placeholders.
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / Version
+      description: 设置 → 关于 中的版本号，或 Docker 镜像标签
+      placeholder: "1.0.0 / ghcr.io/xiayutian11/maskit:1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 运行方式 / Platform
+      options:
+        - Windows 桌面版 (NSIS 安装包)
+        - Docker / Linux 无头
+        - 源码运行 (python engine/panel.py)
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: 客户端 / Client
+      placeholder: "Cursor 1.x / Claude Code / Aider / curl ..."
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象 / What happened
+      description: 期望行为 vs 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      placeholder: |
+        1. 配置客户端 base_url = http://127.0.0.1:18701
+        2. 发送包含 "..." 的消息
+        3. 观察日志页 ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / Logs
+      description: 设置 → 反馈 → 生成诊断包（已自动脱敏），或 docker logs maskit 的相关片段
+      render: text

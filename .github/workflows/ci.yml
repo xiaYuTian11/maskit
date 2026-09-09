@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+# 只读权限：本工作流不引用任何 secret、不写回仓库
+permissions:
+  contents: read
+
+# PR 连续推送只保留最新一次；主干 push 不取消（每个 commit 都要有完整门禁记录）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# job 名同时是分支保护里的 Required status check 名，保持英文、不含测试数量等易变信息
+jobs:
+  python:
+    name: python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile check
+        run: python -m py_compile engine/*.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Smoke tests (stream & egress)
+        run: |
+          python tests/smoke_stream.py
+          python tests/smoke_egress.py
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck & build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: i18n dictionary parity
+        run: node ../scripts/check-i18n.mjs
+
+  rust:
+    name: rust
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # tauri.conf.json 的 bundle.resources 指向 resources/engine，codegen 要求目录存在
+      - name: Prepare placeholder resources dir
+        run: New-Item -ItemType Directory -Force -Path resources\engine
+
+      - name: Cargo check
+        run: cargo check
+
+      - name: Cargo test
+        run: cargo test --lib
+
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Version numbers must agree across panel.py / tauri.conf.json / Cargo.toml / package.json
+        run: python scripts/check-version.py

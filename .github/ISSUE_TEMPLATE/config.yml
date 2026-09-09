@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞 / Security vulnerability
+    url: https://github.com/xiaYuTian11/maskit/security/advisories/new
+    about: 请勿在公开 issue 里披露漏洞细节，走私密 advisory（见 SECURITY.md）
+  - name: 使用交流 / Discussions
+    url: https://github.com/xiaYuTian11/maskit/discussions
+    about: 使用问题、配置咨询、经验分享

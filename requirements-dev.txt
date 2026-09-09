@@ -1,0 +1,4 @@
+# 开发/打包用依赖（运行时镜像不装）
+-r requirements.txt
+pyinstaller>=6.10,<7
+pillow>=10.4,<11   # scripts/gen-icons.py

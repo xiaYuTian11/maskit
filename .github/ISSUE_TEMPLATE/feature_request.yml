@@ -1,0 +1,19 @@
+name: 功能建议 / Feature request
+description: 新的脱敏规则、客户端支持、部署形态或界面改进
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题 / Problem
+      description: 你在什么场景下遇到了什么不便
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案 / Proposal
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑的替代方案 / Alternatives

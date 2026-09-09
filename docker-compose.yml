@@ -1,0 +1,26 @@
+services:
+  maskit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/xiayutian11/maskit:latest
+    container_name: maskit
+    restart: unless-stopped
+    ports:
+      - "5801:5801"         # Web 控制台 (http://<host>:5801/?token=<MASKIT_PANEL_TOKEN>)
+      - "18701:18701"       # OpenAI 反向代理通道
+      - "18702:18702"       # DeepSeek 反向代理通道
+      - "18703:18703"       # Anthropic 反向代理通道
+      - "18704-18710:18704-18710" # 其他自定义上游端口段
+    volumes:
+      # 命名卷由 Docker 管理权限（容器以 uid 10001 非 root 运行）。
+      # 想直接看文件可改成 bind mount：./maskit_data:/data，并先 chown -R 10001 ./maskit_data
+      - maskit_data:/data
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      # 面板登录令牌（≥16 位 ASCII）。不设则每次启动随机生成并打印到 docker logs。
+      - MASKIT_PANEL_TOKEN=${MASKIT_PANEL_TOKEN:-}
+
+volumes:
+  maskit_data:

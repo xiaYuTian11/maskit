@@ -1,0 +1,7 @@
+# 默认所有改动由维护者审阅；安全相关路径单独列出以便后续加人
+*                       @xiaYuTian11
+/engine/transparent.py  @xiaYuTian11
+/engine/panel.py        @xiaYuTian11
+/engine/audit_*.py      @xiaYuTian11
+/.github/               @xiaYuTian11
+/SECURITY.md            @xiaYuTian11

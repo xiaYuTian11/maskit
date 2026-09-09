@@ -1,0 +1,135 @@
+{
+  "capture_mode": "reverse",
+  "target_domains": [
+    "api.openai.com",
+    "api.deepseek.com",
+    "api.anthropic.com"
+  ],
+  "domains_disabled": [],
+  "api_paths": [
+    "/v1/chat/completions",
+    "/v1/completions",
+    "/v1/messages",
+    "/chat/completions",
+    "/v1/responses"
+  ],
+  "sensitive": {
+    "人名": [
+      "张三",
+      "李四"
+    ]
+  },
+  "sensitive_disabled": [],
+  "sensitive_word_disabled": {},
+  "sensitive_word_whole": [],
+  "builtin_rules": {
+    "PRIVATE_KEY": true,
+    "CONNSTR": true,
+    "PHONE": true,
+    "EMAIL": true,
+    "LANDLINE": true,
+    "PLATE": true,
+    "HKID": false,
+    "IDCARD": true,
+    "IP_PRIVATE": true,
+    "IP_INTERNAL": false,
+    "CARD": true,
+    "IBAN": true,
+    "USCC": false,
+    "MAC": false,
+    "API_KEY": true,
+    "ACCESS_KEY": true,
+    "JWT": true,
+    "TOKEN": true,
+    "SECRET": true
+  },
+  "secret_prefixes": [
+    "sk-",
+    "ah-"
+  ],
+  "debug": false,
+  "diagnostic_unmatched": false,
+  "session_ttl": 600,
+  "http2": true,
+  "upstreams": [
+    {
+      "name": "openai",
+      "base_path": "/openai",
+      "port": 18701,
+      "target": "https://api.openai.com",
+      "paths": [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses"
+      ],
+      "use_proxy": false,
+      "extra_headers": {}
+    },
+    {
+      "name": "deepseek",
+      "base_path": "/deepseek",
+      "port": 18702,
+      "target": "https://api.deepseek.com",
+      "paths": [
+        "/v1/chat/completions",
+        "/v1/completions"
+      ],
+      "use_proxy": false,
+      "extra_headers": {}
+    },
+    {
+      "name": "anthropic",
+      "base_path": "/anthropic",
+      "port": 18703,
+      "target": "https://api.anthropic.com",
+      "paths": [
+        "/v1/messages"
+      ],
+      "use_proxy": false,
+      "extra_headers": {}
+    }
+  ],
+  "filter_enabled": true,
+  "fail_closed": true,
+  "response_scan": true,
+  "record_plaintext_words": true,
+  "stream_response": true,
+  "stream_exclude_hosts": [],
+  "stop_mode": "passthrough",
+  "egress_proxy": {
+    "enabled": false,
+    "url": ""
+  },
+  "model_prices": {},
+  "price_sync_enabled": false,
+  "price_sync_url": "https://mask.ciyuanroute.com/api/model-prices",
+  "price_sync_interval_days": 7,
+  "log_retention_days": 7,
+  "autostart": true,
+  "start_minimized": false,
+  "auto_start_proxy": true,
+  "wizard_done": false,
+  "meta": {
+    "poison_scan_default_on": true,
+    "stream_exclude_opencode_cleared": true,
+    "stop_mode_error_default": true,
+    "stream_auto_migrated": true,
+    "stop_mode_passthrough_default_v2": true
+  },
+  "audit": {
+    "enabled": true,
+    "passive": true,
+    "active_probes": false,
+    "severity_floor": "MEDIUM",
+    "auto_report": false,
+    "signals": {
+      "error_leak": true,
+      "identity_swap": true,
+      "tool_call_rewrite": true,
+      "sse_anomaly": true,
+      "response_poison": true,
+      "cross_request_pollution": true,
+      "dangerous_action": true
+    }
+  }
+}

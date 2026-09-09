@@ -1,0 +1,12 @@
+# 统一 LF 行尾（Windows 检出/提交均按 LF，消除 CRLF warning）
+* text=auto eol=lf
+
+# 批处理必须 CRLF（Windows cmd 执行要求）
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制不转行尾
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary

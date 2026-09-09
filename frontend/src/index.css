@@ -1,0 +1,153 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* shadcn/ui 颜色变量（浅色）：背景 slate-50 与白卡拉开层次 */
+  :root {
+    --background: 210 40% 97%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 224 76% 48%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 95%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 95%;
+    --muted-foreground: 215.4 16.3% 42%;
+    --accent: 210 40% 95%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 32% 90%;
+    --input: 214.3 32% 90%;
+    --ring: 224 76% 48%;
+    --radius: 0.75rem;
+    --shadow-card: 0 1px 2px rgb(15 23 42 / 0.05), 0 4px 12px -4px rgb(15 23 42 / 0.08);
+    --shadow-card-hover: 0 2px 4px rgb(15 23 42 / 0.07), 0 12px 28px -8px rgb(15 23 42 / 0.16), 0 0 0 1px hsl(224 76% 48% / 0.14);
+  }
+
+  /* 深色：data-theme 属性切换（与旧面板一致，Tailwind darkMode 走 selector） */
+  /* 深色：中性深灰而不是蓝黑。
+     原来底色是 hsl(224 42% 5%)——色相 224 加 42% 饱和度，整屏泛蓝，
+     用户反馈「像蓝色模式」。这里把面板类颜色的饱和度压到 8~14%，
+     只保留极轻的冷调避免死灰；蓝味集中到 primary/ring 这些强调色上，
+     强调色才是该有颜色的地方。 */
+  [data-theme='dark'] {
+    --background: 220 14% 6%;
+    --foreground: 210 20% 97%;
+    --card: 220 12% 9.5%;
+    --card-foreground: 210 20% 97%;
+    --popover: 220 12% 9.5%;
+    --popover-foreground: 210 20% 97%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 220 10% 15%;
+    --secondary-foreground: 210 20% 97%;
+    --muted: 220 10% 13.5%;
+    --muted-foreground: 215 12% 68%;
+    --accent: 220 10% 15%;
+    --accent-foreground: 210 20% 97%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 20% 97%;
+    --border: 220 9% 19%;
+    --input: 220 9% 19%;
+    --ring: 217.2 91.2% 59.8%;
+    --radius: 0.75rem;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.5);
+    --shadow-card-hover: 0 2px 4px rgb(0 0 0 / 0.4), 0 16px 40px -12px rgb(0 0 0 / 0.6), 0 0 0 1px hsl(217 91% 60% / 0.15);
+  }
+}
+
+@layer base {
+  /* 打包字体：Inter（拉丁/数字）+ JetBrains Mono（等宽），离线可用，改善观感 */
+  @font-face {
+    font-family: 'Inter';
+    src: url('./assets/fonts/inter-var.woff2') format('woff2-variations');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: 'JBMono';
+    src: url('./assets/fonts/jbmono-var.woff2') format('woff2-variations');
+    font-weight: 100 800;
+    font-style: normal;
+    font-display: swap;
+  }
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    /* Inter 负责拉丁/数字（更现代），中文回落系统雅黑（渲染清晰） */
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
+      'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+    font-feature-settings: 'rlig' 1, 'calt' 1, 'cv11' 1, 'ss01' 1;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* 字体层级：标题更鲜明，描述不致过淡 */
+  h1 { font-weight: 700; letter-spacing: -0.01em; }
+  h2 { font-weight: 600; }
+  h3 { font-weight: 600; }
+  /* svg 兜底：任何漏了尺寸的图标不会被 viewBox 撑成巨图 */
+  svg { width: 16px; height: 16px; flex: none; }
+  /* 等宽元素统一用 JBMono（端口/路径/时间/代码） */
+  code, kbd, samp, pre {
+    font-family: 'JBMono', 'JetBrains Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+    font-feature-settings: 'zero' 1, 'ss01' 1;
+  }
+  /* 细滚动条（对齐旧面板观感） */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+
+  /* 数字等宽（统计卡 / 端口 / 耗时 / 时间列不跳动） */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+  code,
+  pre,
+  kbd {
+    font-family: 'JBMono', 'JetBrains Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+  }
+}
+
+/* toast 入场动画 */
+@keyframes toast-in {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* 下载进度条的不确定态：总大小还没从 Content-Length 拿到时用它。
+   不能退化成一个静态宽度——那看着就是「已完成这么多」，
+   等真实进度到达时反而像倒退（用户实测反馈：先跳到中间又从零开始）。 */
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
