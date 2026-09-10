@@ -317,25 +317,33 @@ jobs:
           done < <(find release-assets -type f ! -name 'latest.json' -print0)
 
           # 若存在已签名安装包（.sig），自动组装并上传 latest.json 更新元数据
-          sig_file=$(find release-assets -name '*.exe.sig' -type f | head -n 1 || true)
-          if [ -n "$sig_file" ] && [ -f "$sig_file" ]; then
-            exe_file="${sig_file%.sig}"
-            exe_name=$(basename "$exe_file")
-            sig_content=$(cat "$sig_file" | tr -d '\r\n')
-            pub_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-            cat > release-assets/latest.json <<EOF
-{
-  "version": "$GITHUB_REF_NAME",
-  "notes": "Data Maskit $GITHUB_REF_NAME release.",
-  "pub_date": "$pub_date",
-  "platforms": {
-    "windows-x86_64": {
-      "signature": "$sig_content",
-      "url": "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/$exe_name"
+          python3 -c '
+import os, sys, glob, json, datetime
+root = "release-assets"
+sigs = glob.glob(f"{root}/**/*.exe.sig", recursive=True)
+if sigs:
+    sig_path = sigs[0]
+    exe_name = os.path.basename(sig_path[:-4])
+    with open(sig_path, "r", encoding="utf-8") as f:
+        sig_content = f.read().strip()
+    tag = os.environ.get("GITHUB_REF_NAME", "")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    data = {
+        "version": tag,
+        "notes": f"Data Maskit {tag} release.",
+        "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "platforms": {
+            "windows-x86_64": {
+                "signature": sig_content,
+                "url": f"https://github.com/{repo}/releases/download/{tag}/{exe_name}"
+            }
+        }
     }
-  }
-}
-EOF
+    with open(f"{root}/latest.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    print(f"Generated {root}/latest.json for {tag}")
+'
+          if [ -f release-assets/latest.json ]; then
             gh release upload "$GITHUB_REF_NAME" release-assets/latest.json --clobber
-            echo "Assembled and uploaded latest.json for $GITHUB_REF_NAME"
+            echo "Uploaded latest.json for $GITHUB_REF_NAME"
           fi
