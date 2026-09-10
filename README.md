@@ -143,6 +143,13 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### 5. 添加第三方中转站 / 聚合网关（如 One API / New API）
+1. 在「客户端管理」点击「添加客户端」；
+2. **目标网关**：填入中转商地址（如 `https://api.your-relay.com`）；
+3. **本地端口**：填一个未被占用的端口（如 `18709`）；
+4. **脱敏路径**：**直接填 `/v1` 即可**（前缀通配，自动覆盖所有 `/v1/chat/completions`、`/v1/models` 等子路径）；
+5. 保存后，外部工具的 Base URL 填 `http://127.0.0.1:18709/v1` 即可正常使用！
+
 ---
 
 ## 🚀 下载与部署

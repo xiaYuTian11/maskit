@@ -142,6 +142,13 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### 5. Custom Relay / Aggregator Channels (e.g. One API / New API)
+1. In "Clients", click "Add Client";
+2. **Target Base URL**: your relay address (e.g. `https://api.your-relay.com`);
+3. **Local Port**: assign an unused port (e.g. `18709`);
+4. **Masking Paths**: simply enter `/v1` (prefix matching automatically covers `/v1/chat/completions`, `/v1/models`, etc.);
+5. Save, then set your AI tool's Base URL to `http://127.0.0.1:18709/v1`!
+
 ---
 
 ## 🚀 Download & Deployment
