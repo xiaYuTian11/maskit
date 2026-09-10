@@ -100,7 +100,7 @@ const BUILTIN_RULE_GROUPS: { key: string; labelKey: string; rules: string[] }[] 
 const CLIENT_TYPE_PRESETS: Record<string, { labelKey: string; paths: string[]; headers: [string, string][] }> = {
   openai: {
     labelKey: 'settings.clientType.openai',
-    paths: ['/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings'],
+    paths: ['/v1', '/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings'],
     headers: [['Authorization', 'Bearer <YOUR_API_KEY>']],
   },
   anthropic: {
@@ -217,6 +217,7 @@ function UpstreamForm({
           {/* 路径白名单：多选 chip */}
           <div>
             <Label className="text-xs">{t('settings.upstream.paths')}</Label>
+            <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.upstream.pathsHint')}</p>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {(form.paths ?? []).map((p) => (
                 <span key={p} className="group flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-[11px]">
@@ -621,7 +622,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     onError: (e: Error) => toast(`${t('settings.toast.syncErr')}：${e.message}`, 'error'),
   })
 
-  const upstreams = cfg?.upstreams ?? []
+  const upstreams = useMemo(() => cfg?.upstreams ?? [], [cfg?.upstreams])
+  const nextPort = useMemo(() => {
+    const used = new Set(upstreams.map((u) => u.port))
+    for (let p = 18704; p <= 18799; p++) {
+      if (!used.has(p)) return p
+    }
+    return 18711
+  }, [upstreams])
 
   const words = useMemo(() => {
     const raw = cfg?.sensitive as Record<string, string[]> | undefined
@@ -2139,7 +2147,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
       {(editing || adding) && (
         <UpstreamForm
-          initial={editing ?? { name: '', port: 18711, target: '', use_proxy: false, paths: [], base_path: '' }}
+          initial={editing ?? { name: '', port: nextPort, target: '', use_proxy: false, paths: ['/v1'], base_path: '' }}
           onSave={onSaveUpstream}
           onClose={() => { setEditing(null); setAdding(false) }}
           captureMode={cfg?.capture_mode ?? 'reverse'}
