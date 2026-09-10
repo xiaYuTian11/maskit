@@ -48,10 +48,13 @@ When using **Cursor, Claude Code, Codex, Pi, OpenCode, ChatGPT, or any AI coding
 | **What LLM Answers** | `Check firewall connectivity for {{CONNSTR_zkpmqx}} and verify permissions with {{TERM_fnqtsw}}` | Model reasons, plans, and writes code naturally using placeholders |
 | **What You Actually See** | `Check firewall connectivity for mysql://root:Pass123@192.168.1.50:3306/db and verify permissions with Alice` | **Restored in millisecond typewriter stream with zero workflow disruption!** |
 
-#### 🔬 Real-world Inspection & Highlight Diff
+<details>
+<summary><b>🔍 Click to expand: View real-world masking & restoration dialog screenshot (with CoT & highlight mode)</b></summary>
+<br />
 <p align="center">
   <img src="docs/screenshots/event-detail.png" alt="Real Masking & Restoration Details" width="85%" />
 </p>
+</details>
 
 ---
 

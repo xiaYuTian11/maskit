@@ -48,10 +48,13 @@
 | **模型生成的回答** | `建议检查 {{CONNSTR_zkpmqx}} 的网络连通性，并让 {{TERM_fnqtsw}} 核对账号权限` | 模型围绕占位符正常理解、推理与作答 |
 | **你最终看到的输出** | `建议检查 mysql://root:Pass123@192.168.1.50:3306/db 的网络连通性，并让 李四 核对账号权限` | **本地毫秒级无感还原，开发体验完全不受影响！** |
 
-#### 🔬 真实脱敏与还原明细（支持实时高亮对照）
+<details>
+<summary><b>🔍 点击展开：查看真实脱敏与还原弹窗截图（含思维链分析与实时高亮对照）</b></summary>
+<br />
 <p align="center">
   <img src="docs/screenshots/event-detail.png" alt="真实脱敏与还原事件明细" width="85%" />
 </p>
+</details>
 
 ---
 
