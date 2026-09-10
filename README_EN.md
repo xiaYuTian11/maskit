@@ -231,6 +231,7 @@ The first run creates `engine/config.json` (gitignored) from `engine/config.exam
 
 See [platform and deployment support](docs/PLATFORM_SUPPORT.md) for the supported matrix, and use the [release checklist](docs/RELEASE_CHECKLIST.md) before publishing a tag.
 
+- **QQ Group (Chinese Community)**: **`489926214`**;
 - Questions & ideas: [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions) or **[LINUX DO](https://linux.do/)**;
 - Bugs / feature requests: [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) (templates provided);
 - Security vulnerabilities: private channel only, see [SECURITY.md](SECURITY.md).

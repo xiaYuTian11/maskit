@@ -239,6 +239,7 @@ python tests/smoke_stream.py
 
 平台限制、Docker/源码运行矩阵见 [平台与部署支持](docs/PLATFORM_SUPPORT.md)；维护者发版前按 [发布检查清单](docs/RELEASE_CHECKLIST.md) 验证。
 
+- **官方 QQ 交流群**：**`489926214`**（欢迎入群交流使用反馈、规则建议与最新进展）；
 - 使用问题与想法：[GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions) 或 **[LINUX DO 社区](https://linux.do/)**；
 - Bug / 功能建议：[GitHub Issues](https://github.com/xiaYuTian11/maskit/issues)（有模板）；
 - 安全漏洞：请走私密渠道，见 [SECURITY.md](SECURITY.md)。

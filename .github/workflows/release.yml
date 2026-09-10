@@ -113,18 +113,6 @@ jobs:
             os: windows-latest
             bundle: nsis
             shell: pwsh
-          - platform: macos-arm64
-            os: macos-15
-            bundle: dmg
-            shell: bash
-          - platform: macos-x64
-            os: macos-15-intel
-            bundle: dmg
-            shell: bash
-          - platform: linux-x64
-            os: ubuntu-22.04
-            bundle: deb,appimage
-            shell: bash
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
