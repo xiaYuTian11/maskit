@@ -25,7 +25,7 @@
 
 ## 💡 为什么需要 Maskit？
 
-当你在日常开发中使用 **Cursor、Claude Code、Aider、ChatGPT 或各类 AI 编码助手** 时，你可能在不知不觉中将以下敏感信息发送给外部大模型或中转服务商：
+当你在日常开发中使用 **Cursor、Claude Code（结合 cc-switch）、Codex、ChatGPT 或各类 AI 编码助手** 时，你可能在不知不觉中将以下敏感信息发送给外部大模型或中转服务商：
 
 - 🔑 **代码中的凭据与密钥**：`sk-proj-...`、`ghp_...`、云厂商 AccessKey、JWT Token、PEM 私钥证书
 - 🌐 **内网资产与拓扑**：数据库连接串（`mysql://root:Pass123@192.168.1.50:3306/db`）、私有 IP 地址（`10.x` / `172.16.x` / `192.168.x` / `100.64.x` CGNAT）
@@ -114,10 +114,18 @@ Maskit 为每个上游服务商分配一个专属本地端口（默认 `18701` �
 
 ---
 
-### 3. Aider 命令行编程助手
-终端启动 Aider 时指定 Base URL：
+### 3. Codex / 终端 AI 编程助手接入
+终端启动 Codex 或其它命令行编码助手时，只需设置环境变量即可无感接入：
 ```bash
-aider --openai-api-base http://127.0.0.1:18701/v1 --openai-api-key sk-xxxx
+# Linux / macOS
+export OPENAI_BASE_URL="http://127.0.0.1:18701/v1"
+export OPENAI_API_KEY="your-api-key"
+codex
+
+# Windows PowerShell
+$env:OPENAI_BASE_URL = "http://127.0.0.1:18701/v1"
+$env:OPENAI_API_KEY = "your-api-key"
+codex
 ```
 
 ---

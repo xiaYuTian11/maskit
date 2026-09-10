@@ -27,7 +27,7 @@
 
 ## 💡 Why Maskit?
 
-When coding with **Cursor, Claude Code, Aider, ChatGPT, or AI coding assistants**, you might unintentionally send sensitive credentials, private IPs, or personal identifiers (PII) to external LLM providers:
+When coding with **Cursor, Claude Code (with cc-switch), Codex, ChatGPT, or AI coding assistants**, you might unintentionally send sensitive credentials, private IPs, or personal identifiers (PII) to external LLM providers:
 
 - 🔑 **Credentials & Secrets**: `sk-proj-...`, `ghp_...`, Cloud AccessKeys, JWT tokens, PEM private keys
 - 🌐 **Internal Infrastructure**: DB connection strings (`mysql://root:Pass123@192.168.1.50:3306/db`), private IP addresses (`10.x`, `172.16.x`, `192.168.x`, `100.64.x` CGNAT)
@@ -114,9 +114,17 @@ If you use the popular multi-channel tool **[cc-switch](https://github.com/super
 
 ---
 
-### 3. Aider (Terminal AI Pair Programmer)
+### 3. Codex & Terminal AI Assistants
 ```bash
-aider --openai-api-base http://127.0.0.1:18701/v1 --openai-api-key sk-xxxx
+# Linux / macOS
+export OPENAI_BASE_URL="http://127.0.0.1:18701/v1"
+export OPENAI_API_KEY="your-api-key"
+codex
+
+# Windows PowerShell
+$env:OPENAI_BASE_URL = "http://127.0.0.1:18701/v1"
+$env:OPENAI_API_KEY = "your-api-key"
+codex
 ```
 
 ---
