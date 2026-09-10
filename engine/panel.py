@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.1'
+__version__ = '0.2.2'
 import json
 import copy
 import hashlib
@@ -3779,10 +3779,11 @@ def _load_price_cache_memory():
     return _price_cache
 
 
-def _sync_prices_now(background=True):
+def _sync_prices_now(background=True, force=False):
     """同步在线价格目录到本地缓存。
 
     background=True 时后台线程执行（不阻塞调用方）；False 前台执行（手动同步）。
+    force=True 时跳过开关校验（手动触发视同用户明确授权），成功后自动启用开关。
     成功更新 _price_cache + _price_sync_state；失败只记 last_error，不清缓存。
     """
     def _do():
@@ -3792,7 +3793,7 @@ def _sync_prices_now(background=True):
             _price_sync_state["syncing"] = True
         try:
             cfg = load_config()
-            if not cfg.get("price_sync_enabled", False):
+            if not force and not cfg.get("price_sync_enabled", False):
                 _price_sync_state["last_error"] = "价格同步已关闭（设置）"
                 return
             from shield_defaults import fetch_openrouter_prices, save_price_cache
@@ -3812,6 +3813,12 @@ def _sync_prices_now(background=True):
                         _price_sync_state.update({
                             "last_error": "", "last_sync": time.time(), "model_count": len(prices),
                         })
+                        if force and not cfg.get("price_sync_enabled", False):
+                            try:
+                                cfg["price_sync_enabled"] = True
+                                save_config(cfg)
+                            except Exception:
+                                pass
                         break
                 except Exception as e:
                     last_err = f"{_safe_target(url)}: {_safe_public_text(e, 120)}"
@@ -3871,7 +3878,7 @@ def api_prices_status():
 def api_prices_sync():
     """手动触发价格同步（前台执行，等结果返回）。"""
     try:
-        _sync_prices_now(background=False)
+        _sync_prices_now(background=False, force=True)
         state = dict(_price_sync_state)
         if state.get("last_error"):
             return jsonify({"ok": False, "error": state["last_error"], "state": state}), 502

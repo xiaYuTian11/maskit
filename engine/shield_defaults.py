@@ -181,6 +181,7 @@ MODEL_PRICES = {
     "deepseek-reasoner": {"input": 0.55, "output": 2.19},
     "deepseek-chat": {"input": 0.27, "output": 1.1},
     "deepseek-v3": {"input": 0.27, "output": 1.1},
+    "deepseek": {"input": 0.27, "output": 1.1},
     # 国内主流（参考官方目录价，估算）
     "qwen-max": {"input": 1.6, "output": 6.4},
     "qwen-plus": {"input": 0.4, "output": 1.2},
@@ -329,6 +330,21 @@ def fetch_openrouter_prices(url=OPENROUTER_MODELS_URL, timeout=20):
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
     data = json.loads(raw)
+    # 兼容自托管源直接返回 {"prices": {model: {"input": ..., "output": ...}}}
+    if isinstance(data, dict) and isinstance(data.get("prices"), dict):
+        direct_prices = {}
+        for m_name, p_info in data["prices"].items():
+            if isinstance(p_info, dict) and ("input" in p_info or "output" in p_info):
+                try:
+                    pin = float(p_info.get("input") or 0)
+                    pout = float(p_info.get("output") or 0)
+                    if pin > 0 or pout > 0:
+                        direct_prices[str(m_name).strip()] = {"input": round(pin, 6), "output": round(pout, 6)}
+                except (TypeError, ValueError):
+                    continue
+        if direct_prices:
+            return direct_prices
+
     items = data.get("data") if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise ValueError(f"价格源响应缺少 data 列表: {str(data)[:120]}")

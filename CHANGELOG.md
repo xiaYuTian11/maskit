@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-10
+
+界面直达与价格同步优化版本。
+
+### 优化与修复
+- 顶栏导航区新增 GitHub 官方图标，支持点击一键打开系统默认浏览器直达开源项目主页。
+- 修复手动点击「立即同步价格」时因开关校验导致的 HTTP 502 报错；手动触发自动视同授权并同步。
+- 完善自托管价格源与 OpenRouter 格式的无缝兼容。
+- 优化 DeepSeek 等主流系列模型的默认费率兜底，减少未收录后缀时的未定价展示。
+
 ## [0.2.1] - 2026-09-09
 
 修复与体验优化版本。
@@ -41,7 +51,8 @@
 - Docker 镜像（amd64 / arm64）内嵌 Web 控制台，远程访问需 `MASKIT_PANEL_TOKEN`。
 - 中英文界面一键切换、深浅主题。
 
-[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/xiaYuTian11/maskit/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.2
 [0.2.1]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.1
 [0.2.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.2.0
 [0.1.0]: https://github.com/xiaYuTian11/maskit/releases/tag/v0.1.0
