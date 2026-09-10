@@ -315,3 +315,27 @@ jobs:
           while IFS= read -r -d '' file; do
             gh release upload "$GITHUB_REF_NAME" "$file" --clobber
           done < <(find release-assets -type f ! -name 'latest.json' -print0)
+
+          # 若存在已签名安装包（.sig），自动组装并上传 latest.json 更新元数据
+          sig_file=$(find release-assets -name '*.exe.sig' -type f | head -n 1 || true)
+          if [ -n "$sig_file" ] && [ -f "$sig_file" ]; then
+            exe_file="${sig_file%.sig}"
+            exe_name=$(basename "$exe_file")
+            sig_content=$(cat "$sig_file" | tr -d '\r\n')
+            pub_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            cat > release-assets/latest.json <<EOF
+{
+  "version": "$GITHUB_REF_NAME",
+  "notes": "Data Maskit $GITHUB_REF_NAME release.",
+  "pub_date": "$pub_date",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "$sig_content",
+      "url": "https://github.com/${{ github.repository }}/releases/download/$GITHUB_REF_NAME/$exe_name"
+    }
+  }
+}
+EOF
+            gh release upload "$GITHUB_REF_NAME" release-assets/latest.json --clobber
+            echo "Assembled and uploaded latest.json for $GITHUB_REF_NAME"
+          fi

@@ -67,7 +67,7 @@
   <img src="docs/screenshots/event-detail.png" alt="真实脱敏与还原事件明细" width="85%" />
 </p>
 
-> **实锤效果**：上图中，发往大模型时手机号已被打码为 `{{PHONE_jvbspm}}`（模型完全没有拿到真实号码），而大模型思考作答完毕后，返回给你时毫秒级无感还原回 `13899998888`！可在日志弹窗中一键开启「高亮还原」进行精确比对。
+> **实锤效果**：上图中，发往大模型时手机号已被打码为 `{{PHONE_jvbspm}}`（模型完全没有拿到真实号码），而大模型思考作答完毕后，返回给你时毫秒级无感还原回 `13800138000`！可在日志弹窗中一键开启「高亮还原」进行精确比对。
 
 ---
 
@@ -83,9 +83,8 @@
   - 内置覆盖：PEM 私钥、数据库连接串、API Key/Token、手机号、身份证、银行卡、车牌、内网 IPv4/IPv6 等；
   - 自定义词库：支持一键整分类启停禁用、整词匹配边界防御、正则表达式扩展。
 - 🌐 **两种部署形态**：
-  - **Windows 桌面客户端**（Tauri 2 + React 19）：系统托盘常驻、引擎崩溃自愈、开机自启，顶栏一键中英双语切换；
-  - **Docker（amd64 / arm64）**：Linux 服务器 / NAS / macOS 上无头运行，内嵌同一套 Web 控制台，浏览器远程管理（令牌鉴权）。
-  - **桌面包**：Windows NSIS 是当前主发行形态；macOS DMG 与 Linux deb/AppImage 由 tag CI 构建，下载前请以对应 Release 资产的签名、公证和平台说明为准。
+  - **Windows 桌面客户端**（Tauri 2 + React 19）：系统托盘常驻、引擎崩溃自愈、开机自启，顶栏一键中英双语切换（目前官方桌面端仅发布 Windows 10/11 安装包；macOS 与 Linux 桌面客户端尚未发布）；
+  - **Docker 私有网关（amd64 / arm64）**：Linux 服务器 / NAS / macOS 上无头运行，内嵌同一套 Web 控制台，浏览器远程管理（令牌鉴权）。
 
 ---
 
@@ -176,12 +175,14 @@ print(response.choices[0].message.content)
 docker run -d \
   --name maskit \
   --restart unless-stopped \
-  -p 5801:5801 \
-  -p 18701-18710:18701-18710 \
+  -p 127.0.0.1:5801:5801 \
+  -p 127.0.0.1:18701-18710:18701-18710 \
   -v maskit_data:/data \
-  -e MASKIT_PANEL_TOKEN="change-me-to-a-long-random-string" \
+  -e MASKIT_PANEL_TOKEN="请替换为随机高强度字符串" \
   ghcr.io/xiayutian11/maskit:latest
 ```
+
+> **安全防护提示**：命令默认绑定 `127.0.0.1` 本地回环地址，防止未设密码的 187xx 反代端口暴露于公网。若需在局域网/内网共享，建议将容器置于 Nginx/Caddy 等带有 TLS 的反向代理后，或显式绑定到受信任的内网 IP。
 
 #### 2. 或使用 Docker Compose 编排
 在任意目录创建 `docker-compose.yml`（无需仓库代码）：

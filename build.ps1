@@ -14,7 +14,7 @@
 #   只清理构建树里残留的进程（按 ExecutablePath 在仓库内判定），不启动、不验证、
 #   不更新快捷方式与自启。用户在软件内点更新升级，不由脚本替他装。
 #   不带该开关 = 开发机自测模式（会杀进程并拉起构建产物验证），别对着在用的机器跑。
-param([switch]$ReleaseOnly, [string]$Version = "", [switch]$Unsigned, [switch]$PushDocker)
+param([switch]$ReleaseOnly, [string]$Version = "", [switch]$Unsigned)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
@@ -508,30 +508,28 @@ if ($ReleaseOnly) {
     Write-Host "`n完成: 数据面具 Maskit v$newVer [$modeLabel] 已构建（未安装、未启动、未触碰运行中的实例）" -ForegroundColor Cyan
     Write-Host "安装包: $bundle" -ForegroundColor Cyan
 
-    if ($PushDocker) {
-        Write-Host "`n[Docker] 正在构建并推送 GHCR 镜像..." -ForegroundColor Cyan
-        $dockerBin = "C:\Program Files\Docker\Docker\resources\bin\docker.exe"
-        if (-not (Test-Path $dockerBin)) {
-            $dockerCmd = Get-Command "docker" -ErrorAction SilentlyContinue
-            if ($dockerCmd) { $dockerBin = $dockerCmd.Source }
-        }
-        if (Test-Path $dockerBin) {
-            & $dockerBin build -t "ghcr.io/xiayutian11/maskit:$newVer" -t "ghcr.io/xiayutian11/maskit:latest" .
-            if ($LASTEXITCODE -eq 0) {
-                & $dockerBin push "ghcr.io/xiayutian11/maskit:$newVer"
-                & $dockerBin push "ghcr.io/xiayutian11/maskit:latest"
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "[Docker] 镜像已成功推送到 ghcr.io/xiayutian11/maskit:$newVer 和 :latest" -ForegroundColor Green
-                } else {
-                    Write-Host "[Docker] 镜像推送失败（请先执行 docker login ghcr.io -u <github用户名>）" -ForegroundColor Yellow
+    # 自动组装 latest.json 更新元数据
+    $latestJsonPath = "src-tauri\target\release\bundle\nsis\latest.json"
+    if (-not $unsignedBuild -and (Test-Path $sig)) {
+        $sigContent = (Get-Content $sig -Raw -Encoding UTF8).Trim()
+        $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        $latestObj = @{
+            version = "v$newVer"
+            notes = "Data Maskit v$newVer 发布更新。"
+            pub_date = $pubDate
+            platforms = @{
+                "windows-x86_64" = @{
+                    signature = $sigContent
+                    url = "https://github.com/xiaYuTian11/maskit/releases/download/v$newVer/Maskit_${newVer}_x64-setup.exe"
                 }
             }
-        } else {
-            Write-Host "[Docker] 本机未找到 docker 命令，跳过镜像推送" -ForegroundColor Yellow
         }
+        $latestJsonStr = $latestObj | ConvertTo-Json -Depth 5
+        [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $bundle) "latest.json"), $latestJsonStr, (New-Object Text.UTF8Encoding $false))
+        Write-Host "已自动组装更新元数据: $latestJsonPath" -ForegroundColor Green
     }
 
-    Write-Host "下一步: git tag v$newVer && git push --tags（CI 建 Release 草稿）→ 上传安装包与 .sig → 发布" -ForegroundColor Yellow
+    Write-Host "下一步: git tag v$newVer && git push --tags（CI 自动编译多架构 Docker 镜像并建 Release）→ 发布" -ForegroundColor Yellow
     exit 0
 }
 

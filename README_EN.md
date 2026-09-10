@@ -78,9 +78,8 @@ When coding with **Cursor, Claude Code (with cc-switch), Codex, ChatGPT, or AI c
   - Built-in: PEM private keys, DB connection strings, API keys/tokens, phone numbers, ID cards, bank cards, license plates, private IPv4/IPv6 ranges;
   - Custom: Category-level toggles, whole-word boundary defense, and custom regular expressions.
 - 🌐 **Two Deployment Modes**:
-  - **Windows desktop app** (Tauri 2 + React 19): system tray, engine crash self-healing, auto-start, one-click bilingual switching;
-  - **Desktop bundles**: Windows NSIS is the primary distribution; macOS DMG and Linux deb/AppImage are built by the tag workflow. Check the signing, notarization, and platform notes attached to each Release asset before installing.
-  - **Docker (amd64 / arm64)**: headless on Linux servers / NAS / macOS with the same embedded Web console and token-protected access.
+  - **Windows desktop app** (Tauri 2 + React 19): system tray, engine crash self-healing, auto-start, one-click bilingual switching (official desktop build currently supports Windows 10/11 x64; macOS & Linux desktop apps are not yet released);
+  - **Docker Private Gateway (amd64 / arm64)**: headless on Linux servers / NAS / macOS with the same embedded Web console and token-protected access.
 
 ---
 
@@ -164,12 +163,14 @@ print(response.choices[0].message.content)
 docker run -d \
   --name maskit \
   --restart unless-stopped \
-  -p 5801:5801 \
-  -p 18701-18710:18701-18710 \
+  -p 127.0.0.1:5801:5801 \
+  -p 127.0.0.1:18701-18710:18701-18710 \
   -v maskit_data:/data \
   -e MASKIT_PANEL_TOKEN="change-me-to-a-long-random-string" \
   ghcr.io/xiayutian11/maskit:latest
 ```
+
+> **Security Note**: Defaults to binding on `127.0.0.1` loopback to prevent unauthenticated 187xx proxy channels from internet exposure. If sharing within a private network, place behind a reverse proxy (with TLS) or bind explicitly to a trusted internal IP.
 
 #### 2. Or with Docker Compose
 Create a standalone `docker-compose.yml` anywhere:

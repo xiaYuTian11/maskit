@@ -36,6 +36,9 @@ htmlcov/
 .pytest_cache/
 *.tmp
 *.temp
+test-*.ps1
+_docker_test_run/
+_tmp*
 .turbo/
 # 引擎运行时在数据目录生成的文件（开发态数据目录 = engine/）
 engine/config.json
