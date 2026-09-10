@@ -157,7 +157,22 @@ print(response.choices[0].message.content)
 ---
 
 ### Option B: Docker / Docker Compose (Linux, macOS, NAS, Team Server)
-Run headless with the embedded Web console (same file as [docker-compose.yml](docker-compose.yml) in the repo):
+**No source checkout required.** Pull the official multi-arch image directly from GitHub Container Registry (supports `linux/amd64` and `linux/arm64`):
+
+#### 1. One-line Quick Start (Recommended)
+```bash
+docker run -d \
+  --name maskit \
+  --restart unless-stopped \
+  -p 5801:5801 \
+  -p 18701-18710:18701-18710 \
+  -v maskit_data:/data \
+  -e MASKIT_PANEL_TOKEN="change-me-to-a-long-random-string" \
+  ghcr.io/xiayutian11/maskit:latest
+```
+
+#### 2. Or with Docker Compose
+Create a standalone `docker-compose.yml` anywhere:
 
 ```yaml
 services:

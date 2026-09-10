@@ -161,10 +161,23 @@ print(response.choices[0].message.content)
 
 ### 方式 B：使用 Docker 部署（Linux / macOS / NAS / 团队私有网关）
 
-无需图形界面或桌面环境，直接在服务器上作为团队共享的脱敏网关运行，**内嵌完整 Web 控制台**：
+**无需克隆仓库或下载源码**，直接从 GitHub 容器镜像库拉取官方预构建的多架构镜像（原生支持 `linux/amd64` 与 `linux/arm64`），内嵌完整 Web 控制台：
 
-#### 1. 使用 Docker Compose（推荐）
-在服务器上创建 `docker-compose.yml`（与仓库根目录的 [docker-compose.yml](docker-compose.yml) 相同）：
+#### 1. 一行命令秒级启动（首选推荐）
+直接在服务器或终端运行，Docker 会自动从云端拉取镜像：
+```bash
+docker run -d \
+  --name maskit \
+  --restart unless-stopped \
+  -p 5801:5801 \
+  -p 18701-18710:18701-18710 \
+  -v maskit_data:/data \
+  -e MASKIT_PANEL_TOKEN="change-me-to-a-long-random-string" \
+  ghcr.io/xiayutian11/maskit:latest
+```
+
+#### 2. 或使用 Docker Compose 编排
+在任意目录创建 `docker-compose.yml`（无需仓库代码）：
 ```yaml
 services:
   maskit:

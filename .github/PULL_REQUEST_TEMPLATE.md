@@ -15,5 +15,6 @@ Closes #
 - [ ] 未提交任何真实密钥、内网地址、个人数据（含测试样例）
 - [ ] 未新增任何对外网络请求（本项目承诺零遥测；如确需新增，已在 SECURITY.md「出站清单」登记）
 - [ ] 提交信息符合 Conventional Commits（`feat:` / `fix:` / `docs:` …）
+- [ ] 我已阅读并同意 [CONTRIBUTING.md](CONTRIBUTING.md) 中的「贡献者许可与商业化授权条款」
 
 > CI 会自动跑 Python 单测 + 冒烟、前端类型/Lint/i18n 对齐、Rust 编译与单测、版本号一致性。全绿后维护者审阅合并。
