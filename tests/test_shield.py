@@ -3325,13 +3325,13 @@ class AutoHealTests(unittest.TestCase):
 
         panel._run_console = fake_run
         with mock.patch.object(panel.sys, "platform", "win32"):
-            cmdlines["7777"] = r"C:\Python313\python.exe D:\work\shield\panel.py"
+            cmdlines["7777"] = r"C:\Python313\python.exe C:\Apps\shield\panel.py"
             self.assertTrue(panel._is_shield_panel_pid(7777), "源码面板必须被识别")
-            cmdlines["8888"] = r'"D:\work\dist\LLMShield\LLMShield.exe"'
+            cmdlines["8888"] = r'"C:\Apps\LLMShield\LLMShield.exe"'
             self.assertTrue(panel._is_shield_panel_pid(8888), "打包面板必须被识别")
             cmdlines["9999"] = r"C:\Python313\python.exe manage.py runserver"
             self.assertFalse(panel._is_shield_panel_pid(9999), "无关 python 不能误判")
-            cmdlines["1111"] = r"C:\Python313\python.exe mitmdump.exe -s D:\shield\transparent.py"
+            cmdlines["1111"] = r"C:\Python313\python.exe mitmdump.exe -s C:\Apps\shield\transparent.py"
             self.assertFalse(panel._is_shield_panel_pid(1111), "mitmdump 类进程归 _is_mitmdump_pid 管")
             self.assertFalse(panel._is_shield_panel_pid(os.getpid()), "本进程绝不识别")
 
@@ -3395,7 +3395,7 @@ class AutoHealTests(unittest.TestCase):
         panel._listening_port_pids = lambda ports, fresh=False: {18701: {4321}}
         panel._run_console = lambda argv, timeout=None: (
             0, r'"python.exe","4321","Console","1","20,000 K"' if argv[0] == "tasklist"
-            else r'C:\Python313\python.exe mitmdump.exe -s D:\shield\transparent.py')
+            else r'C:\Python313\python.exe mitmdump.exe -s C:\Apps\shield\transparent.py')
         panel._emit_log = lambda line: None
         panel.proc["p"] = None
 

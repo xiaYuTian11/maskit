@@ -728,12 +728,12 @@ def _prune_recent(now=None):
     """按 TTL + 条数上限清理复用表，防止无界增长。"""
     now = now or time.time()
     ttl = _recent_ttl()
-    stale = [k for k, v in _RECENT_FWD.items() if now - v[2] > ttl]
+    stale = [k for k, v in list(_RECENT_FWD.items()) if now - v[2] > ttl]
     for k in stale:
         tok = _RECENT_FWD.pop(k, [None])[0]
         _RECENT_REV.pop(tok, None)
     if len(_RECENT_FWD) > _RECENT_MAX:
-        oldest = sorted(_RECENT_FWD.items(), key=lambda kv: kv[1][2])
+        oldest = sorted(list(_RECENT_FWD.items()), key=lambda kv: kv[1][2])
         for k, v in oldest[: len(_RECENT_FWD) - _RECENT_MAX]:
             _RECENT_FWD.pop(k, None)
             _RECENT_REV.pop(v[0], None)

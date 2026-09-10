@@ -111,7 +111,7 @@ def main() -> int:
 
         # 这些是本机环境的高置信度指纹；泛化的 C:\\Users\\<user> 示例不拦，
         # 以免文档/测试失去说明能力。
-        if re.search(r"C:\\\\Users\\\\87561|D:\\\\software\\\\work|D:\\\\repo", text):
+        if re.search(r"C:\\Users\\87561|D:\\software\\work|D:\\repo", text):
             findings.append(f"developer-local path is present: {rel}")
 
         if CONTROL_RE.search(text):

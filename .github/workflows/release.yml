@@ -288,6 +288,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
+          pattern: 'maskit-*'
           path: release-assets
           merge-multiple: false
       - name: Create draft and attach verified artifacts
@@ -297,13 +298,20 @@ jobs:
         run: |
           set -euo pipefail
           unsigned_count=$(find release-assets -name UNSIGNED.txt -type f | wc -l)
-          if [ "$unsigned_count" -gt 0 ]; then
-            note='At least one desktop bundle is UNSIGNED. Updater signatures and latest.json metadata were intentionally not generated; use the installer manually and do not enable automatic updates for these assets.'
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+            if [ "$unsigned_count" -gt 0 ]; then
+              echo "Release already exists and CI artifacts are unsigned. Preserving existing signed release assets."
+              exit 0
+            fi
           else
-            note='Desktop bundles were built and .sig files were verified where signing credentials were available. This workflow does not assemble or publish latest.json updater metadata; automatic update availability must be verified separately.'
-          fi
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            if [ "$unsigned_count" -gt 0 ]; then
+              note='At least one desktop bundle is UNSIGNED. Updater signatures and latest.json metadata were intentionally not generated; use the installer manually and do not enable automatic updates for these assets.'
+            else
+              note='Desktop bundles were built and .sig files were verified where signing credentials were available. This workflow does not assemble or publish latest.json updater metadata; automatic update availability must be verified separately.'
+            fi
             gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "$GITHUB_REF_NAME" --notes "$note"
+          fi
           while IFS= read -r -d '' file; do
             gh release upload "$GITHUB_REF_NAME" "$file" --clobber
           done < <(find release-assets -type f ! -name 'latest.json' -print0)

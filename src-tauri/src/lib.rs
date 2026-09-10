@@ -109,7 +109,7 @@ fn terminate_process_tree(pid: u32) {
                     .stderr(Stdio::null())
                     .status();
             }
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 }

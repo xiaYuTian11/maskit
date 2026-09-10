@@ -1311,7 +1311,7 @@ class StabilityFixTests(unittest.TestCase):
 
         panel._run_console = fake_run
         with mock.patch.object(panel.sys, "platform", "win32"):
-            cmdlines["4321"] = r"C:\Python313\python.exe D:\shield\transparent.py"
+            cmdlines["4321"] = r"C:\Python313\python.exe C:\Apps\shield\transparent.py"
             self.assertTrue(panel._is_mitmdump_pid(4321),
                             "加载了本项目 addon 的 python 子进程必须被识别为引擎进程")
             cmdlines["4321"] = r"C:\Python313\python.exe manage.py runserver"
@@ -3201,8 +3201,8 @@ class LegacyAutostartPurgeTests(unittest.TestCase):
     def test_new_value_present_removes_legacy_even_if_file_exists(self):
         """新旧并存 = 旧的必然过期：同一个产品不需要两条自启项。"""
         v = self._purge({
-            "Maskit": r'"D:\software\work\Maskit\Maskit.exe" --minimized',
-            "LLMShield": r'"D:\repo\src-tauri\target\release\llm-shield.exe" --minimized',
+            "Maskit": r'"C:\Program Files\Maskit\Maskit.exe" --minimized',
+            "LLMShield": r'"C:\Apps\LLMShield\llm-shield.exe" --minimized',
         })
         self.assertNotIn("LLMShield", v)
         self.assertIn("Maskit", v)
@@ -3220,7 +3220,7 @@ class LegacyAutostartPurgeTests(unittest.TestCase):
         改指到当前 exe 是壳侧 heal_autostart() 的活（只有壳知道自己的真实路径），
         这里保留现状把决定权交出去。
         """
-        val = r'"D:\repo\src-tauri\target\release\llm-shield.exe" --minimized'
+        val = r'"C:\Apps\LLMShield\llm-shield.exe" --minimized'
         v = self._purge({"LLMShield": val})
         self.assertEqual(v, {"LLMShield": val})
 
