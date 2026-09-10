@@ -5,7 +5,7 @@
 <h1 align="center">Data Maskit</h1>
 
 <p align="center">
-  <strong>Local LLM Privacy & Data Masking Gateway · Automatic Placeholder Masking · Typewriter Stream Restoration · No Telemetry by Default</strong>
+  <strong>Local Privacy Masking & Real-Time Restoration Gateway for LLMs · Automatic Token Masking · Millisecond Typewriter Stream Restoration · 100% Local Processing & Zero Telemetry</strong>
 </p>
 
 <p align="center">
@@ -13,122 +13,117 @@
   <a href="https://github.com/xiaYuTian11/maskit/releases"><img src="https://img.shields.io/github/v/release/xiaYuTian11/maskit?display_name=tag&color=emerald" alt="Release"></a>
   <a href="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml"><img src="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/Community-LINUX%20DO-2563eb?logo=linux&logoColor=white" alt="LINUX DO"></a>
-  <img src="https://img.shields.io/badge/Desktop-Windows-blueviolet.svg" alt="Desktop: Windows">
+  <a href="https://github.com/xiaYuTian11/maskit"><img src="https://img.shields.io/badge/QQ%20Group-489926214-12B7F5.svg" alt="QQ Group"></a>
+  <img src="https://img.shields.io/badge/Desktop-Windows%2010%2F11-blueviolet.svg" alt="Desktop: Windows">
   <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED.svg?logo=docker&logoColor=white" alt="Docker">
-  <img src="https://img.shields.io/badge/Stack-Tauri%202%20%7C%20React%2019%20%7C%20Python%203.13-orange.svg" alt="Tech Stack">
-  <a href="README.md"><img src="https://img.shields.io/badge/Language-中文-red.svg" alt="Chinese README"></a>
+  <a href="README.md"><img src="https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-lightgrey.svg" alt="Chinese README"></a>
 </p>
 
-<p align="center">
-  <b>English</b> | <a href="README.md">简体中文</a>
-</p>
+<p align="center"><a href="README.md">简体中文</a> | English</p>
 
 ---
 
 ## 💡 Why Maskit?
 
-When coding with **Cursor, Claude Code (with cc-switch), Codex, ChatGPT, or AI coding assistants**, you might unintentionally send sensitive credentials, private IPs, or personal identifiers (PII) to external LLM providers:
+When using **Cursor, Claude Code, Codex, Pi, OpenCode, ChatGPT, or any AI coding assistant**, sensitive information can easily be transmitted to external LLM providers:
 
-- 🔑 **Credentials & Secrets**: `sk-proj-...`, `ghp_...`, Cloud AccessKeys, JWT tokens, PEM private keys
-- 🌐 **Internal Infrastructure**: DB connection strings (`mysql://root:Pass123@192.168.1.50:3306/db`), private IP addresses (`10.x`, `172.16.x`, `192.168.x`, `100.64.x` CGNAT)
-- 👤 **PII & Business Secrets**: Phone numbers, ID cards, credit cards, customer names, internal project codenames
+- 🔑 **Credentials & Secrets**: `sk-proj-...`, `ghp_...`, Cloud AccessKeys, JWT Tokens, private keys;
+- 🌐 **Internal Infrastructure**: DB connection strings (`mysql://root:Pass123@192.168.1.50:3306/db`), private IP addresses (`10.x`, `172.16.x`, `192.168.x`);
+- 👤 **Business Privacy (PII)**: Phone numbers, ID numbers, real names, credit cards, proprietary internal project names.
 
-**Maskit's Mission**: A transparent, ultra-fast privacy gateway running entirely on your local machine. **It intercepts requests, replaces sensitive text with structured placeholders before upstream delivery, and seamlessly restores the original text in real-time typewriter stream.**
+**Maskit's Mission**: Act as a transparent local privacy gateway between your developer tools and external AI providers — **mask sensitive tokens before requests leave your machine, and restore them in real-time typewriter stream as answers arrive**!
+
+---
+
+## 🔄 Core Architecture & Real-World Comparison
+
+<p align="center">
+  <img src="docs/architecture-en.svg" alt="Data Maskit Architecture" width="100%" />
+</p>
+
+| Stage | Example Content | Practical Effect |
+|---|---|---|
+| **What You Typed** | `Connect to DB: mysql://root:Pass123@192.168.1.50:3306/db, contact Alice 13800138000` | Contains database passwords and real phone numbers |
+| **What LLM Receives** | `Connect to DB: {{CONNSTR_zkpmqx}}, contact {{TERM_fnqtsw}} {{PHONE_bcdfgh}}` | All sensitive data replaced; **external model never sees raw secrets** |
+| **What LLM Answers** | `Check firewall connectivity for {{CONNSTR_zkpmqx}} and verify permissions with {{TERM_fnqtsw}}` | Model reasons, plans, and writes code naturally using placeholders |
+| **What You Actually See** | `Check firewall connectivity for mysql://root:Pass123@192.168.1.50:3306/db and verify permissions with Alice` | **Restored in millisecond typewriter stream with zero workflow disruption!** |
+
+#### 🔬 Real-world Inspection & Highlight Diff
+<p align="center">
+  <img src="docs/screenshots/event-detail.png" alt="Real Masking & Restoration Details" width="85%" />
+</p>
+
+---
+
+## ✨ Highlights & Feature Overview
+
+### 🛡️ 1. Deep Masking with Multi-turn Consistency
+- **19 Built-in Scanner Rules**: API Keys/Tokens, PEM keys, DB connection strings, phone numbers, ID cards, emails, credit cards, private IPs;
+- **Custom Wordlists & Regex**: Categorized custom dictionary for names, codenames, and proprietary business terms; full regex support;
+- **Sliding-window Placeholder Reuse**: Placeholders remain consistent across long conversations. "Alice" is assigned the exact same token in turn 1 and turn 20, preserving model reasoning consistency.
+
+### ⚡ 2. Millisecond SSE Stream Takeover (Native Typewriter Flow)
+- Intercepts `text/event-stream` chunk by chunk;
+- Automatically reassembles split tokens across chunk boundaries, **maintaining native typewriter responsiveness without lag**.
+
+### 🔌 3. No Root CA Installation + Native Fallback Passthrough (Never Breaks Your API)
+- **Multi-port Reverse Proxy**: Dedicated local ports per model channel (e.g. `18701` for OpenAI, `18703` for Anthropic). Change `base_url` to local port without installing untrusted self-signed root CAs;
+- **Fallback Passthrough Guarantee**: If the proxy is stopped or closed, ports automatically fallback to raw transparent passthrough. **Your coding tools will never experience unexpected connection dropouts!**
+
+### 📊 4. Real-time Logs, Security Audit & Cost Tracking
+- Inspect full request/response diffs with one-click highlight mode;
+- Detect prompt leaks, model-swapping, and destructive commands;
+- Live token usage & model pricing cost estimation.
+
+### 🔒 5. 100% Local Execution, Zero Telemetry
+- All masking and unmasking happen inside your local process. No analytics, tracking SDKs, or cloud telemetry.
 
 ---
 
 ## 📸 Screenshots
 
-| Dashboard Overview | Client Management |
+| Dashboard | Client Port Management |
 |:---:|:---:|
 | ![Dashboard](docs/screenshots/dashboard.png) | ![Clients](docs/screenshots/clients.png) |
-| **Real-time Interception Logs** | **Sensitive Word Management** |
+| **Real-time Logs** | **Sensitive Words & Regex** |
 | ![Logs](docs/screenshots/logs.png) | ![Words](docs/screenshots/words.png) |
-| **Usage Stats & Cost Ranking** | **Security & Audit Center** |
+| **Cost & Token Stats** | **Security Audit** |
 | ![Stats](docs/screenshots/stats.png) | ![Audit](docs/screenshots/audit.png) |
 
 ---
 
-## 🔄 How It Works
+## 🛠️ Universal Integration Guide (Any Tool with Base URL Support)
 
-<p align="center">
-  <img src="docs/architecture-en.svg" alt="Data Maskit Architecture Diagram" width="100%" />
-</p>
-
-### Real-World Example: Before vs. After
-
-| Stage | Content Example | Note |
-|---|---|---|
-| **What You Enter** | `Diagnose connection: mysql://root:Pass123@192.168.1.50:3306/db, contact Alice 13800138000` | Contains sensitive database credentials & phone number |
-| **What the Model Receives** | `Diagnose connection: {{CONNSTR_zkpmqx}}, contact {{TERM_fnqtsw}} {{PHONE_bcdfgh}}` | Sensitive info replaced with tokens; LLM never sees raw credentials |
-| **Model's Response** | `Check firewall ports for {{CONNSTR_zkpmqx}} and verify permissions with {{TERM_fnqtsw}}` | The model reasons normally around placeholders |
-| **What You Actually See** | `Check firewall ports for mysql://root:Pass123@192.168.1.50:3306/db and verify permissions with Alice` | **Restored in real-time typewriter stream. Zero disruption to your workflow.** |
-
----
-
-## ✨ Key Features & Highlights
-
-- 🔒 **Local processing, no telemetry by default**: Masking and restoration run inside local processes. There is no analytics, crash reporting, or tracking SDK. Requests are still forwarded to the LLM upstreams you configure; price-catalog sync is off by default and desktop update checks run only when requested. See [SECURITY.md](SECURITY.md) for the complete outbound list. Ordinary PII may remain in the local event database, so read the retention and trust-boundary notes before deploying.
-- ⚡ **Millisecond SSE Stream Takeover (Typewriter Experience)**: Intercepts `text/event-stream` responses, restoring tokens chunk by chunk with automatic cross-chunk buffer reassembly.
-- 🔌 **Zero-Config Reverse Proxy (No CA Certificates Needed)**: Assigns dedicated local ports per upstream channel (e.g. `http://127.0.0.1:18701`). No system-wide root CA installation required.
-- 🛡️ **Native Fallback Passthrough (Never Breaks Your API)**:
-  - Many proxy tools cause system-wide AI failures if stopped or crashed.
-  - Maskit features an integrated **Fallback Passthrough**: even if the proxy is stopped, the port remains listening and transparently forwards raw requests to upstream. **Your development environment will never experience unexpected connection dropouts.**
-- 🎯 **Built-in Rules + Custom Wordlists**:
-  - Built-in: PEM private keys, DB connection strings, API keys/tokens, phone numbers, ID cards, bank cards, license plates, private IPv4/IPv6 ranges;
-  - Custom: Category-level toggles, whole-word boundary defense, and custom regular expressions.
-- 🌐 **Two Deployment Modes**:
-  - **Windows desktop app** (Tauri 2 + React 19): system tray, engine crash self-healing, auto-start, one-click bilingual switching (official desktop build currently supports Windows 10/11 x64; macOS & Linux desktop apps are not yet released);
-  - **Docker Private Gateway (amd64 / arm64)**: headless on Linux servers / NAS / macOS with the same embedded Web console and token-protected access.
-
----
-
-## 🛠️ Integration with AI Dev Tools
-
-Maskit allocates a dedicated local port for each upstream channel (default `18701` for OpenAI, `18702` for DeepSeek, `18703` for Anthropic; fully customizable).
+Integration is universal: **Simply change your tool's API Base URL to point to Maskit's local port**!
+> Default mapping: OpenAI `http://127.0.0.1:18701/v1` ｜ DeepSeek `http://127.0.0.1:18702/v1` ｜ Anthropic `http://127.0.0.1:18703`
 
 ### 1. Cursor
-Go to `Settings` → `Models` → set **OpenAI Base URL**:
-```text
-http://127.0.0.1:18701/v1
-```
-Enter your real API key (Maskit safely forwards it to upstream locally).
+Go to `Settings` → `Models`:
+- **OpenAI Base URL**: `http://127.0.0.1:18701/v1`
+- Enter your API Key (Maskit forwards it securely to upstream).
 
----
+### 2. Claude Code (with cc-switch)
+- In **[cc-switch](https://github.com/super-l/cc-switch)**, set the Claude channel **Base URL** to:
+  `http://127.0.0.1:18703`
+- Or launch from terminal:
+  ```bash
+  export ANTHROPIC_BASE_URL="http://127.0.0.1:18703"
+  claude
+  ```
 
-### 2. Claude Code (Super easy with cc-switch!)
-If you use the popular multi-channel tool **[cc-switch](https://github.com/super-l/cc-switch)**:
-1. Open `cc-switch` and edit your active Claude channel;
-2. Change the **Base URL** to Maskit's Anthropic port:
-   ```text
-   http://127.0.0.1:18703
-   ```
-3. Save and switch. All terminal `claude` prompts will be automatically masked before hitting the wire!
-
-> **Pure CLI Export**:
-> ```bash
-> export ANTHROPIC_BASE_URL="http://127.0.0.1:18703"
-> claude
-> ```
-
----
-
-### 3. Codex & Terminal AI Assistants
+### 3. Codex / Pi / OpenCode / Aider / CLI Tools
+Set environment variables:
 ```bash
 # Linux / macOS
 export OPENAI_BASE_URL="http://127.0.0.1:18701/v1"
 export OPENAI_API_KEY="your-api-key"
-codex
 
 # Windows PowerShell
 $env:OPENAI_BASE_URL = "http://127.0.0.1:18701/v1"
 $env:OPENAI_API_KEY = "your-api-key"
-codex
 ```
 
----
-
-### 4. Python / LangChain / LlamaIndex Code
+### 4. SDK & Code (Python / Node.js / LangChain)
 ```python
 from openai import OpenAI
 
@@ -139,7 +134,7 @@ client = OpenAI(
 
 response = client.chat.completions.create(
     model="gpt-4o",
-    messages=[{"role": "user", "content": "My database is mysql://root:Pass123@192.168.1.100:3306"}]
+    messages=[{"role": "user", "content": "Check DB: mysql://root:Pass123@192.168.1.100:3306"}]
 )
 print(response.choices[0].message.content)
 ```
@@ -148,17 +143,16 @@ print(response.choices[0].message.content)
 
 ## 🚀 Download & Deployment
 
-### Option A: Windows Desktop Client (Recommended)
+### Option A: Windows Desktop Client (Recommended for Personal Use)
 1. Head over to **[GitHub Releases](https://github.com/xiaYuTian11/maskit/releases)**;
-2. Download the latest `Maskit_<version>_x64-setup.exe`;
-3. Install and run. Click **Start Proxy** in the top bar or system tray.
+2. Download `Maskit_<version>_x64-setup.exe`;
+3. Run installer. Control from system tray with automated Minisign-verified updates.
 
 ---
 
-### Option B: Docker / Docker Compose (Linux, macOS, NAS, Team Server)
-**No source checkout required.** Pull the official multi-arch image directly from GitHub Container Registry (supports `linux/amd64` and `linux/arm64`):
+### Option B: Docker Private Gateway (Recommended for Teams / Servers / NAS)
+**No source checkout required.** Pull the official multi-arch image (native `linux/amd64` and `linux/arm64`):
 
-#### 1. One-line Quick Start (Recommended)
 ```bash
 docker run -d \
   --name maskit \
@@ -166,107 +160,45 @@ docker run -d \
   -p 127.0.0.1:5801:5801 \
   -p 127.0.0.1:18701-18710:18701-18710 \
   -v maskit_data:/data \
-  -e MASKIT_PANEL_TOKEN="change-me-to-a-long-random-string" \
+  -e MASKIT_PANEL_TOKEN="change-me-to-a-strong-token" \
   ghcr.io/xiayutian11/maskit:latest
 ```
 
-> **Security Note**: Defaults to binding on `127.0.0.1` loopback to prevent unauthenticated 187xx proxy channels from internet exposure. If sharing within a private network, place behind a reverse proxy (with TLS) or bind explicitly to a trusted internal IP.
-
-#### 2. Or with Docker Compose
-Create a standalone `docker-compose.yml` anywhere:
-
-```yaml
-services:
-  maskit:
-    image: ghcr.io/xiayutian11/maskit:latest
-    container_name: maskit
-    restart: unless-stopped
-    ports:
-      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_PANEL_HOST_PORT:-5801}:5801"         # Web console
-      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_OPENAI_HOST_PORT:-18701}:18701"       # OpenAI proxy
-      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_DEEPSEEK_HOST_PORT:-18702}:18702"     # DeepSeek proxy
-      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_ANTHROPIC_HOST_PORT:-18703}:18703"   # Anthropic proxy
-      - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_CUSTOM_HOST_START:-18704}-${MASKIT_CUSTOM_HOST_END:-18710}:18704-18710" # custom range
-    volumes:
-      - maskit_data:/data   # Persistent state (words, rules, config, event DB)
-    environment:
-      - TZ=Asia/Shanghai
-      - MASKIT_PANEL_TOKEN=change-me-to-a-long-random-string   # >=16 chars; use a secret file in production
-      # - MASKIT_PANEL_TOKEN_FILE=/run/secrets/maskit_panel_token
-volumes:
-  maskit_data:
-```
-
-Run with:
-```bash
-docker compose up -d
-```
-Open `http://<Server_IP>:5801/` and paste the token on the sign-in page. For a temporary convenience link use `/#token=<MASKIT_PANEL_TOKEN>`: a fragment is not sent in HTTP requests. The legacy `?token=` form remains compatible but is recorded in access logs and browser history. If no fixed token is configured, a random token is generated on every start and printed to `docker logs maskit`; production deployments should use a Docker secret via `MASKIT_PANEL_TOKEN_FILE`.
-
-> Ports 5801 and 187xx have no network-level isolation; expose them only to trusted networks (LAN / VPN / reverse proxy with TLS).
-
-When a reverse proxy terminates HTTPS, set `MASKIT_TRUST_PROXY=1` and make sure it overwrites (rather than appends) the single-hop `X-Forwarded-Proto` and `X-Forwarded-Host` headers. Leave it unset when the panel is directly exposed.
-
-**Updating**:
-```bash
-docker compose pull && docker compose up -d
-```
-Data lives in the named volume `maskit_data` and survives upgrades. Prefer a bind mount? Use `./maskit_data:/data` and run `chown -R 10001 ./maskit_data` first (the container runs as uid 10001).
-
-### Migrating an older installer from the former website
-
-The older installer points to the former update endpoint and cannot discover GitHub Releases by itself. For the first migration, download the new installer from [GitHub Releases](https://github.com/xiaYuTian11/maskit/releases) and install it over the existing directory; configuration, word lists, and events under `%APPDATA%\Maskit` are preserved. Subsequent update checks will use GitHub Releases. Export a configuration backup before upgrading so reinstalling the previous version remains a rollback option.
+Open `http://<server-ip>:5801/?token=<your-token>` in your browser!
+> **Security Tip**: Bound to `127.0.0.1` by default to avoid exposing unauthenticated proxy ports to the public internet. Place behind a reverse proxy (with TLS) for LAN sharing.
 
 ---
 
-### Option C: Build from Source
-
-#### Prerequisites
-- **Python** 3.13 (other versions untested)
-- **Node.js** 20+
-- **Rust** stable (only for the Tauri desktop shell; `Cargo.toml` declares 1.77 minimum)
+### Option C: Run from Source
 
 ```bash
 git clone https://github.com/xiaYuTian11/maskit.git
 cd maskit
 
-# 1. Python dependencies
+# 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Engine + Web console only (open http://127.0.0.1:5801, token in engine/proxy_token)
+# 2. Run engine & WebUI (token in engine/proxy_token)
 python engine/panel.py
 
-# 3. Frontend dev server (vite HMR, talks to the engine above)
-cd frontend && npm ci && npm run dev
-
-# 4. Desktop shell dev (requires Rust)
-cd frontend && npx tauri dev
-
-# 5. Tests
-python -m unittest discover -s tests
-python tests/smoke_stream.py
+# 3. Frontend dev server (Vite hot-reload)
+cd frontend && npm install && npm run dev
 ```
 
-The first run creates `engine/config.json` (gitignored) from `engine/config.example.json`. Windows installers are built with `.\build.ps1 -ReleaseOnly`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+---
+
+## 💬 Community & Support
+
+- **Official QQ Group**: **`489926214`** (Discussion, rule feedback & release updates);
+- Forum: **[LINUX DO Community](https://linux.do/)**;
+- Feedback: [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) & [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions);
+- Security Vulnerabilities: see [SECURITY.md](SECURITY.md).
 
 ---
 
-## 💬 Community
+## 📜 License
 
-See [platform and deployment support](docs/PLATFORM_SUPPORT.md) for the supported matrix, and use the [release checklist](docs/RELEASE_CHECKLIST.md) before publishing a tag.
-
-- **QQ Group (Chinese Community)**: **`489926214`**;
-- Questions & ideas: [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions) or **[LINUX DO](https://linux.do/)**;
-- Bugs / feature requests: [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) (templates provided);
-- Security vulnerabilities: private channel only, see [SECURITY.md](SECURITY.md).
-
----
-
-## 📜 License (AGPL-3.0)
-
-Data Maskit is licensed under the **[GNU AGPL-3.0](LICENSE)**. Free for personal, research, and open-source usage that conforms to the license terms.
-
----
+Data Maskit is released under the **[GNU AGPL-3.0](LICENSE)**. Free for personal developers, researchers, and open-source projects. For commercial redistribution or embedding into closed-source products, please comply with AGPL-3.0 terms.
 
 <p align="center">
   Made with ❤️ by TMW & Contributors.

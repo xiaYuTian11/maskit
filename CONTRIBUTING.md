@@ -17,8 +17,8 @@
 # 0. Python 3.13 + pip install -r requirements.txt（其它版本未验证）
 python -V   # 3.13.x
 
-# 1. 语法 + 单测 + 流式/出口冒烟
-python -m py_compile engine/*.py
+# 1. 语法 + 单测 + 流式/出口冒烟（Windows pwsh 下单引号或遍历）
+python -c "import py_compile, glob; [py_compile.compile(f) for f in glob.glob('engine/*.py')]"
 python -m unittest discover -s tests
 python tests/smoke_stream.py
 python tests/smoke_egress.py
@@ -75,11 +75,10 @@ python scripts/check-version.py
 - 单测不允许真实扫端口/杀进程（曾把运行中的 Shield 真实 taskkill）——涉及启停/端口必须 mock
 - 新增业务逻辑（规则/状态/统计/权限）必须补单测
 
-## 贡献者许可与商业化授权条款（Contributor License Terms）
+## 开发者原创声明与许可（Developer Certificate of Origin）
 
-为了保障 Data Maskit 开源项目的可持续维护，并消除未来可能进行的商业化授权、双许可（Dual-Licensing）或许可证调整所带来的版权法律纠纷，所有向本仓库提交 Pull Request（PR）的贡献者均默认同意以下条款：
+为维护健康的开源社区生态并保障所有使用者的权益，所有向本仓库提交 Pull Request 的贡献者均遵循行业标准的 DCO 约定：
 
-1. **原创性保证**：您保证所提交的代码、补丁或文档系您本人的原创作品，或您拥有将其完全授权给本项目的完整权利，不存在任何侵犯第三方专利、著作权或商业机密的情形。
-2. **完全商业化与双许可授权（Dual-Licensing Grant）**：向本项目提交贡献即视为您授予项目发起人与维护者永久（Perpetual）、全球范围、免版税（Royalty-free）、非排他性且不可撤销的权利，允许维护者在包括但不限于当前 AGPL-3.0 开源版本、未来可能发行的闭源商业版本、企业双许可商业授权（Commercial License）或后续许可证调整中使用、修改、衍生开发与再分发您的贡献内容，无需单独向您支付报酬或额外签署协议。
-3. **开源署名**：您的贡献将在 Git 提交记录与开源 Contributors 列表中永久署名保留。
-4. 如您不同意上述条款，请勿提交代码 PR 或在提交前联系项目维护者协商。
+1. **原创性保证**：您保证所提交的代码、补丁或文档系您本人的原创作品，或您拥有将其以 AGPL-3.0 协议贡献给本项目的完整权利，不存在侵犯第三方专利、著作权或商业机密的情形。
+2. **许可授予**：您授予本项目维护者与全球社区永久、非排他性、免版税的权利，允许将您的贡献内容按照本项目的开源许可证及项目正常维护演进进行使用、修改、集成与分发。
+3. **署名保留**：您的贡献将在 Git 提交历史记录与开源 Contributors 列表中永久署名保留。
