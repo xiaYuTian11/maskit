@@ -511,21 +511,7 @@ if ($ReleaseOnly) {
     # 自动组装 latest.json 更新元数据
     $latestJsonPath = "src-tauri\target\release\bundle\nsis\latest.json"
     if (-not $unsignedBuild -and (Test-Path $sig)) {
-        $sigContent = (Get-Content $sig -Raw -Encoding UTF8).Trim()
-        $pubDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-        $latestObj = @{
-            version = "v$newVer"
-            notes = "Data Maskit v$newVer 发布更新。"
-            pub_date = $pubDate
-            platforms = @{
-                "windows-x86_64" = @{
-                    signature = $sigContent
-                    url = "https://github.com/xiaYuTian11/maskit/releases/download/v$newVer/Maskit_${newVer}_x64-setup.exe"
-                }
-            }
-        }
-        $latestJsonStr = $latestObj | ConvertTo-Json -Depth 5
-        [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $bundle) "latest.json"), $latestJsonStr, (New-Object Text.UTF8Encoding $false))
+        & $py313 scripts\generate-latest-json.py (Split-Path -Parent $bundle) --tag "v$newVer"
         Write-Host "已自动组装更新元数据: $latestJsonPath" -ForegroundColor Green
     }
 
