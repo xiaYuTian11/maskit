@@ -38,6 +38,9 @@ hiddenimports = (
         # （engine_entry._run_as_mitmdump）。漏了它 = 干净机器上代理永远起不来。
         'mitmproxy.tools.main',
         'mitmproxy.tools.dump',
+        # mitmproxy 某些运行路径动态依赖 unittest（截图报错 No module named 'unittest'）
+        # PyInstaller 分析遗漏时会在打包机正常、用户机启动代理失败。
+        'unittest',
     ]
 )
 
@@ -73,7 +76,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'pytest', 'unittest', 'webview', 'pystray',
+    excludes=['tkinter', 'pytest', 'webview', 'pystray',
               'matplotlib', 'PyQt6', 'PyQt6.QtCore', 'PyQt6.QtGui', 'PyQt6.QtWidgets',
               # PyInstaller 的 excludes 是**大小写敏感**的模块名。
               # 原来只写了小写 'ipython'，而实际包名是 IPython —— 排除项形同虚设。

@@ -90,6 +90,8 @@ DEFAULT_PATHS = [
     "/v1/messages",
     "/chat/completions",
     "/v1/responses",
+    "/v1/rerank",
+    "/rerank",
 ]
 
 DEFAULT_TTL = 600
@@ -472,8 +474,10 @@ def extract_usage(body_text):
         data = json.loads(body_text)
         if isinstance(data, dict):
             u = data.get("usage") or {}
+            if not u and isinstance(data.get("meta"), dict):
+                u = data["meta"].get("tokens") or {}
             if isinstance(u, dict):
-                p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+                p = int(u.get("prompt_tokens") or u.get("input_tokens") or u.get("total_tokens") or 0)
                 c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
                 if p or c:
                     return {"prompt_tokens": p, "completion_tokens": c}

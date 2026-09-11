@@ -621,9 +621,9 @@ def _prefix_secret_regex():
     key = tuple(SECRET_PREFIXES)
     if key == _prefix_rx_key and _prefix_rx_cache is not None:
         return _prefix_rx_cache
-    # - / _ 视为等价（审计规则专项 P2）：用户配 sk- 不会漏掉 sk_live_。
-    # 把前缀中的 - 和 _ 都展开成 [-_] 字符类。
-    prefixes = [re.escape(p).replace(r"\-", r"[-_]").replace(r"\_", r"[-_]") for p in SECRET_PREFIXES if p]
+    # - / _ 视为等价（审计规则专项 P2）：用户配 sk- 不会漏掉 sk_live_，配 ghp_ 也兼容 ghp-。
+    # 把前缀中的 - 和 _ 都展开成 [-_] 字符类。逐字符安全转义，防二次替换嵌套。
+    prefixes = ["".join("[-_]" if ch in ("-", "_") else re.escape(ch) for ch in p) for p in SECRET_PREFIXES if p]
     if not prefixes:
         _prefix_rx_cache = None
         _prefix_rx_key = key
@@ -1202,6 +1202,7 @@ _READONLY_METHODS = {"GET", "HEAD", "OPTIONS"}
 _LLM_BODY_KEYS = (
     "messages", "prompt", "input", "instructions", "system", "contents",
     "message", "inputText", "inputs", "payload", "chat_history", "query",
+    "documents",
 )
 
 
@@ -2036,7 +2037,7 @@ _MASK_SKIP_KEYS = {"id", "tool_call_id", "tool_use_id", "name", "url", "data", "
 # tool_call_id 是 Chat Completions 的，tool_use_id 是 Anthropic 的。
 _MASK_CORRELATION_ID_KEYS = {"tool_call_id", "tool_use_id", "call_id"}
 # 业务区容器 key：进入后任何字段都照常扫描
-_MASK_BUSINESS_KEYS = {"input", "arguments", "parameters", "partial_json"}
+_MASK_BUSINESS_KEYS = {"input", "arguments", "parameters", "partial_json", "documents"}
 _MASK_MAX_DEPTH = 24
 # 顶层非对象 JSON 的合成根键：只在 request() 内部存在，发往上游前一定会拆掉。
 # 取一个绝不会与真实字段重名、且不落在任何跳过名单里的名字，保证叶子照常被扫描。
@@ -3733,7 +3734,9 @@ def _read_settings():
         for w, l in flat.items():
             cw.setdefault(str(w), str(l))
     prefixes = []
-    for p in cfg.get("secret_prefixes") or DEFAULT_SECRET_PREFIXES:
+    raw_sp = cfg.get("secret_prefixes")
+    raw_sp = DEFAULT_SECRET_PREFIXES if raw_sp is None else raw_sp
+    for p in raw_sp:
         p = str(p or "").strip()
         if p:
             prefixes.append(p)

@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.3'
+__version__ = '0.2.4'
 import json
 import copy
 import hashlib
@@ -2981,11 +2981,16 @@ def normalize_config(raw, warnings=None):
                 builtin_rules[k] = bool(v)
 
     prefixes = []
-    for prefix in raw.get("secret_prefixes", base["secret_prefixes"]):
-        prefix = str(prefix or "").strip()
-        if 1 <= len(prefix) <= MAX_PREFIX_LEN and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*-", prefix):
-            prefixes.append(prefix)
-    prefixes = _uniq(prefixes)[:100] or list(DEFAULT_SECRET_PREFIXES)
+    raw_prefixes = raw.get("secret_prefixes", base["secret_prefixes"])
+    if isinstance(raw_prefixes, list):
+        for prefix in raw_prefixes:
+            prefix = str(prefix or "").strip()
+            if 1 <= len(prefix) <= MAX_PREFIX_LEN and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", prefix):
+                prefixes.append(prefix)
+    if "secret_prefixes" in raw and isinstance(raw["secret_prefixes"], list) and len(raw["secret_prefixes"]) == 0:
+        prefixes = []
+    else:
+        prefixes = _uniq(prefixes)[:100] or list(DEFAULT_SECRET_PREFIXES)
 
     # 反向代理 upstream 路由表
     ups = []

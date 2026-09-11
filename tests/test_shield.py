@@ -1929,6 +1929,65 @@ class ShieldEngineTests(unittest.TestCase):
             self.assertEqual(flow.request.path, "/v1/chat/completions")
         self._with_no_reload(run)
 
+    def test_rerank_request_and_response_masking(self):
+        """测试 Rerank 请求体脱敏（同一请求内 query 和 documents 相同实体占位符一致）及响应直通还原。"""
+        def run():
+            tr.CAPTURE_MODE = "reverse"
+            tr.UPSTREAMS = [
+                {"name": "cohere", "base_path": "/cohere", "port": 18799, "target": "https://api.cohere.ai", "paths": ["/v1/rerank", "/rerank"]},
+            ]
+            tr.CUSTOM_WORDS = {"张三": "CUSTOMER"}
+            tr._cw_rx_cache = None
+            tr._cw_rx_key = None
+
+            body = {
+                "model": "rerank-v3.5",
+                "query": "请问张三的联系电话是多少？",
+                "documents": [
+                    "张三的电话是13800138000，职位是技术负责人。",
+                    "李四在市场部工作。",
+                    {"text": "紧急情况下可联系张三或者拨打13800138000。"}
+                ],
+                "top_n": 2,
+            }
+            flow = self._reverse_flow("/cohere/v1/rerank", body, listen_port=18799)
+            tr.request(flow)
+
+            # 验证请求体已脱敏
+            self.assertIsNone(getattr(flow, "response", None), "正常脱敏不阻断")
+            masked_body = json.loads(flow.request.content)
+            self.assertNotIn("张三", masked_body["query"])
+            self.assertNotIn("13800138000", masked_body["documents"][0])
+            self.assertNotIn("张三", masked_body["documents"][0])
+            self.assertNotIn("13800138000", masked_body["documents"][2]["text"])
+
+            # 验证 query 和 documents 中的“张三”使用了完全一致的占位符（Cross-Encoder 对齐）
+            import re
+            m_q = re.search(r"\{\{CUSTOMER_[a-z0-9]+\}\}", masked_body["query"])
+            self.assertIsNotNone(m_q)
+            customer_ph = m_q.group()
+            self.assertIn(customer_ph, masked_body["documents"][0])
+            self.assertIn(customer_ph, masked_body["documents"][2]["text"])
+
+            # 模拟云端响应：带有 scores
+            sid = flow.metadata["session_id"]
+            flow.response = SimpleNamespace(
+                status_code=200,
+                headers={"content-type": "application/json"},
+                content=json.dumps({
+                    "id": "rerank-123",
+                    "results": [
+                        {"index": 0, "relevance_score": 0.98},
+                        {"index": 2, "relevance_score": 0.85},
+                    ],
+                    "meta": {"tokens": {"input_tokens": 42}}
+                }).encode("utf-8")
+            )
+            tr.response(flow)
+            resp_data = json.loads(flow.response.content)
+            self.assertEqual(resp_data["results"][0]["relevance_score"], 0.98)
+        self._with_no_reload(run)
+
 
 class PanelConfigTests(unittest.TestCase):
     def test_panel_event_store_uses_panel_data_root(self):
@@ -1939,7 +1998,7 @@ class PanelConfigTests(unittest.TestCase):
             "target_domains": ["https://API.OpenAI.com/v1", "api.openai.com.evil.test", "bad host"],
             "domains_disabled": ["api.openai.com"],
             "api_paths": ["/v1/chat/completions", "bad path"],
-            "secret_prefixes": ["sk-", "ah-", "bad prefix", "x_"],
+            "secret_prefixes": ["sk-", "ah-", "bad prefix", "bad*prefix", "ghp_", "x_"],
             "sensitive": {"PERSON": [" 张三 ", ""], "<bad>": ["x"]},
             "session_ttl": 1,
             "debug": True,
@@ -1948,12 +2007,18 @@ class PanelConfigTests(unittest.TestCase):
         self.assertEqual(cfg["target_domains"], ["api.openai.com", "api.openai.com.evil.test"])
         self.assertEqual(cfg["domains_disabled"], ["api.openai.com"])
         self.assertEqual(cfg["api_paths"], ["/v1/chat/completions"])
-        self.assertEqual(cfg["secret_prefixes"], ["sk-", "ah-"])
+        self.assertEqual(cfg["secret_prefixes"], ["sk-", "ah-", "ghp_", "x_"])
         self.assertEqual(cfg["sensitive"], {"PERSON": ["张三"]})
         self.assertEqual(cfg["session_ttl"], panel.MIN_TTL)
         self.assertEqual(cfg["capture_mode"], "reverse")
         self.assertTrue(cfg["debug"])
         self.assertTrue(cfg["diagnostic_unmatched"])
+
+    def test_normalize_config_secret_prefixes_empty_allowed(self):
+        cfg = panel.normalize_config({
+            "secret_prefixes": [],
+        })
+        self.assertEqual(cfg["secret_prefixes"], [])
 
     def test_normalize_config_sensitive_group_and_builtin_rules(self):
         cfg = panel.normalize_config({
@@ -2017,6 +2082,21 @@ class PanelConfigTests(unittest.TestCase):
             tr._DATA_ROOT = old_root
             tr.STREAM_EXCLUDE_HOSTS = old_excl
             tr._cfg_mtime[0] = old_mtime
+
+    def test_secret_prefixes_empty_list_is_respected_not_falling_back(self):
+        """用户显式清空 secret_prefixes 时必须保留空列表，不能用 or 默认回退。"""
+        old_root = tr._DATA_ROOT
+        old_prefixes = list(tr.SECRET_PREFIXES)
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            tr._DATA_ROOT = tmp
+            (tmp / "config.json").write_text(json.dumps(
+                {"secret_prefixes": []}, ensure_ascii=False), encoding="utf-8")
+            s = tr._read_settings()
+            self.assertEqual(s["prefixes"], [])
+        finally:
+            tr._DATA_ROOT = old_root
+            tr.SECRET_PREFIXES = old_prefixes
 
     def test_legacy_opencode_exclude_is_cleared_once_then_respects_user(self):
         """历史误判清理：老配置里的 opencode.ai 被摘掉一次并落标记；

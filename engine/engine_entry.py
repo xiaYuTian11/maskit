@@ -19,7 +19,24 @@ pywebview 窗口/托盘（由 Tauri 壳承担）。
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
+import os
 import sys
+
+# PyInstaller 在 Windows GUI 模式（console=False / windowed）下，若无依附控制台，
+# sys.stdin / sys.stdout / sys.stderr 会被操作系统与运行时置为 None。
+# mitmproxy 的 TermLogHandler 会读取 sys.stdout 并无判空直接调用
+# vt_codes.ensure_supported(file) -> file.isatty()，当为 None 时必抛
+# AttributeError: 'NoneType' object has no attribute 'isatty'，
+# 导致点击启动代理时直接弹窗崩溃挂起（Windows MessageBox 阻塞）。
+# 此处在导入任何三方库前，确保标准流始终非空且具备完整 TextIO 行为（isatty() -> False）。
+for _stream_name, _stream_mode in (("stdin", "r"), ("stdout", "w"), ("stderr", "w")):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is None or not hasattr(_stream, "isatty"):
+        try:
+            setattr(sys, _stream_name, open(os.devnull, _stream_mode, encoding="utf-8"))
+        except Exception:
+            pass
+
 import threading
 
 import panel

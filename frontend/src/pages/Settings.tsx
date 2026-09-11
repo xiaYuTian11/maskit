@@ -38,7 +38,7 @@ import { getStatus } from '@/api/proxy'
 import { useMutation } from '@tanstack/react-query'
 import type { ShieldConfig, UpstreamConfig } from '@/types/api'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -100,7 +100,7 @@ const BUILTIN_RULE_GROUPS: { key: string; labelKey: string; rules: string[] }[] 
 const CLIENT_TYPE_PRESETS: Record<string, { labelKey: string; paths: string[]; headers: [string, string][] }> = {
   openai: {
     labelKey: 'settings.clientType.openai',
-    paths: ['/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings', '/v1/models'],
+    paths: ['/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings', '/v1/rerank', '/rerank', '/v1/models'],
     headers: [['Authorization', 'Bearer <YOUR_API_KEY>']],
   },
   anthropic: {
@@ -760,6 +760,21 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   const setSecret = (v: string[], msg?: string) => save({ secret_prefixes: v }, msg || t('settings.toast.prefixUpdated'))
 
+  const handleAddPrefix = () => {
+    const p = newPrefix.trim()
+    if (!p) return
+    if (secretPrefixes.includes(p)) {
+      toast(t('settings.words.prefixExists'), 'error')
+      return
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(p) || p.length > 32) {
+      toast(t('settings.words.prefixInvalid'), 'error')
+      return
+    }
+    setSecret([...secretPrefixes, p], `${t('settings.toast.prefixUpdated')} (+${p})`)
+    setNewPrefix('')
+  }
+
   const toggleAuditSignal = (sig: string, on: boolean) => {
     const audit = (cfg?.audit as Record<string, unknown>) ?? {}
     const signals = (audit.signals as Record<string, boolean>) ?? {}
@@ -1299,8 +1314,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </Card>
 
           <Card className="border bg-card">
-            <CardHeader>
+            <CardHeader className="space-y-1">
               <CardTitle className="text-sm font-semibold">{t('settings.words.secretPrefix')}</CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                {t('settings.words.secretPrefixDesc')}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap items-center gap-2">
@@ -1312,23 +1330,20 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 ))}
                 <div className="flex items-center gap-1.5">
                   <Input
-                    className="h-7 w-32 text-xs"
+                    className="h-7 w-36 text-xs font-mono"
                     placeholder={t('settings.words.prefixPh')}
                     value={newPrefix}
                     onChange={(e) => setNewPrefix(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && newPrefix.trim() && !secretPrefixes.includes(newPrefix.trim())) {
-                        setSecret([...secretPrefixes, newPrefix.trim()]); setNewPrefix('')
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        handleAddPrefix()
                       }
                     }}
                   />
                   <Button
                     size="sm" variant="ghost" className="h-6 text-[11px]"
-                    onClick={() => {
-                      if (newPrefix.trim() && !secretPrefixes.includes(newPrefix.trim())) {
-                        setSecret([...secretPrefixes, newPrefix.trim()]); setNewPrefix('')
-                      }
-                    }}
+                    onClick={handleAddPrefix}
                   >
                     {t('settings.words.prefixAdd')}
                   </Button>
