@@ -119,7 +119,16 @@ python scripts/check-version.py
 
 ## 5. 打包与发布规范
 
-- 打包统一使用根目录流水线脚本：
+- **一键全自动发版（推荐）**：使用 `release.ps1`，自动编排「前置 git pull 对齐 -> build.ps1 打包与门禁验证 -> git commit -> git tag -> 推送主分支与 Tag」：
+  ```powershell
+  # 自动读取并按当前/指定版本号完成构建、提交流水线与推送
+  .\release.ps1 -Version "0.2.6"
+
+  # 仅打包测试，不执行 git commit/push
+  .\release.ps1 -BuildOnly
+  ```
+
+- **底层打包流水线**：`build.ps1`（纯构建编排，不含 Git 提交命令）：
   ```powershell
   # 发布模式（不杀本机运行中的生产实例）
   .\build.ps1 -ReleaseOnly

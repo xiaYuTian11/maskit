@@ -2332,6 +2332,168 @@ class PanelConfigTests(unittest.TestCase):
             finally:
                 tr._DATA_ROOT = old_data_root
 
+    def test_extra_headers_placeholder_does_not_clobber_client_credential(self):
+        """注入请求头是占位符/空值时必须跳过，绝不覆盖客户端自带的真实凭据。
+
+        现场（用户报障 + 设置页截图）：客户端类型在 Anthropic 与 OpenAI 之间切换后，
+        extra_headers 里同时留下 x-api-key=<YOUR_API_KEY>、Authorization=Bearer <YOUR_API_KEY>
+        和 anthropic-version=2023-06-01 三行，用户没替换就保存。无条件覆盖会把客户端的真 key
+        顶成占位符字面量，上游（anyrouter 等中转站）只回 401「无效的令牌」，
+        而用户完全看不出是自己的配置把 key 顶掉了——官方直连能走、中转站不能走的现象即由此而来。
+        """
+        from mitmproxy.test import tflow
+        old_log = tr._log
+        tr._log = lambda line: None
+        tr._EXTRA_HEADER_SKIP_WARNED.clear()
+        try:
+            def flow_with(headers):
+                f = tflow.tflow()
+                for k, v in headers.items():
+                    f.request.headers[k] = v
+                return f
+
+            # 1) 占位符 + 客户端带真 key → 真 key 必须保住，同一配置里的正常头照常注入
+            f = flow_with({"x-api-key": "sk-ant-real", "anthropic-version": "2023-06-01"})
+            tr._apply_extra_headers(f, {"name": "anyrouter", "extra_headers": {
+                "x-api-key": "<YOUR_API_KEY>", "anthropic-version": "2023-06-01"}})
+            self.assertEqual(f.request.headers.get("x-api-key"), "sk-ant-real")
+            self.assertEqual(f.request.headers.get("anthropic-version"), "2023-06-01")
+
+            # 2) Bearer 形态的占位符同样跳过
+            f = flow_with({"Authorization": "Bearer sk-real"})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"Authorization": "Bearer <YOUR_API_KEY>"}})
+            self.assertEqual(f.request.headers.get("Authorization"), "Bearer sk-real")
+
+            # 3) 协议头带真实值时仍按既有语义覆盖（客户端发了旧版本号，用配置里的顶掉）
+            f = flow_with({"anthropic-version": "2023-01-01"})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"anthropic-version": "2023-06-01"}})
+            self.assertEqual(f.request.headers.get("anthropic-version"), "2023-06-01")
+
+            # 4) 客户端没带该协议头 → 照常注入（本字段存在的意义）
+            f = flow_with({})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"anthropic-beta": "context-1m-2025-08-07"}})
+            self.assertEqual(f.request.headers.get("anthropic-beta"), "context-1m-2025-08-07")
+
+            # 5) 整值不是占位符的正常值不受影响（只匹配整值，不做子串匹配）
+            f = flow_with({})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"x-custom": "a<b>c"}})
+            self.assertEqual(f.request.headers.get("x-custom"), "a<b>c")
+
+            # 6) 空值同样跳过：空字符串不是凭据，注入等于把客户端的头清掉，比不注入更糟
+            f = flow_with({"x-custom": "keep-me"})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"x-custom": "  "}})
+            self.assertEqual(f.request.headers.get("x-custom"), "keep-me")
+
+            # 7) 用户现场原样复现（设置页截图）：anthropic 预设与 openai 预设叠加后的三行头，
+            #    客户端自带真 key。跳过两个占位符后，真 key 必须原样上行、真头照常注入。
+            f = flow_with({"Authorization": "Bearer sk-ah-user-real-key", "x-api-key": "sk-ah-user-real-key"})
+            tr._apply_extra_headers(f, {"name": "anyrouter", "extra_headers": {
+                "Authorization": "Bearer <YOUR_API_KEY>",
+                "anthropic-version": "2023-06-01",
+                "x-api-key": "<YOUR_API_KEY>"}})
+            self.assertEqual(f.request.headers.get("Authorization"), "Bearer sk-ah-user-real-key")
+            self.assertEqual(f.request.headers.get("x-api-key"), "sk-ah-user-real-key")
+            self.assertEqual(f.request.headers.get("anthropic-version"), "2023-06-01")
+        finally:
+            tr._log = old_log
+            tr._EXTRA_HEADER_SKIP_WARNED.clear()
+
+    def test_extra_headers_credential_headers_are_never_injected(self):
+        """凭据类请求头一律禁止注入，无论值是真是假。
+
+        Maskit 只配 URL、只做透明转发，凭据归客户端所有（Claude Code / Cursor 自带）。
+        在这个字段里填凭据没有任何正当场景：填错就是必然 401，而上游只报「无效的令牌」，
+        用户完全看不出是自己配置造成的（实测 anyrouter 中转站报障即此因）。
+        与凭据无关的协议头（anthropic-version / anthropic-beta）不受影响。
+        """
+        from mitmproxy.test import tflow
+        old_log = tr._log
+        tr._log = lambda line: None
+        tr._EXTRA_HEADER_SKIP_WARNED.clear()
+        try:
+            def flow_with(headers):
+                f = tflow.tflow()
+                for k, v in headers.items():
+                    f.request.headers[k] = v
+                return f
+
+            # 1) 即使是真实值也不注入：凭据归客户端，配置里的值不得覆盖它
+            for name in ("Authorization", "authorization", "X-API-KEY", "x-api-key",
+                         "Cookie", "proxy-authorization", "x-goog-api-key",
+                         "x-auth-token", "private-token", "client-secret"):
+                f = flow_with({name: "sk-client-real"})
+                tr._apply_extra_headers(f, {"name": "up", "extra_headers": {name: "sk-configured-real"}})
+                self.assertEqual(f.request.headers.get(name), "sk-client-real", name)
+
+            # 2) 客户端没带时也不补——补上去等于拿配置里的凭据冒充上游凭据，语义越界
+            f = flow_with({})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"x-api-key": "sk-configured-real"}})
+            self.assertIsNone(f.request.headers.get("x-api-key"))
+
+            # 3) 头名大小写不敏感（HTTP 语义如此）
+            f = flow_with({"Authorization": "Bearer sk-real"})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {"AUTHORIZATION": "Bearer sk-other"}})
+            self.assertEqual(f.request.headers.get("Authorization"), "Bearer sk-real")
+
+            # 4) 只做精确匹配、不做子串匹配：自造头不被误伤
+            f = flow_with({})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {
+                "x-api-key-version": "2", "x-token-count": "9"}})
+            self.assertEqual(f.request.headers.get("x-api-key-version"), "2")
+            self.assertEqual(f.request.headers.get("x-token-count"), "9")
+
+            # 5) 与凭据无关的协议头照常注入
+            f = flow_with({})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "context-1m-2025-08-07"}})
+            self.assertEqual(f.request.headers.get("anthropic-version"), "2023-06-01")
+            self.assertEqual(f.request.headers.get("anthropic-beta"), "context-1m-2025-08-07")
+
+            # 6) 用户现场三行头：两个凭据头全部跳过，协议头照常注入
+            f = flow_with({"Authorization": "Bearer sk-ah-user-real-key", "x-api-key": "sk-ah-user-real-key"})
+            tr._apply_extra_headers(f, {"name": "anyrouter", "extra_headers": {
+                "Authorization": "Bearer <YOUR_API_KEY>",
+                "anthropic-version": "2023-06-01",
+                "x-api-key": "<YOUR_API_KEY>"}})
+            self.assertEqual(f.request.headers.get("Authorization"), "Bearer sk-ah-user-real-key")
+            self.assertEqual(f.request.headers.get("x-api-key"), "sk-ah-user-real-key")
+            self.assertEqual(f.request.headers.get("anthropic-version"), "2023-06-01")
+
+            # 7) 护栏有效性：凭据名单必须真的生效（空名单 → 用例必挂）
+            self.assertTrue(tr._CREDENTIAL_HEADER_NAMES)
+            self.assertIn("x-api-key", tr._CREDENTIAL_HEADER_NAMES)
+
+            # 8) 空值凭据头一律跳过：保存侧把空行整行丢掉 → 引擎侧视为"用户已删"
+            for name in ("Authorization", "x-api-key", "cookie", "X-Auth-Token"):
+                f = flow_with({})
+                tr._apply_extra_headers(f, {"name": "up", "extra_headers": {name: ""}})
+                self.assertNotIn(name.lower(), {k.lower() for k in f.request.headers.keys()}, name)
+                f = flow_with({})
+                tr._apply_extra_headers(f, {"name": "up", "extra_headers": {name: "   "}})
+                self.assertNotIn(name.lower(), {k.lower() for k in f.request.headers.keys()}, name)
+
+            # 9) 占位符值（<...>）一律跳过，与是否凭据头无关（防占位符覆盖真凭据）
+            f = flow_with({"Authorization": "Bearer sk-client-real"})
+            tr._apply_extra_headers(f, {"name": "up", "extra_headers": {
+                "Authorization": "Bearer <YOUR_API_KEY>",
+                "x-custom": "<YOUR_FOO>"}})
+            self.assertEqual(f.request.headers.get("Authorization"), "Bearer sk-client-real")
+            self.assertNotIn("x-custom", f.request.headers.keys())
+        finally:
+            tr._log = old_log
+            tr._EXTRA_HEADER_SKIP_WARNED.clear()
+
+    def test_credential_header_names_synced_with_frontend(self):
+        """引擎与前端的凭据头黑名单必须严格对齐，防止后续维护漂移。"""
+        settings_path = ROOT / "frontend" / "src" / "pages" / "Settings.tsx"
+        self.assertTrue(settings_path.exists(), "未找到前端 Settings.tsx")
+        text = settings_path.read_text("utf-8")
+        m = re.search(r"CREDENTIAL_HEADER_NAMES = new Set\(\[([\s\S]*?)\]\)", text)
+        self.assertIsNotNone(m, "前端 Settings.tsx 中未找到 CREDENTIAL_HEADER_NAMES 定义")
+        frontend_names = set(re.findall(r"'([^']+)'", m.group(1)))
+        self.assertEqual(tr._CREDENTIAL_HEADER_NAMES, frontend_names)
+
     def test_normalize_config_base_path_conflict_renames_and_warns(self):
         """用户显式填写的 base_path 撞车时：自动改名保命，且必须告警（单端口前缀模式契约变了）。"""
         warns = []
@@ -3254,6 +3416,7 @@ class PanelConfigTests(unittest.TestCase):
         old_lpp = panel._listening_port_pids
         killed = []
         old_ready_timeout = panel._START_READY_TIMEOUT
+        old_fallback = panel._start_fallback
 
         class FakePopen:
             pid = 12345
@@ -3290,6 +3453,7 @@ class PanelConfigTests(unittest.TestCase):
             panel.threading.Thread = FakeThread
             panel._emit_log = lambda line: None
             panel.subprocess.Popen = lambda args, **kw: FakePopen()
+            panel._start_fallback = lambda reason="": 0
             # 必须 mock 掉真实清理：FakePopen.pid=12345 是测试假值，失败分支若执行
             # 真实 taskkill /PID 12345 /T /F 可能误杀 Windows 上 PID 恰好复用的真实
             # 进程（含子进程树）。断言调用本身即验证「启动失败必须清理」语义。
@@ -3316,6 +3480,7 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = old_emit
             panel.subprocess.Popen = old_popen
             panel._kill_proxy_tree = old_kill
+            panel._start_fallback = old_fallback
             panel._START_READY_TIMEOUT = old_ready_timeout
 
     def test_issue19_start_proxy_timeout_alive_process_does_not_block_on_read(self):
@@ -3334,6 +3499,7 @@ class PanelConfigTests(unittest.TestCase):
         old_lpp = panel._listening_port_pids
         killed = []
         old_ready_timeout = panel._START_READY_TIMEOUT
+        old_fallback = panel._start_fallback
 
         class HangingStdout:
             def read(self, *args):
@@ -3369,6 +3535,7 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = lambda line: None
             panel.subprocess.Popen = lambda args, **kw: AliveFakePopen()
             panel._kill_proxy_tree = lambda pid: killed.append(pid)
+            panel._start_fallback = lambda reason="": 0
             panel._START_READY_TIMEOUT = 0.5
 
             ok, err = panel.start_proxy()
@@ -3391,6 +3558,7 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = old_emit
             panel.subprocess.Popen = old_popen
             panel._kill_proxy_tree = old_kill
+            panel._start_fallback = old_fallback
             panel._START_READY_TIMEOUT = old_ready_timeout
 
     def test_start_proxy_failure_message_decodes_child_output(self):
@@ -3412,6 +3580,7 @@ class PanelConfigTests(unittest.TestCase):
         old_kill = panel._kill_proxy_tree
         killed = []
         old_ready_timeout = panel._START_READY_TIMEOUT
+        old_fallback = panel._start_fallback
 
         class ExitedFakePopen:
             pid = 22222
@@ -3440,6 +3609,7 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = lambda line: None
             panel.subprocess.Popen = lambda args, **kw: ExitedFakePopen()
             panel._kill_proxy_tree = lambda pid: killed.append(pid)
+            panel._start_fallback = lambda reason="": 0
             panel._START_READY_TIMEOUT = 0.2
 
             ok, err = panel.start_proxy()
@@ -3462,6 +3632,7 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = old_emit
             panel.subprocess.Popen = old_popen
             panel._kill_proxy_tree = old_kill
+            panel._start_fallback = old_fallback
             panel._START_READY_TIMEOUT = old_ready_timeout
 
 

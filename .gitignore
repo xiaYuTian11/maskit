@@ -63,6 +63,7 @@ src-tauri/resources/engine/
 *.pdb
 
 # Local / IDE
+PROMOTION_GUIDE.md
 .vscode/
 .idea/
 *.swp

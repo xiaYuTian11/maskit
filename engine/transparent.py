@@ -1150,23 +1150,93 @@ def apply_reverse_routing(flow):
     return up, final
 
 
+# 注入请求头的占位符形态：**整个值**就是 <...>（可带 Bearer 前缀）。
+# 只匹配「整体就是占位符」，不做子串匹配——真实 header 值（application/json、
+# 真 key、URL）里不会整值长这样，所以不会误伤正常配置。
+_EXTRA_HEADER_PLACEHOLDER_RX = re.compile(r"^\s*(?:Bearer\s+)?<[^<>]{1,64}>\s*$", re.IGNORECASE)
+
+# 凭据类请求头：语义就是「承载身份凭据」，一律禁止通过 extra_headers 注入。
+#
+# 为什么单列一份名单：Maskit 的定位是**只配 URL 的透明转发网关**，凭据归客户端所有
+# （Claude Code / Cursor 等都会自带）。在这个字段里填凭据没有任何正当场景，只会把
+# 客户端自带的真 key 覆盖成配置里的值——填错就是必然 401，而用户从上游看到的只有
+# 「无效的令牌」，根本联想不到是自己的配置造成的（实测 anyrouter 中转站报障即此因）。
+#
+# 与凭据无关的协议头不受影响，例如 anthropic-version、anthropic-beta
+# （实测 claude-sonnet-4-5 必须带 anthropic-beta: context-1m-2025-08-07 才能用 1M 上下文）。
+#
+# 比对方式：头名转小写后精确匹配（HTTP 头名大小写不敏感），不做子串匹配，
+# 所以 x-api-key-version 这类自造头不会被误伤。
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "x-api-key",
+    "api-key",
+    "apikey",
+    "x-goog-api-key",
+    "x-auth-token",
+    "x-access-token",
+    "x-token",
+    "x-session-token",
+    "private-token",
+    "x-gitlab-token",
+    "x-github-token",
+    "x-amz-security-token",
+    "x-amz-credential",
+    "x-client-secret",
+    "client-secret",
+})
+
+# 同一 (客户端, 头名) 只告警一次，避免每个请求刷一行日志；config reload 时清空。
+_EXTRA_HEADER_SKIP_WARNED = set()
+
+
 def _apply_extra_headers(flow, upstream):
     """按 upstream 配置注入静态请求头（extra_headers）。
 
-    场景：上游要求 x-api-key/Authorization 等头，但客户端没带（或带的是测试键）
-    时，在转发前注入/覆盖。仅 reverse 模式（客户端流量必经本钩子）；
-    值含敏感信息只进内存配置，不落日志。
+    场景：上游要求某个**与凭据无关**的协议头，但客户端根本不发
+    （典型：anthropic-beta: context-1m-2025-08-07），在转发前注入。
+    仅 reverse 模式（客户端流量必经本钩子）；值含敏感信息只进内存配置，不落日志。
+
+    **三类值一律跳过注入**：
+
+      1. 凭据头（authorization / x-api-key / cookie …，见 `_CREDENTIAL_HEADER_NAMES`）：
+         凭据属于客户端，Maskit 只做 URL 转发。在这里填凭据只会覆盖客户端自带的真 key，
+         换回一个必然 401——而上游报的只是「无效的令牌」，用户看不出是自己配置造成的。
+      2. 占位符值（整个值就是 `<...>`，可带 Bearer 前缀，如 `<YOUR_API_KEY>`）：
+         永远不可能是真实凭据，注入等于用一个假 key 顶掉真 key。
+      3. 空值：空字符串不是凭据，注入等于把客户端的头清掉，比不注入更糟。
+
+    三者都跳过之后，请求退回「客户端自带凭据」的正常路径：用户即使没填也不会挂，
+    真要注入的协议头照常按真实值覆盖。
     """
     try:
         extra = (upstream or {}).get("extra_headers") or {}
         if not isinstance(extra, dict) or not extra:
             return
+        up_name = str((upstream or {}).get("name") or "")
         for key, value in extra.items():
             k = str(key or "").strip()
             if not k:
                 continue
+            v = str(value)
+            if k.lower() in _CREDENTIAL_HEADER_NAMES:
+                if (up_name, k) not in _EXTRA_HEADER_SKIP_WARNED:
+                    _EXTRA_HEADER_SKIP_WARNED.add((up_name, k))
+                    _log(f"[mask] 客户端「{up_name}」的注入请求头 {k} 属于凭据头，已跳过注入"
+                         f"（凭据请配在客户端里，Maskit 只做透明转发；"
+                         f"此处填凭据会覆盖客户端自带的真凭据并导致上游 401）")
+                continue
+            if not v.strip() or _EXTRA_HEADER_PLACEHOLDER_RX.match(v):
+                if (up_name, k) not in _EXTRA_HEADER_SKIP_WARNED:
+                    _EXTRA_HEADER_SKIP_WARNED.add((up_name, k))
+                    why = "值为空" if not v.strip() else f"仍是占位符 {v}"
+                    _log(f"[mask] 客户端「{up_name}」的注入请求头 {k} {why}，已跳过注入"
+                         f"（请在设置页填入真实值或删除该行；跳过不会影响客户端自带的凭据）")
+                continue
             try:
-                flow.request.headers[k] = str(value)
+                flow.request.headers[k] = v
             except Exception:
                 pass
     except Exception:
@@ -2598,8 +2668,9 @@ def request(flow: http.HTTPFlow):
         # 初始化必打的接口，直接拒绝会让人以为代理坏了。这里只决定"是否脱敏"，转发照旧。
         up_name = matched_up.get("name") or ""
         flow.metadata["shield_upstream"] = up_name
-        # 客户端级注入请求头（extra_headers）：如 x-api-key 等上游要求但客户端没带的
-        # 静态头。必须在转发前设置（客户端请求头在 request() 阶段可改）。
+        # 客户端级注入请求头（extra_headers）：只注入与凭据无关的协议头
+        # （凭据头与占位符/空值都会被 _apply_extra_headers 跳过）。
+        # 必须在转发前设置（客户端请求头在 request() 阶段可改）。
         _apply_extra_headers(flow, matched_up)
         # 出口代理必须在任何 return 之前挂上（含下面的 passthrough_unlisted_path 分支）
         _apply_egress_proxy(flow, matched_up)
@@ -3877,6 +3948,8 @@ def _maybe_reload(force=False):
     CUSTOM_WORDS.update(s["words"])
     _refresh_custom_words_sorted()
     _CUSTOM_WORD_RX_CACHE.clear()  # 词表变更后清编译缓存
+    # 配置变更后允许对注入请求头的占位符/空值重新告警一次（用户改了配置就该重新提醒）
+    _EXTRA_HEADER_SKIP_WARNED.clear()
     SENSITIVE_DISABLED = set(s.get("sensitive_disabled") or set())
     SENSITIVE_WORD_DISABLED = {
         k: set(v) for k, v in (s.get("sensitive_word_disabled") or {}).items()

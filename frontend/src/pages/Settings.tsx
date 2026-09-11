@@ -31,6 +31,7 @@ import {
   ExternalLink,
   Check,
   Search,
+  ChevronRight,
 } from 'lucide-react'
 import { getConfig, saveConfig, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup } from '@/api/settings'
 import { runAudit, cancelAudit, getAuditJob, getAuditReport } from '@/api/audit'
@@ -97,16 +98,20 @@ const BUILTIN_RULE_GROUPS: { key: string; labelKey: string; rules: string[] }[] 
 
 // ========== 上游表单 ==========
 // 客户端类型 → 路径预设（多选 chip 展示，用户可增删；自定义类型全部手输）
+// headers 只放「与凭据无关」的协议头。凭据头（Authorization / x-api-key）**绝不预填**：
+// 预设一旦填上 <YOUR_API_KEY> 这类占位符，用户不替换就保存，转发时会无条件覆盖客户端
+// 自带的真 key，上游只回 401「无效的令牌」，用户完全看不出是自己的配置把 key 顶掉了
+// （实测 anyrouter 中转站必现）。客户端本来就带凭据，真需要注入的场景手填真实值即可。
 const CLIENT_TYPE_PRESETS: Record<string, { labelKey: string; paths: string[]; headers: [string, string][] }> = {
   openai: {
     labelKey: 'settings.clientType.openai',
     paths: ['/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings', '/v1/rerank', '/rerank', '/v1/models'],
-    headers: [['Authorization', 'Bearer <YOUR_API_KEY>']],
+    headers: [],
   },
   anthropic: {
     labelKey: 'settings.clientType.anthropic',
     paths: ['/v1/messages', '/v1/complete'],
-    headers: [['x-api-key', '<YOUR_API_KEY>'], ['anthropic-version', '2023-06-01']],
+    headers: [['anthropic-version', '2023-06-01']],
   },
   gemini: {
     labelKey: 'settings.clientType.gemini',
@@ -115,6 +120,34 @@ const CLIENT_TYPE_PRESETS: Record<string, { labelKey: string; paths: string[]; h
   },
   custom: { labelKey: 'settings.clientType.custom', paths: [], headers: [] },
 }
+
+// 凭据类请求头：语义就是「承载身份凭据」，禁止通过「注入请求头」配置。
+// Maskit 只配 URL、只做透明转发，凭据归客户端（Claude Code / Cursor 等自带）。
+// 在这里填凭据只会覆盖客户端自带的真 key，换回一个必然 401，而上游只报「无效的令牌」，
+// 用户完全看不出是自己配置造成的（实测 anyrouter 中转站报障即此因）。
+// 必须与引擎侧 engine/transparent.py 的 _CREDENTIAL_HEADER_NAMES 保持一致。
+const CREDENTIAL_HEADER_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'x-api-key',
+  'api-key',
+  'apikey',
+  'x-goog-api-key',
+  'x-auth-token',
+  'x-access-token',
+  'x-token',
+  'x-session-token',
+  'private-token',
+  'x-gitlab-token',
+  'x-github-token',
+  'x-amz-security-token',
+  'x-amz-credential',
+  'x-client-secret',
+  'client-secret',
+])
+
+const isCredentialHeader = (k: string) => CREDENTIAL_HEADER_NAMES.has(k.trim().toLowerCase())
 
 function detectClientType(u: UpstreamConfig): string {
   // 按现有 paths 猜测类型（编辑已有客户端时回显）
@@ -141,8 +174,14 @@ function UpstreamForm({
   const [newPath, setNewPath] = useState('')
   const [newHeaderKey, setNewHeaderKey] = useState('')
   const [newHeaderVal, setNewHeaderVal] = useState('')
-  const { t } = useI18n()
+  const { t, tf } = useI18n()
   const extraHeaders = form.extra_headers ?? {}
+  // 「注入请求头」是可选的高级覆盖入口，默认收起——请求头本来就原样透传，不需要用户做任何事。
+  // 但已有配置（含历史遗留的占位符行）必须默认展开，否则用户看不到问题行、也删不掉。
+  // 受控 + onToggle 回写：初始值由 lazy initializer 一次性算出（不依赖 effect 时机，弹窗在
+  // Radix portal 里挂载时 effect 里改 DOM 不生效），用户手动开合时把 DOM 真实状态同步回 state，
+  // 于是重渲染永远写回正确值，不会把用户展开的状态弹回去。
+  const [advOpen, setAdvOpen] = useState(() => Object.keys(initial.extra_headers ?? {}).length > 0)
 
   const presets = CLIENT_TYPE_PRESETS[clientType] ?? CLIENT_TYPE_PRESETS.openai
   const presetPaths = presets.paths.filter((p) => !(form.paths ?? []).includes(p))
@@ -176,6 +215,30 @@ function UpstreamForm({
     const h = { ...extraHeaders }
     delete h[k]
     set('extra_headers', h)
+  }
+
+  // 保存前双重拦截「会覆盖客户端凭据」的配置：
+  //   1) 凭据类头名（Authorization / x-api-key / cookie …）——凭据归客户端，不该配在这里；
+  //   2) 占位符值（<YOUR_API_KEY>，可带 Bearer 前缀）——假 key 顶掉真 key，必然 401。
+  // 两者都会让上游只回「无效的令牌」，用户完全看不出是自己的配置造成的。
+  // 预设已不再预填凭据头，这里兜住手输与历史配置。
+  const PLACEHOLDER_HEADER_VAL = /^\s*(?:Bearer\s+)?<[^<>]{1,64}>\s*$/i
+  const saveChecked = () => {
+    // 空值的行不算违规：onSaveUpstream 会把它整行丢掉，效果等同「删行」，
+    // 否则用户清空值（而不是点删除）时会被永久卡在弹窗里，改不动也退不出。
+    const cred = Object.keys(extraHeaders).find(
+      (k) => isCredentialHeader(k) && String(extraHeaders[k] ?? '').trim() !== '',
+    )
+    if (cred) {
+      toast(tf('settings.upstream.headerCredential', { k: cred }), 'error')
+      return
+    }
+    const bad = Object.entries(extraHeaders).find(([, v]) => PLACEHOLDER_HEADER_VAL.test(String(v ?? '')))
+    if (bad) {
+      toast(tf('settings.upstream.headerPlaceholder', { k: bad[0], v: bad[1] }), 'error')
+      return
+    }
+    onSave(form)
   }
 
   return (
@@ -245,35 +308,61 @@ function UpstreamForm({
             </div>
           </div>
 
-          {/* 注入请求头：Key-Value 列表 */}
-          <div>
-            <Label className="text-xs">{t('settings.upstream.headers')}</Label>
-            <div className="mt-1.5 space-y-1.5">
-              {Object.entries(extraHeaders).map(([k, v]) => (
-                <div key={k} className="flex items-center gap-1.5">
-                  <Input className="h-7 w-36 font-mono text-[11px]" value={k} readOnly />
-                  <Input className="h-7 flex-1 font-mono text-[11px]" value={v} onChange={(e) => setHeader(k, e.target.value)} />
-                  <button type="button" className="shrink-0 text-muted-foreground opacity-60 hover:text-red-500" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+          {/* 注入请求头：可选的高级覆盖入口，默认收起。
+              请求头本来就原样透传（引擎只改写 Host，流式请求额外把 accept-encoding 置为
+              identity），不碰这里就绝不会注入任何头。仅在「客户端根本不发某个头、上游又要求」
+              时才需要展开填写，例如 anthropic-beta: context-1m-2025-08-07。 */}
+          <details
+            className="group rounded-lg border border-border/60 bg-muted/20"
+            open={advOpen}
+            onToggle={(e) => setAdvOpen(e.currentTarget.open)}
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground">
+              <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
+              {t('settings.upstream.headersAdvanced')}
+              {Object.keys(extraHeaders).length > 0 && (
+                <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px]">{Object.keys(extraHeaders).length}</span>
+              )}
+            </summary>
+            <div className="px-2.5 pb-2.5">
+              <div className="space-y-1.5">
+                {Object.entries(extraHeaders).map(([k, v]) => {
+                  // 凭据头标红：这类头不该配在这里，非空值时保存会被拦下（见 saveChecked）。
+                  // 历史配置里若残留，用户一眼就能看到该删哪行；值已清空的行等同于删行，不标红。
+                  const cred = isCredentialHeader(k) && String(v ?? '').trim() !== ''
+                  const base = 'h-7 font-mono text-[11px]'
+                  return (
+                    <div key={k} className="flex items-center gap-1.5">
+                      <Input
+                        className={`${base} w-36 ${cred ? 'border-destructive/60 text-destructive' : ''}`}
+                        value={k}
+                        readOnly
+                        title={cred ? t('settings.upstream.headerCredentialRow') : undefined}
+                      />
+                      <Input className={`${base} flex-1`} value={v} onChange={(e) => setHeader(k, e.target.value)} />
+                      <button type="button" className="shrink-0 text-muted-foreground opacity-60 hover:text-red-500" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+                    </div>
+                  )
+                })}
+                {presetHeaders.map(([k, v]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setHeader(k, v)}
+                    className="flex items-center gap-1.5 rounded-lg border border-dashed border-border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                  >
+                    <Plus className="h-3 w-3" /> {k}：{v}
+                  </button>
+                ))}
+                <div className="flex items-center gap-1.5">
+                  <Input className="h-7 w-36 font-mono text-[11px]" value={newHeaderKey} onChange={(e) => setNewHeaderKey(e.target.value)} placeholder={t('settings.upstream.headerNamePh')} />
+                  <Input className="h-7 flex-1 font-mono text-[11px]" value={newHeaderVal} onChange={(e) => setNewHeaderVal(e.target.value)} placeholder={t('settings.upstream.headerValPh')} />
+                  <Button size="sm" variant="ghost" className="h-7 shrink-0 text-[11px]" onClick={() => { if (newHeaderKey.trim()) { setHeader(newHeaderKey, newHeaderVal); setNewHeaderKey(''); setNewHeaderVal('') } }}>{t('settings.upstream.headerAdd')}</Button>
                 </div>
-              ))}
-              {presetHeaders.map(([k, v]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setHeader(k, v)}
-                  className="flex items-center gap-1.5 rounded-lg border border-dashed border-border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                >
-                  <Plus className="h-3 w-3" /> {k}：{v}
-                </button>
-              ))}
-              <div className="flex items-center gap-1.5">
-                <Input className="h-7 w-36 font-mono text-[11px]" value={newHeaderKey} onChange={(e) => setNewHeaderKey(e.target.value)} placeholder={t('settings.upstream.headerNamePh')} />
-                <Input className="h-7 flex-1 font-mono text-[11px]" value={newHeaderVal} onChange={(e) => setNewHeaderVal(e.target.value)} placeholder={t('settings.upstream.headerValPh')} />
-                <Button size="sm" variant="ghost" className="h-7 shrink-0 text-[11px]" onClick={() => { if (newHeaderKey.trim()) { setHeader(newHeaderKey, newHeaderVal); setNewHeaderKey(''); setNewHeaderVal('') } }}>{t('settings.upstream.headerAdd')}</Button>
               </div>
+              <p className="mt-1.5 text-[11px] text-muted-foreground">{t('settings.upstream.headerHint')}</p>
             </div>
-            <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.upstream.headerHint')}</p>
-          </div>
+          </details>
 
           {/* 单端口前缀模式才需要 base_path；反向代理模式无需 */}
           {captureMode !== 'reverse' && (
@@ -290,7 +379,7 @@ function UpstreamForm({
         </div>
         <DialogFooter>
           <Button size="sm" variant="outline" onClick={onClose}>{t('settings.upstream.cancel')}</Button>
-          <Button size="sm" onClick={() => onSave(form)}>{t('settings.upstream.save')}</Button>
+          <Button size="sm" onClick={saveChecked}>{t('settings.upstream.save')}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

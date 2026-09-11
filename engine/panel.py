@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.5'
+__version__ = '0.2.6'
 import json
 import copy
 import hashlib
@@ -1261,7 +1261,9 @@ def _start_passthrough():
             proxy_url = egress_url if use_proxy else None
             try:
                 srv = _PassthroughHTTPServer((LISTEN_HOST, port), _make_passthrough_handler(target, proxy_url=proxy_url, upstream_name=name))
-                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                t = threading.Thread(target=srv.serve_forever, daemon=True)
+                srv._serve_thread = t
+                t.start()
                 _passthrough["servers"][port] = srv
                 started += 1
             except OSError as e:
@@ -1278,13 +1280,16 @@ def _stop_passthrough():
     """停止全部兜底监听（透传或 503 占位），启动 mitmdump 前必须让出端口。
 
     先 shutdown() 让 serve_forever 循环退出（阻塞 ≤ poll_interval，默认 0.5s），
-    再 server_close() 关 socket。只调 server_close() 会留下仍在 select 已关
-    socket 的线程 → WinError 10038 刷屏，且干扰下一次 start_proxy。
+    再 server_close() 关 socket。
+    注意：在后台线程中以有界超时执行 srv.shutdown()，若服务从未在独立线程运行
+    （如单元测试 Mock 环境），避免直接调 shutdown() 触发 Python socketserver 标准库无界死锁。
     """
     with _passthrough["lock"]:
         for srv in _passthrough["servers"].values():
             try:
-                srv.shutdown()
+                t = threading.Thread(target=srv.shutdown, daemon=True)
+                t.start()
+                t.join(timeout=1.0)
             except Exception:
                 pass
         for srv in _passthrough["servers"].values():
@@ -3086,7 +3091,10 @@ def normalize_config(raw, warnings=None):
             # use_proxy：该 upstream 转发到真实上游时是否经由出口代理。
             # 逐 upstream 而非全局——境内中转（anyrouter 等）直连更快更稳，
             # 只有境外官方 API 需要代理，一刀切会把前者也绕远甚至绕挂。
-            # extra_headers：转发前注入的静态请求头 {key: value}（如 x-api-key），
+            # extra_headers：转发前注入的静态请求头 {key: value}，只用于**与凭据无关**的
+            # 协议头（如 anthropic-beta）。凭据头（Authorization / x-api-key / cookie 等）
+            # 由 transparent._CREDENTIAL_HEADER_NAMES 在注入时跳过——凭据归客户端所有，
+            # 这里保留原样存盘是为了让设置页能把历史遗留行展示出来给用户删。
             # 规范化：key 限安全字符、value 限长度，非法条目丢弃。
             extra_headers = {}
             raw_extra = u.get("extra_headers")

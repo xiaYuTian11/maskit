@@ -80,6 +80,15 @@
   * {
     @apply border-border;
   }
+  /* <details><summary> 的默认展开三角：Tailwind 的 list-none 只清掉 list-style-type，
+     WebKit/WKWebView（macOS 桌面壳）下三角由 ::-webkit-details-marker 控制，这里补一刀，
+     保证跨平台折叠区的外观一致（设置页「高级选项」依赖此行为）。 */
+  details > summary {
+    list-style: none;
+  }
+  details > summary::-webkit-details-marker {
+    display: none;
+  }
   body {
     @apply bg-background text-foreground;
     /* Inter 负责拉丁/数字（更现代），中文回落系统雅黑（渲染清晰） */
