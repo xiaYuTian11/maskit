@@ -278,6 +278,12 @@ jobs:
           fi
           # 移除未打包的散装 .app 目录，避免内部上百个散装文件被误当作 Release 资产上传或计入校验和
           rm -rf src-tauri/target/release/bundle/macos/*.app
+          # Tauri 打 dmg 时把 create-dmg 的辅助脚本和图标留在 bundle/dmg/，并把 create-dmg 自带的
+          # 支持文件摊在 bundle/share/ 下；上传路径是整棵 bundle 目录，这些中间产物会一起变成
+          # Release 资产（v0.2.7 就发出了 bundle_dmg.sh / icon.icns / eula-resources-template.xml /
+          # template.applescript）。这里只删中间产物，保留真正的 .dmg 产物本身。
+          rm -rf src-tauri/target/release/bundle/share
+          find src-tauri/target/release/bundle/dmg -type f ! -name '*.dmg' -delete || true
 
       - name: Generate SHA-256 checksums (Windows)
         if: runner.os == 'Windows'
