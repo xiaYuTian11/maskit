@@ -1471,6 +1471,63 @@ class ShieldEngineTests(unittest.TestCase):
             self.assertEqual(evt["choices"][0]["delta"]["content"], "{{NAME_ab")
         self._with_no_reload(run)
 
+    def test_sse_stream_error_path_does_not_drop_channel_pending(self):
+        """流式处理中途抛异常：各通道被扣住的半截占位符必须补发，不能静默丢弃。
+
+        异常分支原先只 `restore(state["buf"])`，而该函数 channel 默认是 ""，
+        正文/思考/工具参数通道里的 pending 会被丢掉 —— 客户端看到的文本凭空少一截。
+        """
+        def run():
+            sid = "sse-exc-pend"
+            tr._new_session(sid)
+            tr.sessions[sid]["rev"] = {"{{NAME_abcdef}}": "张三"}
+            flow = SimpleNamespace(
+                request=SimpleNamespace(method="POST", path="/v1/chat/completions", host="api.openai.com", headers={}),
+                response=SimpleNamespace(headers={"content-type": "text/event-stream"}, status_code=200, content=b""),
+                metadata={},
+            )
+            stream = tr._sse_stream_factory(flow, sid, "api.openai.com", "POST", "/v1/chat/completions", {})
+            # 必须在第一次调用之前打补丁：计数器从 chunk1 开始数，第 2 次事件才炸
+            orig = tr._restore_sse_event
+            calls = {"n": 0}
+
+            def boom(block, sid_, final=False):
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise RuntimeError("boom-injected")
+                return orig(block, sid_, final=final)
+
+            tr._restore_sse_event = boom
+            try:
+                out1 = stream(('data: %s\n\n' % json.dumps(
+                    {"id": "c1", "model": "gpt", "choices": [{"delta": {"content": "结尾{{NAME_ab"}}]},
+                    ensure_ascii=False)).encode("utf-8")).decode("utf-8")
+                # 半截占位符被扣住，本块只下发「结尾」
+                self.assertNotIn("{{NAME_ab", out1)
+                self.assertEqual(tr.sessions[sid]["pending"].get("c0.content"), "{{NAME_ab")
+                out2 = stream(('data: %s\n\n' % json.dumps(
+                    {"id": "c2", "model": "gpt", "choices": [{"delta": {"content": "后续文本"}}]},
+                    ensure_ascii=False)).encode("utf-8")).decode("utf-8")
+            finally:
+                tr._restore_sse_event = orig
+
+            # 扣留的残片与原始数据都必须出现，一个都不能少
+            self.assertIn("{{NAME_ab", out2)
+            self.assertIn("后续文本", out2)
+            # 补发事件必须独立成行：与残片粘成 `data: {…}data: {…}` 时，
+            # 严格按行解析的 SDK 会 JSON.parse 失败并整条丢弃（等于白补）
+            for line in out2.splitlines():
+                if line.startswith("data: "):
+                    self.assertEqual(line.count("data: "), 1, "补发事件与相邻内容粘连：%r" % line)
+            # 补发事件沿用同通道最后一个事件的模板，结构完整且带回残片原文
+            evts = [json.loads(l[6:]) for l in out2.splitlines()
+                    if l.startswith("data: ") and l[6:].strip().startswith("{")]
+            self.assertTrue(
+                any(e.get("choices", [{}])[0].get("delta", {}).get("content") == "{{NAME_ab" for e in evts),
+                "补发事件里没带回被扣住的残片：%r" % evts,
+            )
+        self._with_no_reload(run)
+
     def test_tool_call_arguments_roundtrip_preserves_json_shape(self):
         def run():
             flow = self._flow("api.openai.com", "/v1/chat/completions", {

@@ -26,12 +26,16 @@ Release v0.2.7: Harden placeholder restoration in command-line tool calls, add "
   *Fix: Fully restore escaped placeholders (`\{\{X\}\}`) including their backslashes, instead of leaving `\{\` / `\}\}` residue that silently breaks the resulting command — previously the real value appeared while the command stayed broken, which is more dangerous than no restore at all.*
 - 修复模型改写占位符**标签**（`IPPRIVATE` → `IP_PRIVATE`、或整段小写）导致完全还原不了的问题：按 6 位随机后缀反查即可救回（仅纯辅音后缀入索引，标签被整段换名时仍拒绝猜测，宁可失败可见）。同时修正这类还原在事件明细里被误标成「未还原」的问题。
   *Fix: Restore placeholders whose label the model rewrote (`IPPRIVATE` → `IP_PRIVATE`, or lowercased) via reverse-lookup on the 6-char random suffix. Only consonant suffixes are indexed, and renamed labels are still refused rather than guessed. Also corrects such restores being wrongly flagged as "not restored" in event details.*
+- 修复**流式响应中途出错时丢弃已扣留文本**的问题：还原函数默认只清空一个缓冲槽，正文、思考、工具参数各自通道里被扣住的半截占位符会被静默丢弃，客户端看到的文本凭空少一截（实测：`结尾{{NAME_ab` 之后直接跳到下一块）。现在异常分支会把各通道滞留一并补发，且补发事件独立成行——与残片粘成 `data: {…}data: {…}` 时，严格按行解析的 SDK 会整条丢弃，等于白补。
+  *Fix: Stop dropping withheld text when a streaming response fails mid-stream. The restore call only flushed a single buffer slot, so half-placeholders held per channel (content / reasoning / tool arguments) were silently discarded and the client saw a gap in the text. The error path now flushes every channel, and each flush event is emitted on its own line — glued onto a fragment as `data: {…}data: {…}` a strict line-based SDK would discard the whole event.*
 
 ### 优化 / Improvements
 - 增强 `generate-latest-json.py` 多平台签名解析，提前绑定版本标签防止未绑定变量异常。
   *Improve multi-platform signature parser in `generate-latest-json.py` to ensure robust manifest generation across platforms.*
 - 独立 Windows 与 Unix 平台的 Python 依赖安装步骤，规避跨 Shell 语法差异。
   *Separate platform-specific Python installation steps in Release workflow to prevent shell syntax conflicts.*
+- 消除还原路径上两处**正则回溯**引起的超线性耗时：`_PARTIAL_RX` 与 `_ESCAPED_PLACEHOLDER_RX` 中的无上限反斜杠量词（`\\*` / `\\+`）在「连续反斜杠」文本上会退化成 O(N²)，32KB 输入实测 293ms（流式场景下会拖慢每个 chunk，表现为编辑器里逐字输出卡顿）。量词封顶为 `\\{0,3}` / `\\{1,3}` 后恢复线性（同输入 0.4ms），且对全部真实转义形态逐条等价。已对引擎热路径上的所有正则做回溯扫描，确认无其它超线性项。
+  *Improve: Remove two super-linear regex backtracking hotspots in the restore path. Unbounded backslash quantifiers (`\\*` / `\\+`) in `_PARTIAL_RX` and `_ESCAPED_PLACEHOLDER_RX` degraded to O(N²) on runs of backslashes — 293 ms for a 32 KB input, which slowed every chunk in streaming mode and showed up as stuttering output. Capping them at `\\{0,3}` / `\\{1,3}` restores linear behaviour (0.4 ms for the same input) with identical results on every real escape form. All regexes on the engine hot path were scanned for backtracking; no other super-linear case remains.*
 
 ## [0.2.6] - 2026-09-11
 

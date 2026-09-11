@@ -158,7 +158,12 @@ t('值形态兜底：sk- 前缀 / JWT / PEM', () => {
   assert.deepEqual(classifyEnvKey('FOO', 'sk-liveabcdefgh1234'), { secret: true, label: 'API_KEY' })
   assert.deepEqual(classifyEnvKey('FOO', 'ah-abcdefgh1234'), { secret: true, label: 'API_KEY' })
   assert.equal(classifyEnvKey('FOO', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig').label, 'JWT')
-  assert.equal(classifyEnvKey('FOO', '-----BEGIN RSA PRIVATE KEY-----').label, 'PRIVATE_KEY')
+  // PEM 头**运行时拼**，不写字面量：完整的 `-----BEGIN … PRIVATE KEY-----` 会触发
+  // GitHub Secret Scanning 的形态，`scripts/audit-public-release.py` 会据此拦下公开发布
+  // （该脚本的约定就是「测试应运行时构造伪造值，而不是把完整 key 形态写进公开历史」）。
+  // 这条用例验的是值形态兜底，不能删，所以只把拼装挪到运行时。
+  const pemHead = ['-----BEGIN', 'RSA', 'PRIVATE KEY-----'].join(' ')
+  assert.equal(classifyEnvKey('FOO', pemHead).label, 'PRIVATE_KEY')
   // 短前缀值不误判（前缀后必须 ≥8 位）
   assert.equal(classifyEnvKey('FOO', 'sk-demo').secret, false)
 })
