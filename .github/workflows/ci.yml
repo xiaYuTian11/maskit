@@ -113,7 +113,15 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.13'
+      # pyyaml 只给下面这条 workflow 校验用，其余校验脚本一律零依赖
+      - name: Install workflow lint dependency
+        run: python -m pip install --quiet 'pyyaml>=6,<7'
+
       - name: Version numbers must agree across panel.py / tauri.conf.json / Cargo.toml / package.json
         run: |
           python scripts/check-version.py
           python scripts/audit-public-release.py
+
+      # CI 不 lint workflow，YAML 或 run 块写坏只在推送后（最坏是发版时）才炸
+      - name: Workflow YAML and shell syntax must be valid
+        run: python scripts/check-workflows.py

@@ -20,6 +20,8 @@ Release v0.2.7: Harden placeholder restoration in command-line tool calls, add "
   *Support native macOS DMG bundle compilation: Added `macos-latest` arm64 runner to GitHub Release workflow, producing `Maskit_<version>_aarch64.dmg` automatically on release.*
 - 统一跨平台自动更新元数据 `latest.json`，同时支持 Windows (`windows-x86_64`) 与 macOS (`darwin-aarch64`) 在线签名静默/增量升级。
   *Unified multi-platform `latest.json` updater manifest supporting both Windows (`windows-x86_64`) and macOS (`darwin-aarch64`) OTA signature-verified updates.*
+- 新增 `scripts/check-workflows.py` 并接入 CI 门禁（`version` job）：校验 `.github/workflows` 下每个 workflow 的 YAML 可解析、job 与 step 结构完整，并把显式 `shell: bash` 的步骤抽出来跑 `bash -n`。此前 CI 不 lint workflow，YAML 或 `run` 块写坏只会在推送后（最坏是发版那一刻）才暴露。
+  *Added `scripts/check-workflows.py` to the CI gate (`version` job): it checks that every workflow under `.github/workflows` parses as YAML with a well-formed job/step structure, and runs `bash -n` on steps that declare `shell: bash`. Previously CI did not lint workflows, so a broken YAML file or `run` block only surfaced after the push — at worst at release time.*
 
 ### 修复 / Bug Fixes
 - 修复模型把占位符写成**转义形态**（`\{\{IPPRIVATE_x\}\}`）时还原不彻底、留下 `\{\` 与 `\}\}` 残渣的问题：真值确实出来了，但命令仍然是坏的，用户会误判成「还原成功」，比彻底不还原更危险。现在整个转义块连同反斜杠一并替换，且流式响应的 chunk 边界落在反斜杠与花括号之间时也不再漏残渣。

@@ -104,9 +104,17 @@ cd ..
 
 # 5. 版本号四处一致（panel.py / tauri.conf.json / Cargo.toml / package.json）
 python scripts/check-version.py
+python scripts/audit-public-release.py
+
+# 6. workflow 校验（改动 .github/workflows 时必跑；依赖 pyyaml）
+python scripts/check-workflows.py
 ```
 
 与 CI（`.github/workflows/ci.yml` 的 `python` / `frontend` / `rust` / `version` 四个 job）完全对应。
+
+> `check-workflows.py` 是唯一需要额外依赖的校验脚本（`pyyaml`）：CI 不 lint workflow，
+> YAML 或 `run` 块写坏只会在「推送后 Actions 页报错」才暴露，最坏拖到打 tag 发版时才炸。
+> 只校验显式 `shell: bash` 的步骤（`shell: pwsh` 拿 bash 语法验必然误报）。
 
 ### 运行时文件约定
 
