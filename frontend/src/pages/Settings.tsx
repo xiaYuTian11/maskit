@@ -1376,11 +1376,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <p className="mt-0.5 text-[11px] text-muted-foreground">{t('settings.words.builtinRulesHint')}</p>
               </div>
               <div className="flex gap-1.5">
-                <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={() => {
+                <Button size="sm" variant="outline" className="h-6 text-[11px]" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, true]))
                   save(() => saveBuiltinRules(next), t('settings.toast.allOn'))
                 }}>{t('settings.words.allOn')}</Button>
-                <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={() => {
+                <Button size="sm" variant="outline" className="h-6 text-[11px]" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, false]))
                   save(() => saveBuiltinRules(next), t('settings.toast.allOff'))
                 }}>{t('settings.words.allOff')}</Button>
