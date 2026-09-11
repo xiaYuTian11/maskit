@@ -33,7 +33,7 @@ import {
   Search,
   ChevronRight,
 } from 'lucide-react'
-import { getConfig, saveConfig, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup } from '@/api/settings'
+import { getConfig, saveConfig, saveBuiltinRules, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup, type SaveConfigResponse } from '@/api/settings'
 import { runAudit, cancelAudit, getAuditJob, getAuditReport } from '@/api/audit'
 import { getStatus } from '@/api/proxy'
 import { useMutation } from '@tanstack/react-query'
@@ -726,12 +726,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
 
-  const save = async (next: Partial<ShieldConfig>, msg?: string) => {
+  const save = async (next: Partial<ShieldConfig> | (() => Promise<SaveConfigResponse>), msg?: string) => {
     setSaving(true)
-    // 串行化保存请求队列：后一个保存必须等待前一个完成后执行，且总是从 queryClient 或返回结果获取最新状态
+    // 串行执行保存请求；规则开关只提交变化的条目，不携带旧的整表快照。
     const task = saveQueueRef.current.then(async () => {
       try {
-        const r = await saveConfig(next)
+        const r = await (typeof next === 'function' ? next() : saveConfig(next))
         if (!r.ok) {
           toast(r.error || t('settings.toast.saveFailed'), 'error')
           return
@@ -849,8 +849,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   }
 
   const setRule = (rule: string, on: boolean) => {
-    const builtin = (cfg?.builtin_rules as Record<string, boolean>) ?? {}
-    save({ builtin_rules: { ...builtin, [rule]: on } }, tf(on ? 'settings.toast.ruleOn' : 'settings.toast.ruleOff', { rule }))
+    save(() => saveBuiltinRules({ [rule]: on }), tf(on ? 'settings.toast.ruleOn' : 'settings.toast.ruleOff', { rule }))
   }
 
   const setSecret = (v: string[], msg?: string) => save({ secret_prefixes: v }, msg || t('settings.toast.prefixUpdated'))
@@ -1379,11 +1378,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               <div className="flex gap-1.5">
                 <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, true]))
-                  save({ builtin_rules: next }, t('settings.toast.allOn'))
+                  save(() => saveBuiltinRules(next), t('settings.toast.allOn'))
                 }}>{t('settings.words.allOn')}</Button>
                 <Button size="sm" variant="outline" className="h-6 text-[11px]" onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, false]))
-                  save({ builtin_rules: next }, t('settings.toast.allOff'))
+                  save(() => saveBuiltinRules(next), t('settings.toast.allOff'))
                 }}>{t('settings.words.allOff')}</Button>
               </div>
             </CardHeader>

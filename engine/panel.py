@@ -3611,6 +3611,27 @@ def api_set_config():
                     "proxy_restarted": restarted})
 
 
+@app.post("/api/config/builtin_rules")
+def api_set_builtin_rules():
+    """Apply only the specified rule changes, without replacing a stale rule table."""
+    changes = request.get_json(silent=True)
+    if not isinstance(changes, dict) or not changes:
+        return jsonify({"ok": False, "error": "规则更新必须是非空 JSON 对象"}), 400
+    if any(rule not in DEFAULT_BUILTIN_RULES or type(enabled) is not bool
+           for rule, enabled in changes.items()):
+        return jsonify({"ok": False, "error": "规则名称必须有效，开关值必须是布尔值"}), 400
+    warnings = []
+    try:
+        with cfg_lock:
+            cfg = _load_config_locked()
+            cfg["builtin_rules"].update(changes)
+            cfg = save_config(cfg, warnings)
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
+    _emit_log("[panel] 内置规则已更新")
+    return jsonify({"ok": True, "config": cfg, "warnings": warnings, "proxy_restarted": False})
+
+
 @app.get("/api/config/backups")
 def api_config_backups():
     """列出可用配置备份（config.json.bak-*），带结构摘要供用户判断该回滚到哪份。

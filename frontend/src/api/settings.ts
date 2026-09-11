@@ -23,6 +23,14 @@ export function saveConfig(cfg: Partial<ShieldConfig>): Promise<SaveConfigRespon
   })
 }
 
+/** Update changed rules only; other tabs may have changed the remaining rules. */
+export function saveBuiltinRules(changes: Record<string, boolean>): Promise<SaveConfigResponse> {
+  return shieldFetch<SaveConfigResponse>('/api/config/builtin_rules', {
+    method: 'POST',
+    body: JSON.stringify(changes),
+  })
+}
+
 export function emergencyDisableOriginCheck(customToken?: string): Promise<{ ok: boolean; message: string; config?: ShieldConfig }> {
   return shieldFetch<{ ok: boolean; message: string; config?: ShieldConfig }>('/api/config/disable_origin_check', {
     method: 'POST',
