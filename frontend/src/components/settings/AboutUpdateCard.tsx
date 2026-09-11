@@ -9,7 +9,7 @@
  * - 版本号从引擎 /api/status 取真实值，不写死在前端（写死必然和实际产物脱节）。
  */
 import { useEffect, useRef, useState } from 'react'
-import { Download, RefreshCw, CheckCircle2, Loader2, Shield } from 'lucide-react'
+import { Download, RefreshCw, CheckCircle2, Loader2, Shield, Terminal, ExternalLink, AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -49,18 +49,14 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { v
   }, [autoInstall])
 
   const doCheck = async () => {
-    if (!isTauri()) {
-      toast(t('about.tauriOnly'), 'error')
-      return
-    }
     setChecking(true)
     setResult(null)
     try {
-      const r = await checkUpdate()
+      const r = await checkUpdate(version)
       setResult(r)
       if (r.ok && !r.has_update) toast(t('about.upToDate'))
-      // 顶栏「更新到 vX」跳进来时，检查到有新版就自动开始下载安装
-      if (r.ok && r.has_update && autoInstall) {
+      // 顶栏「更新到 vX」跳进来时，桌面端检查到有新版就自动开始下载安装
+      if (r.ok && r.has_update && autoInstall && isTauri()) {
         setTimeout(() => doInstall(), 300)
       }
       // r.ok === false 只在卡片里显示，不弹 toast：网络不好不是用户的错
@@ -157,9 +153,39 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { v
             {result.notes && (
               <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">{result.notes}</p>
             )}
-            <Button size="sm" className="h-8" onClick={doInstall}>
-              <Download className="mr-1.5 h-3.5 w-3.5" /> {t('about.downloadInstall')}
-            </Button>
+            {isTauri() ? (
+              <Button size="sm" className="h-8" onClick={doInstall}>
+                <Download className="mr-1.5 h-3.5 w-3.5" /> {t('about.downloadInstall')}
+              </Button>
+            ) : (
+              <div className="space-y-2.5 border-t border-border/50 pt-2.5">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                  <Terminal className="h-3.5 w-3.5 text-primary" />
+                  <span>{t('about.dockerUpdateTitle')}</span>
+                </div>
+                <div className="space-y-1.5 rounded-md bg-muted/60 p-2.5 font-mono text-[11px] text-foreground select-all">
+                  <div className="text-[10px] text-muted-foreground"># Docker Compose:</div>
+                  <div>docker compose pull && docker compose up -d</div>
+                  <div className="mt-1.5 text-[10px] text-muted-foreground"># Docker CLI:</div>
+                  <div>docker pull ghcr.io/xiayutian11/maskit:latest</div>
+                </div>
+                <div className="flex items-start gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-400">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{t('about.dockerPersistWarning')}</span>
+                </div>
+                {result.version && (
+                  <a
+                    href={`https://github.com/xiaYuTian11/maskit/releases/tag/${result.version}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                  >
+                    <span>{t('about.dockerReleaseLink')}</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+            )}
           </div>
         ) : result?.ok && !result.has_update ? (
           <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">

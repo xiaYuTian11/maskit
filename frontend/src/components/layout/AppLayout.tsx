@@ -46,6 +46,7 @@ function GithubIcon({ className }: { className?: string }) {
   )
 }
 import { useI18n } from '@/lib/i18n'
+import { isTauri } from '@/lib/shield-fetch'
 import { checkUpdate, updateTrayProxyStatus } from '@/lib/tauri'
 import { useNavigate, useLocation } from 'react-router-dom'
 
@@ -175,14 +176,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
     setCheckingUpdate(true)
     setUpToDateNotice(false)
     try {
-      const r = await checkUpdate()
+      const r = await checkUpdate(status?.version)
       if (!r.ok) {
         toast(r.error || t('layout.checkFail'), 'error')
       } else if (r.has_update) {
         setUpdateVersion(r.version ?? null)
         toast(tf('layout.newVersionToast', { v: r.version ?? '' }))
-        // 带 install=1：关于页的 AboutUpdateCard 收到后自动检查+下载，不用再手动点
-        navigate('/settings?tab=about&install=1')
+        // 带 install=1：桌面版跳进关于页自动检查+下载；非桌面版（Docker/Web）跳转至关于页查看镜像拉取与持久化更新指引
+        navigate(isTauri() ? '/settings?tab=about&install=1' : '/settings?tab=about')
       } else {
         setUpdateVersion(null)
         setUpToDateNotice(true)
@@ -206,7 +207,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     let cancelled = false
     const probe = async () => {
       try {
-        const r = await checkUpdate()
+        const r = await checkUpdate(status?.version)
         if (cancelled || !r.ok) return
         // 没有更新时要**清掉**旧值，否则用户手动装完新版，
         // 顶栏还挂着上一次查到的版本号不消失
@@ -222,6 +223,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       clearTimeout(first)
       clearInterval(timer)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // 页面标题（从路由映射，i18n）
@@ -410,7 +412,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             {updateVersion ? (
               <Button
                 size="sm"
-                onClick={() => navigate('/settings?tab=about&install=1')}
+                onClick={() => navigate(isTauri() ? '/settings?tab=about&install=1' : '/settings?tab=about')}
                 title={tf('layout.newVersionHint', { v: updateVersion ?? '' })}
                 className="h-8 gap-1.5 px-3 text-xs font-medium"
               >

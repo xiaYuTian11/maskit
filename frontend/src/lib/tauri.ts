@@ -4,7 +4,7 @@
  * - engine_state：引擎就绪/崩溃状态（§4.7）
  */
 import { invoke } from '@tauri-apps/api/core'
-import { shieldFetch } from './shield-fetch'
+import { isTauri, shieldFetch } from './shield-fetch'
 
 export interface EngineState {
   ready: boolean
@@ -62,12 +62,73 @@ export interface UpdateProgress {
   total?: number | null
 }
 
+function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0)
+  const pb = b.replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0
+    const nb = pb[i] ?? 0
+    if (na > nb) return 1
+    if (na < nb) return -1
+  }
+  return 0
+}
+
 /**
  * 检查更新。
+ * 桌面端（Tauri）走 Rust Updater 插件并校验签名；
+ * Web / Docker 容器端通过 GitHub Releases API 探测最新版本，返回升级信息与更新指引。
  * 约定：网络/服务端异常返回 ok=false 而不是抛异常——检查更新失败不该弹错误框打断用户。
  */
-export async function checkUpdate(): Promise<UpdateCheck> {
-  return await invoke<UpdateCheck>('check_update')
+export async function checkUpdate(currentVersion?: string): Promise<UpdateCheck> {
+  if (isTauri()) {
+    try {
+      return await invoke<UpdateCheck>('check_update')
+    } catch (e) {
+      return { ok: false, has_update: false, error: String(e) }
+    }
+  }
+
+  // 非 Tauri 桌面环境（Web 控制台 / Docker 容器部署）：通过 GitHub API 探测最新版本
+  try {
+    let curVer = currentVersion
+    if (!curVer) {
+      try {
+        const st = await shieldFetch<{ version: string }>('/api/status', { noToken: false })
+        curVer = st.version
+      } catch {
+        curVer = ''
+      }
+    }
+
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 6000)
+    const resp = await fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest', {
+      headers: { Accept: 'application/vnd.github.v3+json' },
+      signal: controller.signal,
+    })
+    clearTimeout(timeout)
+
+    if (!resp.ok) {
+      return { ok: false, has_update: false, error: `GitHub API HTTP ${resp.status}` }
+    }
+    const data = (await resp.json()) as { tag_name?: string; body?: string; published_at?: string }
+    const latestTag = String(data.tag_name || '').trim()
+    const cleanLatest = latestTag.replace(/^v/, '')
+    const cleanCur = (curVer || '').replace(/^v/, '')
+    const hasUpdate = Boolean(cleanLatest && cleanCur && compareSemver(cleanLatest, cleanCur) > 0)
+
+    return {
+      ok: true,
+      has_update: hasUpdate,
+      version: latestTag,
+      current_version: curVer ? `v${cleanCur}` : undefined,
+      notes: data.body || '',
+      pub_date: data.published_at,
+    }
+  } catch (e) {
+    return { ok: false, has_update: false, error: String(e) }
+  }
 }
 
 /** 下载并安装更新，完成后应用自动重启（调用后本进程即将退出，不要期待返回值）。 */

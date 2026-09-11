@@ -493,6 +493,9 @@ const zh: Record<string, string> = {
   'about.networkUnreachable': '网络不可达',  'about.updateFail': '检查更新失败（{err}）。不影响正常使用，稍后再试即可。',
   'about.checking': '检查中…',
   'about.tauriOnly': '在线更新只在桌面应用内可用',
+  'about.dockerUpdateTitle': 'Docker 镜像更新指引',
+  'about.dockerPersistWarning': '数据持久化提醒：重新部署前请确保容器挂载了持久化数据目录（如 -v maskit_data:/data），重新拉取镜像与重建容器后配置（config.json）与事件库将完整保留、绝不丢失！',
+  'about.dockerReleaseLink': '查看 GitHub 发版详情',
 
   // ===== 反馈 =====
   'fb.title': '反馈问题',
@@ -1413,6 +1416,9 @@ const en: Record<string, string> = {
   'about.networkUnreachable': 'Network unreachable',  'about.updateFail': 'Update check failed ({err}). Normal use is unaffected; try again later.',
   'about.checking': 'Checking…',
   'about.tauriOnly': 'Online updates only work in the desktop app',
+  'about.dockerUpdateTitle': 'Docker Upgrade Guide',
+  'about.dockerPersistWarning': 'Data Persistence Notice: Ensure a persistent volume is mounted (e.g. -v maskit_data:/data) before redeploying. Your config and audit logs will be completely preserved without data loss!',
+  'about.dockerReleaseLink': 'View GitHub Release',
 
   // ===== Feedback =====
   'fb.title': 'Report an Issue',
