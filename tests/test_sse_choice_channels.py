@@ -125,3 +125,43 @@ class SseChoiceChannelTests(unittest.TestCase):
                 self.assertEqual(deltas, [{"type": "response.output_text.delta", "output_index": 9,
                                            "delta": self.originals[0]}])
                 self.assertEqual(session["pending"], {})
+
+    def test_responses_done_events_name_their_own_channel(self):
+        """.done 必须报出自己那条通道，否则终态到了也不会刷它。
+
+        并与写入侧 `_sse_text_slots` 交叉验证：终态前缀和 delta 写的必须是同一个
+        通道名 —— 写成另一个名字等于刷了一条没人用的通道，残留照旧被扣着。
+        """
+        for kind, channel in (("reasoning_text", "reason"),
+                              ("function_call_arguments", "args")):
+            with self.subTest(kind=kind):
+                writer = tr._sse_text_slots(
+                    {"type": f"response.{kind}.delta", "output_index": 7, "delta": ""})[0][0]
+                self.assertEqual(writer, "r7." + channel)
+                self.assertEqual(
+                    tr._sse_terminal_prefixes(
+                        {"type": f"response.{kind}.done", "output_index": 7}),
+                    ("r7." + channel,))
+
+    def test_done_without_snapshot_still_releases_the_held_tail(self):
+        """上游偶尔发不带快照字段的 .done：残留必须就地补发，不能拖到 [DONE]。
+
+        没有终态前缀时 `_sse_terminal_prefixes` 返回 `()`，调用点的
+        `if ending is None or ending` 为假 → 根本不刷，直到 [DONE] 才吐出来。
+        """
+        token = self.tokens[0]
+        self.restore_events([
+            {"type": "response.reasoning_text.delta", "output_index": 0,
+             "delta": "think " + token[:-2]},
+        ])
+        self.assertIn("r0.reason", tr.sessions[self.sid]["pending"])
+        out = tr._restore_sse_event(
+            "data: " + json.dumps(
+                {"type": "response.reasoning_text.done", "output_index": 0}),
+            self.sid)
+        payloads = [json.loads(line[6:]) for line in out.splitlines()
+                    if line.startswith("data: ")]
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual(payloads[0]["delta"], self.originals[0])
+        self.assertEqual(payloads[1]["type"], "response.reasoning_text.done")
+        self.assertNotIn("r0.reason", tr.sessions[self.sid]["pending"])
