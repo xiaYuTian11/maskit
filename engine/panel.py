@@ -45,6 +45,8 @@ from shield_defaults import (
     OPENROUTER_MODELS_URL,
     PRICE_SYNC_INTERVAL_DAYS,
     MODEL_PRICES,
+    extract_usage,
+    SSEUsageAccumulator,
 )
 
 # 资源目录（打包后随 exe 发布的只读资源：templates、transparent.py、shield_defaults.py）
@@ -973,6 +975,9 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
                 # 几十~几百字节永远攒不满 64KB → 客户端等整个生成结束才见首字节
                 # （实测 read=2.0s 一次性返回 vs read1=0s 逐块返回）。
                 sent = 0
+                usage_stream = (SSEUsageAccumulator()
+                                if "text/event-stream" in resp.getheader("Content-Type", "").lower()
+                                else None)
                 resp_tail_chunks = []
                 tail_len = 0
                 while True:
@@ -984,22 +989,29 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
                     sent += len(chunk)
                     self.wfile.write(chunk)
                     self.wfile.flush()
-                    # 留存尾部 chunk（用于提取 usage 计费，最大 64KB）
-                    resp_tail_chunks.append(chunk)
-                    tail_len += len(chunk)
-                    if tail_len > 65536:
+                    if usage_stream is not None:
+                        # 用量逐行累计，避免长流把 message_start 的输入计数挤出尾部。
+                        try:
+                            usage_stream.feed(chunk)
+                        except Exception:
+                            pass  # 计费解析失败不影响原样转发
+                    else:
+                        # 非 SSE 响应仍只留存尾部，最大 64KB。
+                        resp_tail_chunks.append(chunk)
+                        tail_len += len(chunk)
                         while tail_len > 65536 and resp_tail_chunks:
                             tail_len -= len(resp_tail_chunks.pop(0))
                 self.wfile.flush()
-                # 尝试从尾部文本提取 token usage（供首屏 Token 与费用估算）
-                resp_usage = {}
-                if resp_tail_chunks:
-                    try:
-                        from shield_defaults import extract_usage
+                # SSE 保留独立的累计用量；兼容末行没有换行的上游。
+                resp_usage = usage_stream.usage if usage_stream is not None else {}
+                try:
+                    if usage_stream is not None:
+                        resp_usage = usage_stream.feed(b"", final=True)
+                    elif resp_tail_chunks:
                         tail_text = b"".join(resp_tail_chunks).decode("utf-8", errors="replace")
                         resp_usage = extract_usage(tail_text)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
                 # 透传期间记 PASS 事件：不脱敏时段的流量也要留痕
                 # （此前透传完全不记日志，用户无法确认流量经过了自己）
                 try:
