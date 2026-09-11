@@ -499,8 +499,8 @@ def extract_usage(body_text, previous=None):
                 if value >= 0:
                     updates[field] = value
                     break
-        # Preserve the existing total-only compatibility path.
-        if not updates and u.get("total_tokens") is not None:
+        # Preserve total-only snapshots, including explicit zero breakdowns.
+        if not any(updates.values()) and u.get("total_tokens") is not None:
             try:
                 total = int(u["total_tokens"])
                 if total >= 0:
@@ -534,3 +534,35 @@ def extract_usage(body_text, previous=None):
             continue
         merge(d)
     return usage
+
+
+class SSEUsageAccumulator:
+    """Merge usage from complete SSE data lines without retaining response text.
+
+    Network chunks can split a JSON line anywhere. Oversized lines are skipped
+    until the next newline, keeping this best-effort accounting buffer bounded.
+    """
+
+    MAX_LINE_BYTES = 65536
+
+    def __init__(self):
+        self.usage = {}
+        self._pending = b""
+        self._discard_line = False
+
+    def feed(self, chunk, final=False):
+        parts = chunk.split(b"\n")
+        for index, part in enumerate(parts):
+            if not self._discard_line:
+                if len(self._pending) + len(part) <= self.MAX_LINE_BYTES:
+                    self._pending += part
+                else:
+                    self._pending = b""
+                    self._discard_line = True
+            if index < len(parts) - 1 or final:
+                if not self._discard_line and self._pending.startswith(b"data:"):
+                    self.usage = extract_usage(
+                        self._pending.decode("utf-8", errors="replace"), previous=self.usage)
+                self._pending = b""
+                self._discard_line = False
+        return self.usage
