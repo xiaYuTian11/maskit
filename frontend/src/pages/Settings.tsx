@@ -2038,12 +2038,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </Label>
               <Input
                 type="number"
+                min={0}
+                step={1}
                 className="h-8 w-24 text-xs"
                 defaultValue={cfg?.log_retention_days ?? 7}
                 onBlur={(e) => {
                   const parsed = Number(e.target.value)
                   // Zero means unlimited retention; only empty/invalid input uses the default.
-                  const v = e.target.value.trim() === '' || !Number.isFinite(parsed) ? 7 : parsed
+                  const v = e.target.value.trim() === '' || !Number.isFinite(parsed) ? 7 : Math.max(0, Math.floor(parsed))
+                  e.target.value = String(v)
                   if (v !== (cfg?.log_retention_days ?? 7)) save({ log_retention_days: v }, t('settings.toast.retentionUpdated'))
                 }}
               />

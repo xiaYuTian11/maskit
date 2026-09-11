@@ -3515,6 +3515,10 @@ def _sse_terminal_prefixes(data):
         return (f"a{data.get('index', 0)}.",)
     if data.get("type") == "response.output_text.done":
         return (f"r{data.get('output_index', 0)}.text",)
+    if data.get("type") == "response.reasoning_text.done":
+        return (f"r{data.get('output_index', 0)}.reason",)
+    if data.get("type") == "response.function_call_arguments.done":
+        return (f"r{data.get('output_index', 0)}.args",)
     return tuple(f"c{_sse_choice_index(c, position)}."
                  for position, c in enumerate(data.get("choices", []) or [])
                  if isinstance(c, dict) and c.get("finish_reason"))
