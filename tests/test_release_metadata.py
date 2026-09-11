@@ -1,10 +1,13 @@
 """发布元数据脚本回归测试（`scripts/generate-latest-json.py`）。
 
 这个脚本**只在签名发布那一刻**被 GitHub Actions 的 `release-draft` job 调用，
-本地门禁完全覆盖不到它 —— 而 0.2.7 之前它是**真的坏的**：`repo` 与 `tag` 都在
-拼接下载 URL **之后**才赋值，只要存在 `.sig`（即签名发布）就
-`UnboundLocalError: cannot access local variable 'repo'` 直接崩，
-自动更新元数据其实从来没生成成功过，而且没有任何门禁会报出来。
+本地门禁完全覆盖不到它 —— 而 0.2.7 之前它是**真的坏的**：`c944e5e`（macOS DMG
+支持）把 `repo` 与 `tag` 的赋值挪到了拼接下载 URL **之后**，只要存在 `.sig`
+（即签名发布）就 `UnboundLocalError: cannot access local variable 'repo'` 直接崩，
+而且没有任何门禁会报出来。
+
+注意别把影响夸大：那笔回归发生在 v0.2.6 **之后**，v0.2.6 的 `latest.json` 是
+正常生成的（线上可下载、签名正确）；只是 v0.2.7 正好落在这个窗口里，所以必须修。
 
 所以这里锁的是三件事：
 1. 有签名文件时必须能跑通（就是上面那个崩溃的回归）；
