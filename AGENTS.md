@@ -134,6 +134,7 @@ python scripts/check-workflows.py
 - **发版日志中英双语规范（强制）**：
   - 每次发版时，`CHANGELOG.md` 与 GitHub Release 说明必须提供**中英双语（Bilingual）对照**，方便海内外开发者理解变更细节；
   - 格式遵循 Keep a Changelog，重大修复与破坏性变动需附带中英文说明。
+  - **发版前请确认 `CHANGELOG.md` 已有 `## [<version>]` 章节**（release-draft job 通过 `scripts/render-release-notes.py` 从 CHANGELOG 切出双语章节作为 Release body；找不到该章节脚本会 `SystemExit(1)`，发版 job 直接失败，不会生成空 body 静默上线）。
 
 - **多平台构建矩阵**：
   - **Windows 桌面端**：`x86_64` NSIS 安装包；
