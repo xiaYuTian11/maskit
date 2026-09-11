@@ -331,19 +331,34 @@ jobs:
           set -euo pipefail
           unsigned_count=$(find release-assets -name UNSIGNED.txt -type f | wc -l)
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            # Release 已存在 —— 走的是「移动 tag 重跑」场景：把 body 更新到最新的双语版本，
+            # 资产由下面的 `gh release upload --clobber` 覆盖；注意 upload 不会删除线上多余资产，
+            # 因此 bundle/share、bundle/dmg 下的中间产物需要单独清掉（见下面 stray 段）。
             echo "Release $GITHUB_REF_NAME already exists."
             if [ "$unsigned_count" -gt 0 ]; then
               echo "Release already exists and CI artifacts are unsigned. Preserving existing signed release assets."
               exit 0
             fi
+            note=$(python3 scripts/render-release-notes.py "${GITHUB_REF_NAME#v}")
+            gh release edit "$GITHUB_REF_NAME" --notes "$note"
           else
             if [ "$unsigned_count" -gt 0 ]; then
               note='At least one desktop bundle is UNSIGNED. No updater signature was produced for it, so automatic updates are not offered for those bundles; install them manually instead.'
             else
-              note='Desktop bundles were built and signed. latest.json updater metadata is assembled from the .sig files and uploaded with this release, so the built-in updater can update to it automatically.'
+              note=$(python3 scripts/render-release-notes.py "${GITHUB_REF_NAME#v}")
             fi
             gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "Data Maskit $GITHUB_REF_NAME" --notes "$note"
           fi
+          # 清理线上已存在的 Tauri 构建中间产物（仅 v0.2.7 那次出现的新增项；现有 Release 上的资产
+          # gh release upload 不会自动删除，这里手动清掉，避免发布页混进 bundle_dmg.sh / icon.icns /
+          # eula-resources-template.xml / template.applescript 这类不应分发的文件）。
+          existing_assets=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          for stray in bundle_dmg.sh icon.icns eula-resources-template.xml template.applescript; do
+            if printf '%s\n' "$existing_assets" | grep -qxF "$stray"; then
+              gh release delete-asset "$GITHUB_REF_NAME" "$stray" >/dev/null
+              echo "Removed stray asset: $stray"
+            fi
+          done
           while IFS= read -r -d '' file; do
             gh release upload "$GITHUB_REF_NAME" "$file" --clobber
           done < <(find release-assets -type f ! -name 'latest.json' -print0)
