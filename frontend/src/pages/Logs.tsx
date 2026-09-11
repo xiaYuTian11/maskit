@@ -141,26 +141,39 @@ export default function LogsPage() {
   )
   const logsQuery = useQuery<LogsCache>({
     queryKey: logsKey,
-    queryFn: async ({ queryKey }) => {
+    queryFn: async ({ queryKey, signal }) => {
       // 从缓存读上次的累积列表 + 游标（首次为空）
       const prev = queryClient.getQueryData<LogsCache>(queryKey)
       const prevList = prev?.list ?? []
-      const since = prevList.length > 0 ? prevList[prevList.length - 1].seq : 0
-      const resp = await getLogs({
-        since,
-        limit: 200,
-        type: filterType === FILTER_ALL ? undefined : filterType,
-        sensitive,
-        q,
-        fulltext,
-        slim: true,
-      })
-      if (resp.tail?.length) setTailData(resp.tail)
-      // 增量 append 去重（按 seq）
+      let since = prevList.length > 0 ? prevList[prevList.length - 1].seq : 0
+      let list = prevList
+      let tail = prev?.tail ?? []
       const seen = new Set(prevList.map((e) => e.seq))
-      const added = (resp.events as ShieldEvent[]).filter((e) => !seen.has(e.seq))
-      const list = added.length > 0 ? [...prevList, ...added] : prevList
-      return { list, tail: resp.tail ?? prev?.tail ?? [] }
+      // Catch up after backgrounding without skipping records. Bound each poll so
+      // sustained traffic cannot keep it running forever; the next poll continues.
+      for (let batch = 0; batch < 5; batch++) {
+        const resp = await getLogs({
+          since,
+          limit: 200,
+          type: filterType === FILTER_ALL ? undefined : filterType,
+          sensitive,
+          q,
+          fulltext,
+          slim: true,
+        }, signal)
+        tail = resp.tail ?? tail
+        const added = resp.events.filter((e) => {
+          if (seen.has(e.seq)) return false
+          seen.add(e.seq)
+          return true
+        })
+        if (added.length) list = [...list, ...added]
+        const next = resp.next_since ?? resp.events.at(-1)?.seq ?? since
+        if (!resp.has_more || next <= since) break
+        since = next
+      }
+      if (tail.length) setTailData(tail)
+      return { list, tail }
     },
     // 本页单独配置：不走全局 30s 缓存，挂载即发
     staleTime: 0,

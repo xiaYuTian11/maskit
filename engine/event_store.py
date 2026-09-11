@@ -1177,10 +1177,12 @@ def fetch_restore_items(now=None, limit=200):
 
 
 def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=False,
-                 event_type=None, max_limit=1000):
+                 event_type=None, max_limit=1000, ascending=False):
     """读取事件列表。
 
     since=id（返回 id>since 的，供增量轮询）；limit 约束返回条数；
+    ascending=True 按游标之后最早的记录分页，避免增量积压时跳过中间记录。
+    默认仍取最新记录，保持首次加载、导出和历史调用的语义。
     sensitive_only 隐藏 PASS/SKIP；query 搜索主机/路径/方法/状态/类型等结构化列。
     event_type 按事件类型精确过滤（下推到 SQL，命中 idx_events_type_ts）。
         它与 sensitive_only 互斥且优先级更高：显式指定类型时以类型为准，否则
@@ -1219,13 +1221,13 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
     sql = (
         "SELECT id, payload FROM events WHERE "
         + " AND ".join(where)
-        + " ORDER BY id DESC LIMIT ?"
+        + (" ORDER BY id ASC LIMIT ?" if ascending else " ORDER BY id DESC LIMIT ?")
     )
     params.append(limit)
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
-    return [_row_to_event(row) for row in reversed(rows)]
+    return [_row_to_event(row) for row in (rows if ascending else reversed(rows))]
 
 
 def prune_events(now=None, retention_days=RETENTION_DAYS):

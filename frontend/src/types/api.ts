@@ -154,6 +154,9 @@ export interface LogsResponse {
   db: string
   sensitive_only: boolean
   total: number
+  /** Older engines may not include pagination metadata. */
+  has_more?: boolean
+  next_since?: number
 }
 
 export interface LogDetailResponse {

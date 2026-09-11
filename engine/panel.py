@@ -4314,7 +4314,7 @@ def api_logs():
         prune_event_log()
         _last_log_prune[0] = time.time()
     since = _arg_int("since", 0, 0, 2**31)
-    limit = _arg_int("limit", 500, 1, 5000)
+    limit = _arg_int("limit", 500, 1, 1000)
     # 默认显示全部事件（含 SKIP/PASS 噪声）。曾默认 '1' 隐藏，用户会误以为日志丢了。
     sensitive_only = request.args.get("sensitive", "0") != "0"
     query = request.args.get("q", "")
@@ -4324,8 +4324,15 @@ def api_logs():
     event_type = request.args.get("type", "").strip().upper() or None
     if event_type and not re.fullmatch(r"[A-Z_]{1,32}", event_type):
         event_type = None
-    ev = fetch_events(since=since, limit=limit, sensitive_only=sensitive_only,
-                      query=query, fulltext=fulltext, event_type=event_type)
+    # First load shows the latest page; subsequent polls consume the oldest unseen
+    # records. Fetch one extra row to tell the client whether it needs to catch up.
+    incremental = since > 0
+    ev = fetch_events(since=since, limit=limit + int(incremental), sensitive_only=sensitive_only,
+                      query=query, fulltext=fulltext, event_type=event_type,
+                      max_limit=1001, ascending=incremental)
+    has_more = incremental and len(ev) > limit
+    ev = ev[:limit]
+    next_since = ev[-1]["seq"] if ev else since
     # slim：剔除只有详情弹窗才用的正文字段。这四个字段占 events 体积 79%
     # （dialog 34% + dialog_req 28% + resp_preview 9% + req_preview 8%），
     # 而列表行一个都不渲染。全量 1000 条实测 8.2MB → slim 后约 1.7MB。
@@ -4382,6 +4389,8 @@ def api_logs():
         "db": str(DB_PATH),
         "sensitive_only": sensitive_only,
         "total": len(ev),
+        "has_more": has_more,
+        "next_since": next_since,
     })
 
 
