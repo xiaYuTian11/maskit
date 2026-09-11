@@ -69,6 +69,29 @@ if ($BuildOnly) {
     exit 0
 }
 
+# 3.5 CHANGELOG 章节预检（放在 -BuildOnly 之后：只打包测试时不需要章节）
+#     release.yml 的 release-draft job 会用 scripts/render-release-notes.py 从 CHANGELOG.md
+#     切出 `## [<version>]` 章节作为 Release body（中英双语）。章节缺失时该脚本 SystemExit(1)，
+#     发版 job 直接失败 —— 但那时 tag 已经推到远端了，清理起来很麻烦。
+#     所以在 commit/tag 之前就拦住，让失败点留在本地。
+$changelogPath = Join-Path $Root "CHANGELOG.md"
+if (-not (Test-Path $changelogPath)) {
+    Write-Error "找不到 CHANGELOG.md ($changelogPath)。Release body 需要它，请先创建。"
+    exit 1
+}
+$changelogHeading = "## [$targetVer]"
+if (-not (Select-String -Path $changelogPath -Pattern $changelogHeading -SimpleMatch -Quiet)) {
+    Write-Host ""
+    Write-Host "CHANGELOG.md 里找不到章节: $changelogHeading" -ForegroundColor Red
+    Write-Host "GitHub Release 的双语说明是从该章节提取的，缺失会让云端发版 job 失败。" -ForegroundColor Yellow
+    Write-Host "请按 AGENTS.md「CHANGELOG 维护工作流」补好后重跑：" -ForegroundColor Yellow
+    Write-Host "    1) 把开发期间累积的 `## [Unreleased]` 条目改名为 $changelogHeading - <日期>" -ForegroundColor Yellow
+    Write-Host "    2) 或直接新建该章节并写入中英双语条目" -ForegroundColor Yellow
+    Write-Error "CHANGELOG 章节缺失，已中止发版（未产生任何 Git 提交或 Tag）。"
+    exit 1
+}
+Write-Host "CHANGELOG.md 已包含 $changelogHeading 章节。" -ForegroundColor Green
+
 # 4. 检查是否有需要提交的改动
 $status = (git status --porcelain)
 if (-not $status) {
