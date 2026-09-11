@@ -3376,7 +3376,7 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source):
         "text": [],       # 还原后文本留存（供审计/扫描），有上限
         "text_len": 0,
         "truncated": False,  # 文本留存已达上限，后续块不再累积
-        "usage": {},      # 最后一次采到的 token 用量（与文本留存解耦，见 _keep）
+        "usage": {},      # 累计 token 用量，保留未再次上报的字段（与文本留存解耦）
         "done": False,
         "calls": 0,       # 诊断：stream 回调被调用次数
         "bytes_in": 0,    # 诊断：累计输入字节
@@ -3387,7 +3387,7 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source):
         # （实测单次 completion 达 1 万+ token）会把带 usage 的尾部整个丢掉，
         # 「今日 Token 用量」永久少计。因此 usage 每块单独扫，不受留存上限影响。
         try:
-            u = _extract_usage(chunk)
+            u = _extract_usage(chunk, previous=state["usage"])
             if u:
                 state["usage"] = u
         except Exception:

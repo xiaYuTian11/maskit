@@ -457,36 +457,71 @@ def save_price_cache(path, prices, source):
         pass
 
 
-def extract_usage(body_text):
+def extract_usage(body_text, previous=None):
     """从响应 body 提取 token 用量（尽力而为，供统计与费用估算）。
 
     支持三种形态：
     - OpenAI chat/completions 非流式：顶层 usage.{prompt_tokens,completion_tokens}
     - Anthropic messages：usage.{input_tokens,output_tokens}
-    - SSE 流式：usage 在最后一个带 usage 的 chunk（客户端须带 include_usage，
-      否则上游不返回，采不到属正常）。SSE 拼接文本里逐行扫 data: 取最后命中。
+    - SSE：包括 message_start.message.usage 和 response.* 的 response.usage。
+      用量是累计计数：只更新本次出现的字段，不相加，也不把缺失字段清零。
+    previous 可传入此前流片段的结果；文本截断不影响跨片段累计。
     返回 {"prompt_tokens": int, "completion_tokens": int} 或 {}（没采到）。
     """
-    if not body_text:
-        return {}
     import json
+    usage = dict(previous or {})
+
+    def merge(data):
+        if not isinstance(data, dict):
+            return
+        u = data.get("usage")
+        if not isinstance(u, dict) or not u:
+            if data.get("type") == "message_start":
+                envelope = data.get("message")
+            elif str(data.get("type", "")).startswith("response."):
+                envelope = data.get("response")
+            else:
+                envelope = data.get("meta")
+            if isinstance(envelope, dict):
+                u = envelope.get("usage") or envelope.get("tokens")
+        if not isinstance(u, dict):
+            return
+        updates = {}
+        for field, aliases in (("prompt_tokens", ("prompt_tokens", "input_tokens")),
+                               ("completion_tokens", ("completion_tokens", "output_tokens"))):
+            for alias in aliases:
+                if alias not in u:
+                    continue
+                try:
+                    value = int(u[alias])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if value >= 0:
+                    updates[field] = value
+                    break
+        # Preserve the existing total-only compatibility path.
+        if not updates and u.get("total_tokens") is not None:
+            try:
+                total = int(u["total_tokens"])
+                if total >= 0:
+                    updates["prompt_tokens"] = total
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if updates:
+            usage.update(updates)
+            usage.setdefault("prompt_tokens", 0)
+            usage.setdefault("completion_tokens", 0)
+
+    if not body_text:
+        return usage
     try:
         data = json.loads(body_text)
-        if isinstance(data, dict):
-            u = data.get("usage") or {}
-            if not u and isinstance(data.get("meta"), dict):
-                u = data["meta"].get("tokens") or {}
-            if isinstance(u, dict):
-                p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
-                c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
-                if not p and not c and u.get("total_tokens"):
-                    p = int(u["total_tokens"])
-                if p or c:
-                    return {"prompt_tokens": p, "completion_tokens": c}
-    except Exception:
+    except (TypeError, ValueError):
         pass
-    # SSE：扫所有 data: 行，取最后带 usage 的 chunk（OpenAI 流式惯例）
-    last = {}
+    else:
+        merge(data)
+        return usage
+    # SSE data lines may contain partial usage snapshots from different events.
     for line in body_text.splitlines():
         if not line.startswith("data:"):
             continue
@@ -497,14 +532,5 @@ def extract_usage(body_text):
             d = json.loads(line_data)
         except Exception:
             continue
-        if not isinstance(d, dict):
-            continue
-        u = d.get("usage")
-        if not isinstance(u, dict):
-            continue
-        p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
-        c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
-        if p or c:
-            last = {"prompt_tokens": p, "completion_tokens": c}
-    return last
-
+        merge(d)
+    return usage
