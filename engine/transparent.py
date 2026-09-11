@@ -3270,6 +3270,19 @@ def _restore_sse_data(data, sid, final=False, final_prefixes=()):
     # 非增量事件（message_start / content_block_start / response.completed …）是完整快照，整树还原
     for k, v in list(data.items()):
         data[k] = _restore_tree(v, sid, k)
+    # Responses .done payloads replace the full value, rather than extending
+    # its deltas. Discard that channel's stale tail after restoring the snapshot;
+    # appending it would duplicate text or emit a delta after completion.
+    snapshot = {
+        "response.output_text.done": ("text", "text"),
+        "response.reasoning_text.done": ("text", "reason"),
+        "response.function_call_arguments.done": ("arguments", "args"),
+    }.get(data.get("type"))
+    if snapshot is not None and isinstance(data.get(snapshot[0]), str):
+        channel = f"r{data.get('output_index', 0)}.{snapshot[1]}"
+        s = sessions.get(sid) or {}
+        s.get("pending", {}).pop(channel, None)
+        s.get("flush_tmpl", {}).pop(channel, None)
 
 
 def _build_flush_event(tmpl_json, channel, leftover):

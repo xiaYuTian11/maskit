@@ -89,3 +89,39 @@ class SseChoiceChannelTests(unittest.TestCase):
                             for event in restored for item in event.get("choices", [])
                             for call in item.get("delta", {}).get("tool_calls", []))
         self.assertEqual(json.loads('"' + arguments + '"'), self.originals[1])
+
+    def test_responses_done_snapshots_clear_only_the_matching_channel(self):
+        cases = (("output_text", "text", "text", False),
+                 ("function_call_arguments", "arguments", "args", True),
+                 ("reasoning_text", "text", "reason", False))
+        for kind, field, channel, arguments in cases:
+            with self.subTest(kind=kind):
+                a, b = self.tokens
+                self.restore_events([
+                    {"type": f"response.{kind}.delta", "output_index": 4, "delta": b[:9]},
+                    {"type": "response.output_text.delta", "output_index": 9, "delta": a[:9]},
+                ])
+                snapshot = json.dumps({"name": b}) if arguments else b
+                done = {"type": f"response.{kind}.done", "output_index": 4, field: snapshot}
+                # Include the event header used by Responses clients, and check
+                # that no old delta is synthesized around the complete snapshot.
+                restored = tr._restore_sse_event(
+                    f"event: response.{kind}.done\ndata: " + json.dumps(done), self.sid)
+                self.assertEqual(restored.count("event: "), 1)
+                payloads = [json.loads(line[6:]) for line in restored.splitlines() if line.startswith("data: ")]
+                self.assertEqual(len(payloads), 1)
+                value = payloads[0][field]
+                self.assertEqual(json.loads(value) if arguments else value,
+                                 {"name": self.originals[1]} if arguments else self.originals[1])
+                session = tr.sessions[self.sid]
+                self.assertNotIn(f"r4.{channel}", session["pending"])
+                self.assertNotIn(f"r4.{channel}", session.get("flush_tmpl", {}))
+                self.assertEqual(session["pending"]["r9.text"], a[:9])
+                ending = self.restore_events([
+                    {"type": "response.output_text.delta", "output_index": 9, "delta": a[9:]},
+                    {"type": "response.completed", "response": {}}, "[DONE]",
+                ])
+                deltas = [d for d in ending if d.get("type", "").endswith(".delta")]
+                self.assertEqual(deltas, [{"type": "response.output_text.delta", "output_index": 9,
+                                           "delta": self.originals[0]}])
+                self.assertEqual(session["pending"], {})
