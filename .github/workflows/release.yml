@@ -115,7 +115,7 @@ jobs:
             shell: pwsh
           - platform: macos-arm64
             os: macos-latest
-            bundle: dmg
+            bundle: 'app,dmg'
             shell: bash
     runs-on: ${{ matrix.os }}
     permissions:
@@ -276,6 +276,8 @@ jobs:
           if [ "$mode" = unsigned ]; then
             printf '%s\n' 'UNSIGNED: no updater signature was generated for this bundle.' > src-tauri/target/release/bundle/UNSIGNED.txt
           fi
+          # 移除未打包的散装 .app 目录，避免内部上百个散装文件被误当作 Release 资产上传或计入校验和
+          rm -rf src-tauri/target/release/bundle/macos/*.app
 
       - name: Generate SHA-256 checksums (Windows)
         if: runner.os == 'Windows'
