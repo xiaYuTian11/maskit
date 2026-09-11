@@ -136,8 +136,8 @@ export default function LogsPage() {
 
   // —— 事件查询：累积列表放进 query cache，游标从缓存数据派生 ——
   const logsKey = useMemo(
-    () => ['logs', { sensitive, q, fulltext }] as const,
-    [sensitive, q, fulltext],
+    () => ['logs', { filterType, sensitive, q, fulltext }] as const,
+    [filterType, sensitive, q, fulltext],
   )
   const logsQuery = useQuery<LogsCache>({
     queryKey: logsKey,
@@ -149,6 +149,7 @@ export default function LogsPage() {
       const resp = await getLogs({
         since,
         limit: 200,
+        type: filterType === FILTER_ALL ? undefined : filterType,
         sensitive,
         q,
         fulltext,
@@ -243,7 +244,12 @@ export default function LogsPage() {
     if (exporting) return
     setExporting(true)
     try {
-      const resp = await exportLogs({ sensitive, q, fulltext })
+      const resp = await exportLogs({
+        type: filterType === FILTER_ALL ? undefined : filterType,
+        sensitive,
+        q,
+        fulltext,
+      })
       const blob = await resp.blob()
       const filename = `maskit-events-${dayjs().format('YYYY-MM-DD-HHmmss')}.json`
       if (isTauri()) {
@@ -590,10 +596,10 @@ export default function LogsPage() {
           })}
         </div>
 
-        {paged.length === 0 && !isFetching && (
+        {paged.length === 0 && !logsQuery.isLoading && (
           <div className="py-16 text-center text-sm text-muted-foreground">{t('logs.noEvents')}</div>
         )}
-        {paged.length === 0 && isFetching && (
+        {paged.length === 0 && logsQuery.isLoading && (
           <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             {t('logs.loading')}

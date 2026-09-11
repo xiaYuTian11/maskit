@@ -236,7 +236,7 @@ cd frontend && npm run dev
 ## 💬 社区与交流
 
 - **官方 QQ 交流群**：**`489926214`**（欢迎加入交流讨论，获取最新规则与版本动态）；
-- 论坛交流：**[LINUX DO 社区讨论专区](https://linux.do/)**；
+- 论坛交流：**[LINUX DO 社区讨论专区](https://linux.do/t/topic/2884715)**；
 - 建议反馈：[GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) 与 [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions)；
 - 安全漏洞：私密反馈渠道见 [SECURITY.md](SECURITY.md)。
 

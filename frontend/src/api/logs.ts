@@ -8,6 +8,8 @@ export interface LogsParams {
   /** 游标：id > since（增量轮询） */
   since?: number
   limit?: number
+  /** 事件类型（精确过滤，如下推 ERR / BLOCK / SCAN_WARN / MASK / RESTORE 等） */
+  type?: string
   /** 隐藏 SKIP/PASS */
   sensitive?: boolean
   /** 搜索词（结构化列） */
@@ -22,6 +24,7 @@ export function getLogs(params: LogsParams): Promise<LogsResponse> {
   const search = new URLSearchParams()
   if (params.since) search.set('since', String(params.since))
   if (params.limit) search.set('limit', String(params.limit))
+  if (params.type) search.set('type', params.type)
   if (params.sensitive) search.set('sensitive', '1')
   if (params.q) search.set('q', params.q)
   if (params.fulltext) search.set('fulltext', '1')
@@ -37,12 +40,14 @@ export function getLogDetail(seq: number): Promise<LogDetailResponse> {
 
 /** 导出（恒脱敏 JSON）；返回原始 Response 供落盘 */
 export function exportLogs(params: {
+  type?: string
   sensitive?: boolean
   q?: string
   fulltext?: boolean
   limit?: number
 }): Promise<Response> {
   const search = new URLSearchParams()
+  if (params.type) search.set('type', params.type)
   if (params.sensitive) search.set('sensitive', '1')
   if (params.q) search.set('q', params.q)
   if (params.fulltext) search.set('fulltext', '1')

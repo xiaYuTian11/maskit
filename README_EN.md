@@ -234,7 +234,7 @@ cd frontend && npm run dev
 ## 💬 Community & Support
 
 - **Official QQ Group**: **`489926214`** (Discussion, rule feedback & release updates);
-- Forum: **[LINUX DO Community](https://linux.do/)**;
+- Forum: **[LINUX DO Community](https://linux.do/t/topic/2884715)**;
 - Feedback: [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) & [GitHub Discussions](https://github.com/xiaYuTian11/maskit/discussions);
 - Security Vulnerabilities: see [SECURITY.md](SECURITY.md).
 

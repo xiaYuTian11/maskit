@@ -1177,11 +1177,14 @@ def fetch_restore_items(now=None, limit=200):
 
 
 def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=False,
-                 max_limit=1000):
+                 event_type=None, max_limit=1000):
     """读取事件列表。
 
     since=id（返回 id>since 的，供增量轮询）；limit 约束返回条数；
     sensitive_only 隐藏 PASS/SKIP；query 搜索主机/路径/方法/状态/类型等结构化列。
+    event_type 按事件类型精确过滤（下推到 SQL，命中 idx_events_type_ts）。
+        它与 sensitive_only 互斥且优先级更高：显式指定类型时以类型为准，否则
+        「只看 SKIP」这类查询会被 sensitive_only 的 NOT IN ('SKIP','PASS') 判成空集。
     fulltext=True 时才额外扫描 payload 大字段（LIKE 无索引，逐行读 payload 代价高，
     默认关闭；审计性能项 P0-5——搜索框默认走结构化列，全文检索由前端显式开启）。
 
@@ -1195,7 +1198,10 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
     limit = max(1, min(int(limit or 500), int(max_limit or 1000)))
     where = ["id > ?"]
     params = [since]
-    if sensitive_only:
+    if event_type:
+        where.append("type = ?")
+        params.append(str(event_type).strip().upper())
+    elif sensitive_only:
         # 「隐藏透传」：隐藏 PASS/SKIP（过网关但未脱敏的只读/非LLM）
         # MASK/RESTORE/BLOCK/BYPASS 即使 count=0 也显示
         where.append("type NOT IN ('SKIP', 'PASS')")

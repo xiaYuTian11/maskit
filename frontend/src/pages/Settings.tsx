@@ -725,6 +725,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
       setAddWordVal('')
       return
     }
+    // 短词告警（不阻断）：自定义词是无边界的字面子串匹配，1-2 字符会连带打码 data1 这类
+    // 标识符（实测加 "a1" 会把 "data1" 变成 "dat{{TERM_x}}"），把上游 prompt 改坏且极难排查。
+    // re: 正则词走用户自己的模式，不套用这个长度门槛。
+    if (v.length < 3 && !v.startsWith('re:')) {
+      toast(tf('settings.toast.wordTooShort', { word: v, n: v.length }), 'error')
+    }
     const next = { ...words, [cat]: [...existing, v] }
     save({ sensitive: next }, t('settings.toast.added'))
     setAddWordVal('')
@@ -767,7 +773,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
       toast(t('settings.words.prefixExists'), 'error')
       return
     }
-    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(p) || p.length > 32) {
+    if (!/^[@A-Za-z0-9][@A-Za-z0-9_.-]*$/.test(p) || p.length > 32) {
       toast(t('settings.words.prefixInvalid'), 'error')
       return
     }
@@ -1125,13 +1131,36 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                         title={t('settings.words.regexTitle')}
                         value={cat === addWordCat ? addWordVal : ''}
                         onChange={(e) => setAddWordVal(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && addWord(cat, addWordVal)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            if (addWordVal.trim()) addWord(cat, addWordVal)
+                          }
+                        }}
                         onBlur={() => { if (!addWordVal.trim()) setAddWordCat(null) }}
                         autoFocus
                       />
                     ) : null}
-                    <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" title={t('settings.words.regexTitle')} onClick={() => { setAddWordCat(cat); setAddWordVal('') }}>
-                      {t('settings.words.addWord')}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-2 text-[11px]"
+                      title={t('settings.words.regexTitle')}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        if (addWordCat === cat) {
+                          if (addWordVal.trim()) {
+                            addWord(cat, addWordVal)
+                          } else {
+                            setAddWordCat(null)
+                          }
+                        } else {
+                          setAddWordCat(cat)
+                          setAddWordVal('')
+                        }
+                      }}
+                    >
+                      {addWordCat === cat && addWordVal.trim() ? t('common.save') : t('settings.words.addWord')}
                     </Button>
                     <Button
                       size="icon"

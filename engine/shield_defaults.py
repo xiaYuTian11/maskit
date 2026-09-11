@@ -477,8 +477,10 @@ def extract_usage(body_text):
             if not u and isinstance(data.get("meta"), dict):
                 u = data["meta"].get("tokens") or {}
             if isinstance(u, dict):
-                p = int(u.get("prompt_tokens") or u.get("input_tokens") or u.get("total_tokens") or 0)
+                p = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
                 c = int(u.get("completion_tokens") or u.get("output_tokens") or 0)
+                if not p and not c and u.get("total_tokens"):
+                    p = int(u["total_tokens"])
                 if p or c:
                     return {"prompt_tokens": p, "completion_tokens": c}
     except Exception:

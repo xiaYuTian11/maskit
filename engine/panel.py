@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.4'
+__version__ = '0.2.5'
 import json
 import copy
 import hashlib
@@ -180,9 +180,12 @@ PANEL_PORT = _default_panel_port()
 PROXY_PORT = 5802
 PID_FILE = ROOT / "shield.pid"
 # mitmdump 启动就绪等待上限：冷启动要加载 transparent.py + 绑定全部 upstream 端口，
-# 固定 sleep 会过早判定成功（客户端启动瞬间连端口即「网络连接异常」）。轮询就绪，
-# 超时按失败处理并杀进程，避免留下占端口的僵尸。
-_START_READY_TIMEOUT = 15
+# 在弱 CPU（如 NAS/低配云主机）或多 upstream 场景下常需 20s 左右。
+# 默认放宽到 60s（端口就绪即提前退出，不影响正常机型速度），并支持环境变量覆盖。
+try:
+    _START_READY_TIMEOUT = int(os.environ.get("MASKIT_START_READY_TIMEOUT", "60").strip() or "60")
+except Exception:
+    _START_READY_TIMEOUT = 60
 ENV_BACKUP_PATH = ROOT / "shield-env-backup.json"
 EVENT_LOG_PATH = LEGACY_JSONL_PATH
 # 面板监听地址：桌面版恒 127.0.0.1；Docker/无头部署用 MASKIT_PANEL_HOST=0.0.0.0 开放。
@@ -2188,22 +2191,28 @@ def _start_proxy_locked():
             break
         time.sleep(0.15)
     if p.poll() is not None or not ready:
-        out = ""
-        try:
-            if p.stdout:
-                out = p.stdout.read()[-500:]
-        except Exception:
-            pass
         if p.poll() is None:
-            # 端口迟迟不 listen：进程还活着但不可用，杀掉避免占端口的僵尸
+            # 端口迟迟不 listen：进程还活着但不可用，先杀掉释放端口，避免占端口的僵尸
             _emit_log(f"[panel] mitmdump {_START_READY_TIMEOUT}s 内未监听端口 {missing}，判定启动失败")
             try:
                 _kill_proxy_tree(p.pid)
             except Exception:
                 pass
+        out = ""
+        try:
+            # 进程终止后以有界超时安全读取输出，绝不裸调用可能对存活子进程无界阻塞的
+            # p.stdout.read()（Issue #19：弱 CPU 冷启动超时时该调用会永久挂死面板线程）。
+            if p.stdout:
+                raw = p.stdout.read() if p.poll() is not None else p.communicate(timeout=1.5)[0]
+                # Popen 未启用 text=True，读回的是 bytes；不解码会让错误提示渲染成 b'...'
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                out = (raw or "")[-500:]
+        except Exception:
+            pass
         _start_fallback("启动失败")
-        reason = out or (f"{_START_READY_TIMEOUT}s 内未监听端口 {missing}"
-                         if not ready else "进程已退出")
+        reason = out.strip() or (f"{_START_READY_TIMEOUT}s 内未监听端口 {missing}"
+                                 if not ready else "进程已退出")
         return False, f"mitmdump 启动失败: {reason}"
     proc["p"] = p
     try:
@@ -2985,7 +2994,7 @@ def normalize_config(raw, warnings=None):
     if isinstance(raw_prefixes, list):
         for prefix in raw_prefixes:
             prefix = str(prefix or "").strip()
-            if 1 <= len(prefix) <= MAX_PREFIX_LEN and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", prefix):
+            if 1 <= len(prefix) <= MAX_PREFIX_LEN and re.fullmatch(r"[@A-Za-z0-9][@A-Za-z0-9_.-]*", prefix):
                 prefixes.append(prefix)
     if "secret_prefixes" in raw and isinstance(raw["secret_prefixes"], list) and len(raw["secret_prefixes"]) == 0:
         prefixes = []
@@ -4304,8 +4313,11 @@ def api_logs():
     # 全文搜索开关：默认只搜结构化列（host/path/method/status/type），
     # payload LIKE 全表扫描仅在用户显式勾选「全文搜索（全库）」时启用。
     fulltext = request.args.get("fulltext", "0") != "0"
+    event_type = request.args.get("type", "").strip().upper() or None
+    if event_type and not re.fullmatch(r"[A-Z_]{1,32}", event_type):
+        event_type = None
     ev = fetch_events(since=since, limit=limit, sensitive_only=sensitive_only,
-                      query=query, fulltext=fulltext)
+                      query=query, fulltext=fulltext, event_type=event_type)
     # slim：剔除只有详情弹窗才用的正文字段。这四个字段占 events 体积 79%
     # （dialog 34% + dialog_req 28% + resp_preview 9% + req_preview 8%），
     # 而列表行一个都不渲染。全量 1000 条实测 8.2MB → slim 后约 1.7MB。
@@ -4516,8 +4528,11 @@ def api_logs_export():
     query = request.args.get("q", "")
     # 与 /api/logs 同口径：默认不扫 payload，仅在显式勾选全文搜索时启用
     fulltext = request.args.get("fulltext", "0") != "0"
+    event_type = request.args.get("type", "").strip().upper() or None
+    if event_type and not re.fullmatch(r"[A-Z_]{1,32}", event_type):
+        event_type = None
     ev = fetch_events(since=0, limit=limit, sensitive_only=sensitive_only,
-                      query=query, fulltext=fulltext, max_limit=EXPORT_MAX)
+                      query=query, fulltext=fulltext, event_type=event_type, max_limit=EXPORT_MAX)
     # 是否被上限截断——拿满 limit 就说明后面还有。静默截断过一次：接口写着允许
     # 5000，底层却砍到 1000，用户导出一整天的日志只拿到 1000 条还以为是全部。
     truncated = len(ev) >= limit

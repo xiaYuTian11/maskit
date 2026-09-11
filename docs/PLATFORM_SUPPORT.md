@@ -25,6 +25,18 @@ docker compose down
 
 远程访问必须设置 `MASKIT_PANEL_TOKEN` 或 `MASKIT_PANEL_TOKEN_FILE`（至少 16 位 ASCII），并只向可信网络暴露 `5801` 与 `187xx` 端口。Compose 默认将主机端口绑定到 `127.0.0.1`；需要远程访问时显式设置 `MASKIT_BIND_HOST` 并配置防火墙。`/healthz` 是唯一不需要令牌的存活探针；控制台登录和 `/api/*` 请求仍需要令牌。
 
+## 低配设备与启动超时
+
+代理进程冷启动时要加载 `transparent.py` 并绑定全部 upstream 端口，默认就绪等待上限为 60 秒。NAS、低配云主机或多 upstream 场景下可能超过该上限，面板会判定「启动失败」并回退到透明直连（网络不断，但不脱敏）。
+
+若确认是启动慢而非崩溃（日志里能看到进程仍在运行），可放宽就绪等待上限（单位秒；只影响启动判定，不影响运行时性能）：
+
+```bash
+MASKIT_START_READY_TIMEOUT=120
+```
+
+Docker 用 `-e MASKIT_START_READY_TIMEOUT=120` 传入；桌面客户端需在系统环境变量中设置后重启应用。仍反复超时请先排查端口占用与 mitmdump 是否可执行，不要单纯加大该值。
+
 ## 桌面构建
 
 Windows 安装包由根目录流水线生成：

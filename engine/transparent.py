@@ -628,7 +628,10 @@ def _prefix_secret_regex():
         _prefix_rx_cache = None
         _prefix_rx_key = key
         return None
-    _prefix_rx_cache = re.compile(r"(?<![A-Za-z0-9_-])(?:" + "|".join(prefixes) + r")[A-Za-z0-9][A-Za-z0-9_-]{18,}(?![A-Za-z0-9_-])")
+    # 凭据后缀阈值：前缀匹配后跟随至少 8 位无空格密文字符（1+7 位）。
+    # 之前硬编码 19 位（1+18）导致自建平台、内部鉴权或测试环境的 8~16 位自定义短 Key 严重漏判。
+    # 设为 8 位既能彻底避开 sk-demo/sk-test 等极短日常词误伤，又能全面覆盖自定义短凭据。
+    _prefix_rx_cache = re.compile(r"(?<![A-Za-z0-9_-])(?:" + "|".join(prefixes) + r")[A-Za-z0-9][A-Za-z0-9_-]{7,}(?![A-Za-z0-9_-])")
     _prefix_rx_key = key
     return _prefix_rx_cache
 
@@ -844,20 +847,38 @@ def _remember(fwd, labels, orig, label):
         labels[orig] = label
 
 
-# 按长度降序的敏感词表（长词优先匹配），只在 config reload 时重建，避免 mask 热路径重排
+# 按长度降序的敏感词表（长词优先匹配，保证同一位置长词先命中）。
+# 唯一消费者是 _custom_combined_regex，而它只在合并正则缓存未命中时才会走到这里，
+# 所以下面的排序不进 mask 热路径。
 _CUSTOM_WORDS_SORTED = ()
 
 
+def _sorted_custom_words():
+    """CUSTOM_WORDS 按词长降序的元组（长词优先）。"""
+    return tuple(sorted(CUSTOM_WORDS.items(), key=lambda kv: len(kv[0]), reverse=True))
+
+
 def _refresh_custom_words_sorted():
+    """显式重建排序词表（热重载与测试直改词表后调用，用于预热）。"""
     global _CUSTOM_WORDS_SORTED
-    _CUSTOM_WORDS_SORTED = tuple(sorted(CUSTOM_WORDS.items(), key=lambda kv: len(kv[0]), reverse=True))
+    _CUSTOM_WORDS_SORTED = _sorted_custom_words()
 
 
 def _custom_words_sorted():
-    """取排序词表；词表长度变了（热重载/测试直接改 dict）就惰性重建。"""
+    """取排序词表；**内容**变了才重建。
+
+    曾只比长度（`len(cache) != len(CUSTOM_WORDS)`）：等长换词——例如把
+    {张三, 李四} 换成 {密, 王五}——长度不变就不重建，于是继续沿用旧词表，
+    新词不生效、旧词继续命中；现象还随用例/请求顺序漂移（曾让单字边界用例随机失败）。
+
+    生产路径 reload_config 会显式重建，但把正确性寄托在「每个调用方都记得刷新」上
+    太脆——任何绕过 reload 直改 CUSTOM_WORDS 的路径（主要是测试）都会中招。
+    这里改成比内容，谁改词表都自动正确，不再依赖调用方纪律。
+    """
     global _CUSTOM_WORDS_SORTED
-    if len(_CUSTOM_WORDS_SORTED) != len(CUSTOM_WORDS):
-        _refresh_custom_words_sorted()
+    cur = _sorted_custom_words()
+    if cur != _CUSTOM_WORDS_SORTED:
+        _CUSTOM_WORDS_SORTED = cur
     return _CUSTOM_WORDS_SORTED
 
 
@@ -1492,7 +1513,20 @@ def _custom_combined_regex():
     会 re.compile 抛 PatternError，导致整个合并正则失败 → mask() 异常 →
     fail-closed 503，全部客户端被拒。这里逐词 try 编译，坏词跳过并留痕，
     其余词照常生效；绝不让词表配置错误升级成全局阻断。
+
+    缓存命中判断必须放在构建 parts 之前：合并正则的 key 已完整覆盖词表与禁用状态
+    （_custom_word_enabled 只读 SENSITIVE_DISABLED / SENSITIVE_WORD_DISABLED），
+    命中时直接返回，既省掉热路径上的排序与拼接，也避免「跳过非法正则词」的日志
+    每次请求都重打一遍（原实现把日志与 parts 构建放在检查之前，命中缓存也会刷日志）。
     """
+    key = (
+        tuple(CUSTOM_WORDS.items()),
+        tuple(sorted(SENSITIVE_DISABLED)),
+        tuple(sorted((l, w) for l, ws in SENSITIVE_WORD_DISABLED.items() for w in ws)),
+        tuple(sorted(SENSITIVE_WORD_WHOLE)),
+    )
+    if _CUSTOM_COMBINED_CACHE["key"] == key and _CUSTOM_COMBINED_CACHE["rx"] is not None:
+        return _CUSTOM_COMBINED_CACHE["rx"]
     parts = []
     skipped = []
     for word, label in _custom_words_sorted():
@@ -1516,14 +1550,6 @@ def _custom_combined_regex():
     if skipped:
         for w, err in skipped[:5]:
             _log(f"[mask] 跳过非法正则词 {w[:60]}...：{err}")
-    key = (
-        tuple(CUSTOM_WORDS.items()),
-        tuple(sorted(SENSITIVE_DISABLED)),
-        tuple(sorted((l, w) for l, ws in SENSITIVE_WORD_DISABLED.items() for w in ws)),
-        tuple(sorted(SENSITIVE_WORD_WHOLE)),
-    )
-    if _CUSTOM_COMBINED_CACHE["key"] == key and _CUSTOM_COMBINED_CACHE["rx"] is not None:
-        return _CUSTOM_COMBINED_CACHE["rx"]
     # 整体再包一层 try：parts 拼合本身也可能因用户正则里的 | 破坏结构，
     # 兜底降级为空正则（全部词不生效但代理不 503）
     try:
@@ -3419,57 +3445,6 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source):
             return passthrough
 
     return _stream
-
-
-def _extract_usage(body_text):
-    """从响应 body 提取 token 用量（尽力而为，供首屏统计）。
-
-    支持三种形态：
-    - OpenAI chat/completions 非流式：顶层 usage.{prompt_tokens,completion_tokens}
-    - Anthropic messages：usage.{input_tokens,output_tokens}
-    - SSE 流式：usage 在最后一个带 usage 的 chunk（客户端须带 include_usage，
-      否则上游不返回，采不到属正常）。SSE 拼接文本里逐行扫 data: 取最后命中。
-    返回 {"prompt_tokens": int, "completion_tokens": int} 或 {}（没采到）。
-    """
-    if not body_text:
-        return {}
-    try:
-        data = json.loads(body_text)
-        if isinstance(data, dict):
-            u = data.get("usage") or {}
-            if isinstance(u, dict):
-                p = _int_or_zero(u.get("prompt_tokens", u.get("input_tokens")))
-                c = _int_or_zero(u.get("completion_tokens", u.get("output_tokens")))
-                if p or c:
-                    return {"prompt_tokens": p, "completion_tokens": c}
-    except Exception:
-        pass
-    # SSE：扫所有 data: 行，取最后带 usage 的 chunk（OpenAI 流式惯例）
-    last = {}
-    for line in body_text.splitlines():
-        if not line.startswith("data: "):
-            continue
-        try:
-            d = json.loads(line[6:])
-        except Exception:
-            continue
-        if not isinstance(d, dict):
-            continue
-        u = d.get("usage")
-        if not isinstance(u, dict):
-            continue
-        p = _int_or_zero(u.get("prompt_tokens", u.get("input_tokens")))
-        c = _int_or_zero(u.get("completion_tokens", u.get("output_tokens")))
-        if p or c:
-            last = {"prompt_tokens": p, "completion_tokens": c}
-    return last
-
-
-def _int_or_zero(v):
-    try:
-        return int(v or 0)
-    except Exception:
-        return 0
 
 
 def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, streamed_text=None, stream_actual="whole", stream_usage=None):

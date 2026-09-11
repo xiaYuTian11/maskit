@@ -49,41 +49,54 @@ export function mergeMaskRestore(events: readonly ShieldEvent[], opts: MergeOpti
   )
 
   const bySid = new Map<string, MergedEvent>()
-  const noSid: MergedEvent[] = []
+  // 已成对（MASK+RESTORE 已合并）的 sid：再来的同类事件必须独立成行，绝不静默覆盖已成对的那行
+  const paired = new Set<string>()
+  const independent: MergedEvent[] = []
   for (const e of filtered) {
     const sid = e.sid || ''
-    if (!sid) {
-      noSid.push({ ...e, _audit: false, _detailSeq: undefined })
+    // 仅 MASK 与 RESTORE 参与会话往返链路合并；其余类型（ERR/BLOCK/SCAN_WARN/CANCEL 等）即便带 sid 也必须独立成行展示，绝不吞日志
+    if (!sid || (e.type !== 'MASK' && e.type !== 'RESTORE')) {
+      independent.push({ ...e, _audit: false, _detailSeq: undefined })
       continue
     }
     const existing = bySid.get(sid)
     if (!existing) {
       bySid.set(sid, { ...e, _audit: false, _detailSeq: undefined })
-    } else if (e.type === 'RESTORE' || existing.type === 'RESTORE') {
-      // 同 sid 的 MASK + RESTORE：RESTORE 的耗时/费用/状态/还原数/模型补到主行
-      const merged: MergedEvent = { ...existing }
-      if (e.type === 'RESTORE') {
-        merged.http_status = e.http_status ?? merged.http_status
-        merged.upstream_ms = e.upstream_ms ?? merged.upstream_ms
-        merged.total_ms = e.total_ms ?? merged.total_ms
-        merged.status = e.status ?? merged.status
-        merged.restored = e.restored ?? merged.restored
-        // unresolved 只在 RESTORE 事件上产生，不带过来的话合并行永远显示不出「未还原」
-        merged.unresolved = e.unresolved ?? merged.unresolved
-        merged.degraded = e.degraded ?? merged.degraded
-        merged.stream_actual = e.stream_actual ?? merged.stream_actual
-        merged.cost_usd = e.cost_usd ?? merged.cost_usd
-        merged.model = e.model ?? merged.model
-        // 详情弹窗回源 RESTORE（含请求+回复完整链路）
-        merged._detailSeq = e.seq
-        if (!merged.upstream) merged.upstream = e.upstream ?? ''
+    } else if (paired.has(sid)) {
+      // 该 sid 已合并成对，第三次及以后的事件独立成行，防止把已合并行的耗时/费用/还原数覆盖掉
+      independent.push({ ...e, _audit: false, _detailSeq: undefined })
+    } else if (
+      (existing.type === 'MASK' && e.type === 'RESTORE') ||
+      (existing.type === 'RESTORE' && e.type === 'MASK')
+    ) {
+      // 真正成对的 MASK + RESTORE：合并为一条往返链路行
+      const m = existing.type === 'MASK' ? existing : e
+      const r = existing.type === 'RESTORE' ? existing : e
+      const merged: MergedEvent = {
+        ...m,
+        _audit: false,
+        http_status: r.http_status ?? m.http_status,
+        upstream_ms: r.upstream_ms ?? m.upstream_ms,
+        total_ms: r.total_ms ?? m.total_ms,
+        status: r.status ?? m.status,
+        restored: r.restored ?? m.restored,
+        unresolved: r.unresolved ?? m.unresolved,
+        degraded: r.degraded ?? m.degraded,
+        stream_actual: r.stream_actual ?? m.stream_actual,
+        cost_usd: r.cost_usd ?? m.cost_usd,
+        model: r.model || m.model || '',
+        _detailSeq: r.seq,
+        upstream: r.upstream || m.upstream || '',
       }
       bySid.set(sid, merged)
+      paired.add(sid)
+    } else {
+      // 同一 sid 出现两个同类事件时，独立成行，防静默覆盖
+      independent.push({ ...e, _audit: false, _detailSeq: undefined })
     }
-    // 其余类型（CANCEL/DNS_ERROR/ERR/SCAN_WARN 等）不与 MASK 合并，保持独立行
   }
 
-  const ev = [...bySid.values(), ...noSid].map((e) => ({ ...e, _audit: false as const }))
+  const ev = [...bySid.values(), ...independent].map((e) => ({ ...e, _audit: false as const }))
   // 按 ts 降序（最新在前）
   return ev.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0))
 }

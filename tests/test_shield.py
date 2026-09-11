@@ -469,8 +469,80 @@ class ShieldEngineTests(unittest.TestCase):
     def test_key_prefix_rules_do_not_mask_short_words(self):
         sid = "short"
         tr._new_session(sid)
-        masked = tr.mask("sk-demo ah-test sk-1234567890 ah-1234567890", sid)
-        self.assertEqual(masked, "sk-demo ah-test sk-1234567890 ah-1234567890")
+        masked = tr.mask("sk-demo ah-test sk-abc ah-1234", sid)
+        self.assertEqual(masked, "sk-demo ah-test sk-abc ah-1234")
+
+    def test_custom_short_keys_and_at_prefix_masked(self):
+        """验证 8 位自定义短 Key 和 @ 前缀均能正确命中并脱敏。"""
+        old_pref = list(tr.SECRET_PREFIXES)
+        try:
+            tr.SECRET_PREFIXES = ["sk-", "@token-"]
+            tr._prefix_rx_cache = None
+            tr._prefix_rx_key = None
+            sid = "short_custom"
+            tr._new_session(sid)
+            # 8 位短 key 和 @ 前缀短 key
+            text = "内部密钥是 sk-12345678 和 @token-abcdef12 以及常规 key sk-1234567890123456"
+            masked = tr.mask(text, sid)
+            self.assertNotIn("sk-12345678", masked)
+            self.assertNotIn("@token-abcdef12", masked)
+            self.assertNotIn("sk-1234567890123456", masked)
+            # 验证能完整还原
+            restored = tr.restore(masked, sid)
+            self.assertEqual(restored, text)
+        finally:
+            tr.SECRET_PREFIXES = old_pref
+            tr._prefix_rx_cache = None
+            tr._prefix_rx_key = None
+
+    def test_short_keys_below_prefix_threshold_work_as_custom_words(self):
+        """短于前缀阈值（8 位）的固定 Key，按「敏感词」字面匹配仍可完整脱敏/还原。
+
+        这是前缀规则覆盖不到时的官方兜底路径——设置页 Secret 前缀卡片直接指向它，
+        所以必须锁住：否则改了阈值或自定义词链路，用户按指引配了却依然漏判。
+        """
+        old_words = dict(tr.CUSTOM_WORDS)
+        try:
+            tr.CUSTOM_WORDS.clear()
+            # 注意：这里换词前后都是 2 条（setUp 是 张三/李四），刻意不显式重建排序词表，
+            # 顺带覆盖 _custom_words_sorted() 的等长换词惰性重建路径。
+            tr.CUSTOM_WORDS.update({"sk-abc": "API_KEY", "T0k3n": "API_KEY"})
+            sid = "short_words"
+            tr._new_session(sid)
+            text = "短 Key 是 sk-abc 与 T0k3n，另外 sk-demo 是日常词"
+            masked = tr.mask(text, sid)
+            self.assertNotIn("sk-abc", masked)
+            self.assertNotIn("T0k3n", masked, "自定义词大小写不敏感，变体也须命中")
+            self.assertIn("sk-demo", masked, "前缀规则仍不应误伤极短日常词")
+            self.assertEqual(tr.restore(masked, sid), text)
+        finally:
+            tr.CUSTOM_WORDS.clear()
+            tr.CUSTOM_WORDS.update(old_words)
+
+    def test_custom_words_same_count_swap_takes_effect(self):
+        """等长换词必须立即生效（排序词表缓存曾只比长度，等长换词会沿用旧词表）。
+
+        回归护栏：把「缓存失效只比长度」改回长度比较，本用例必挂——新词不生效、
+        旧词继续命中，且症状会随用例顺序漂移，是最难排查的一类问题。
+        """
+        tr.CUSTOM_WORDS.clear()
+        tr.CUSTOM_WORDS.update({"张三": "NAME", "李四": "NAME"})
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+        sid = "swap-before"
+        tr._new_session(sid)
+        self.assertNotIn("张三", tr.mask("联系人张三", sid))
+
+        # 换成条数相同、内容完全不同的两个词
+        tr.CUSTOM_WORDS.clear()
+        tr.CUSTOM_WORDS.update({"密": "密级", "王五": "NAME"})
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+        sid2 = "swap-after"
+        tr._new_session(sid2)
+        masked = tr.mask("联系人王五，密 与 公开，旧词张三", sid2)
+        self.assertNotIn("王五", masked, "等长换词后新词必须立即生效")
+        self.assertNotIn("密 与", masked, "单字边界语义不得因换词失效")
+        self.assertIn("张三", masked, "已移除的旧词不得继续命中")
+        self.assertEqual(tr.restore(masked, sid2), "联系人王五，密 与 公开，旧词张三")
 
     def test_key_prefix_rules_are_configurable(self):
         tr.SECRET_PREFIXES = ["ak-"]
@@ -618,6 +690,8 @@ class ShieldEngineTests(unittest.TestCase):
         """单字词只在独立出现时命中，避免「密」打中「密码」。"""
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"密": "密级", "张三": "人名"})
+        # 刻意不调 _refresh_custom_words_sorted()：本用例换词前后都是 2 条，正好覆盖
+        # _custom_words_sorted() 的惰性重建路径（曾经只比长度，等长换词会沿用旧词表）。
         tr._CUSTOM_WORD_RX_CACHE.clear()
         sid = "short-bound"
         tr._new_session(sid)
@@ -1986,6 +2060,11 @@ class ShieldEngineTests(unittest.TestCase):
             tr.response(flow)
             resp_data = json.loads(flow.response.content)
             self.assertEqual(resp_data["results"][0]["relevance_score"], 0.98)
+            # 验证 Rerank 响应的 tokens 用量被正确提取（兼容 Cohere meta.tokens 与 total_tokens）
+            extracted_usage = tr._extract_usage(flow.response.content.decode("utf-8"))
+            self.assertEqual(extracted_usage, {"prompt_tokens": 42, "completion_tokens": 0})
+            total_usage = tr._extract_usage(json.dumps({"usage": {"total_tokens": 128}}))
+            self.assertEqual(total_usage, {"prompt_tokens": 128, "completion_tokens": 0})
         self._with_no_reload(run)
 
 
@@ -1998,7 +2077,7 @@ class PanelConfigTests(unittest.TestCase):
             "target_domains": ["https://API.OpenAI.com/v1", "api.openai.com.evil.test", "bad host"],
             "domains_disabled": ["api.openai.com"],
             "api_paths": ["/v1/chat/completions", "bad path"],
-            "secret_prefixes": ["sk-", "ah-", "bad prefix", "bad*prefix", "ghp_", "x_"],
+            "secret_prefixes": ["sk-", "ah-", "bad prefix", "bad*prefix", "ghp_", "x_", "@token-"],
             "sensitive": {"PERSON": [" 张三 ", ""], "<bad>": ["x"]},
             "session_ttl": 1,
             "debug": True,
@@ -2007,7 +2086,7 @@ class PanelConfigTests(unittest.TestCase):
         self.assertEqual(cfg["target_domains"], ["api.openai.com", "api.openai.com.evil.test"])
         self.assertEqual(cfg["domains_disabled"], ["api.openai.com"])
         self.assertEqual(cfg["api_paths"], ["/v1/chat/completions"])
-        self.assertEqual(cfg["secret_prefixes"], ["sk-", "ah-", "ghp_", "x_"])
+        self.assertEqual(cfg["secret_prefixes"], ["sk-", "ah-", "ghp_", "x_", "@token-"])
         self.assertEqual(cfg["sensitive"], {"PERSON": ["张三"]})
         self.assertEqual(cfg["session_ttl"], panel.MIN_TTL)
         self.assertEqual(cfg["capture_mode"], "reverse")
@@ -3085,6 +3164,50 @@ class PanelConfigTests(unittest.TestCase):
         self.assertEqual(data["events"][0]["type"], "RESTORE")
         self.assertEqual(data["store"], "sqlite")
 
+    def test_api_logs_type_filter_pushdown(self):
+        """测试 /api/logs?type=ERR 下推数据库精确查询，避免海量日志下被 LIMIT 截断。"""
+        old_db = event_store.DB_PATH
+        old_panel_db = panel.DB_PATH
+        old_token = panel.API_TOKEN
+        try:
+            event_store._reset_writer()
+            event_store.DB_PATH = ROOT / ".test-type-filter-events.sqlite3"
+            event_store.DB_PATH.unlink(missing_ok=True)
+            panel.DB_PATH = event_store.DB_PATH
+            panel.API_TOKEN = "test-token"
+            event_store._reset_writer()
+
+            # 插入较早的 ERR 事件
+            event_store.append_event({"ts": time.time() - 100, "type": "ERR", "msg": "test error"})
+            # 插入大量新的 MASK/RESTORE 事件，模拟 800+ 真实请求产生的海量日志
+            for i in range(10):
+                event_store.append_event({"ts": time.time() - 50 + i, "type": "MASK", "count": 1})
+                event_store.append_event({"ts": time.time() - 50 + i, "type": "RESTORE", "restored": 1})
+
+            with panel.app.test_client() as client:
+                # 1. 过滤 type=ERR，即便前面有大量 MASK/RESTORE，也能精准把 ERR 捞出来
+                res = client.get("/api/logs?type=ERR&limit=5", headers={"X-Shield-Token": panel.API_TOKEN})
+                data = res.get_json()
+                self.assertEqual(res.status_code, 200)
+                self.assertEqual(len(data["events"]), 1)
+                self.assertEqual(data["events"][0]["type"], "ERR")
+                self.assertEqual(data["events"][0]["msg"], "test error")
+
+                # 2. 导出接口也支持 type 过滤
+                res_exp = client.get("/api/logs/export?type=ERR", headers={"X-Shield-Token": panel.API_TOKEN})
+                data_exp = res_exp.get_json()
+                self.assertEqual(res_exp.status_code, 200)
+                self.assertEqual(len(data_exp["events"]), 1)
+                self.assertEqual(data_exp["events"][0]["type"], "ERR")
+        finally:
+            event_store._reset_writer()
+            event_store.DB_PATH.unlink(missing_ok=True)
+            event_store.DB_PATH.with_name(event_store.DB_PATH.name + "-wal").unlink(missing_ok=True)
+            event_store.DB_PATH.with_name(event_store.DB_PATH.name + "-shm").unlink(missing_ok=True)
+            event_store.DB_PATH = old_db
+            panel.DB_PATH = old_panel_db
+            panel.API_TOKEN = old_token
+
     def test_transparent_emit_writes_sqlite_event_store(self):
         old_db = event_store.DB_PATH
         old_log = tr._log
@@ -3130,6 +3253,7 @@ class PanelConfigTests(unittest.TestCase):
         old_kill = panel._kill_proxy_tree
         old_lpp = panel._listening_port_pids
         killed = []
+        old_ready_timeout = panel._START_READY_TIMEOUT
 
         class FakePopen:
             pid = 12345
@@ -3176,6 +3300,7 @@ class PanelConfigTests(unittest.TestCase):
             self.assertIn("未监听端口", err, f"错误信息须说明端口未就绪: {err!r}")
             self.assertIsNone(panel.proc["p"], "判定失败后不得残留进程句柄")
             self.assertEqual(killed, [12345], "启动失败必须清理进程，防止占端口的僵尸")
+            self.assertFalse(panel.state["proxy_starting"], "启动结束后 proxy_starting 必须复位为 False (Issue #19)")
         finally:
             panel._listening_port_pids = old_lpp
             panel.proc["p"] = None
@@ -3191,7 +3316,153 @@ class PanelConfigTests(unittest.TestCase):
             panel._emit_log = old_emit
             panel.subprocess.Popen = old_popen
             panel._kill_proxy_tree = old_kill
-            panel._START_READY_TIMEOUT = 15
+            panel._START_READY_TIMEOUT = old_ready_timeout
+
+    def test_issue19_start_proxy_timeout_alive_process_does_not_block_on_read(self):
+        """Issue #19: 启动超时分支对存活子进程严禁调用无界阻塞的 p.stdout.read()，
+        且 proxy_starting 必须在 finally 成功释放为 False。"""
+        import io
+        old_port_listen = panel._port_listen
+        old_load = panel.load_config
+        old_admin = panel.is_admin
+        old_up = panel.detect_upstream
+        old_sleep = panel.time.sleep
+        old_thread = panel.threading.Thread
+        old_emit = panel._emit_log
+        old_popen = panel.subprocess.Popen
+        old_kill = panel._kill_proxy_tree
+        old_lpp = panel._listening_port_pids
+        killed = []
+        old_ready_timeout = panel._START_READY_TIMEOUT
+
+        class HangingStdout:
+            def read(self, *args):
+                # 模拟子进程存活时管道未关闭导致的无界挂死
+                raise RuntimeError("p.stdout.read() was called on an alive process!")
+
+        class AliveFakePopen:
+            pid = 54321
+            stdout = HangingStdout()
+
+            def poll(self):
+                # 始终存活（模拟弱 CPU 机器冷启动超时的现场）
+                return None
+
+            def communicate(self, timeout=None):
+                return (b"mock timed out stderr output", b"")
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                pass
+            def start(self):
+                pass
+
+        try:
+            panel._port_listen = lambda port: False
+            panel._listening_port_pids = lambda ports, fresh=False: {}
+            panel.load_config = lambda: {**panel.default_config(), "capture_mode": "local"}
+            panel.enabled_domains = lambda cfg: ["api.openai.com"]
+            panel.is_admin = lambda: True
+            panel.detect_upstream = lambda: ""
+            panel.time.sleep = lambda seconds: None
+            panel.threading.Thread = FakeThread
+            panel._emit_log = lambda line: None
+            panel.subprocess.Popen = lambda args, **kw: AliveFakePopen()
+            panel._kill_proxy_tree = lambda pid: killed.append(pid)
+            panel._START_READY_TIMEOUT = 0.5
+
+            ok, err = panel.start_proxy()
+            self.assertFalse(ok)
+            self.assertEqual(killed, [54321], "必须先杀掉未就绪的存活进程")
+            self.assertFalse(panel.state["proxy_starting"], "proxy_starting 绝不可被阻塞挂死，必须复位为 False")
+            self.assertIn("mock timed out stderr output", err, "必须通过 communicate 安全读取到错误信息")
+        finally:
+            panel._listening_port_pids = old_lpp
+            panel.proc["p"] = None
+            panel.state["proxy_running"] = False
+            panel.state["proxy_pid"] = None
+            panel.PID_FILE.unlink(missing_ok=True)
+            panel._port_listen = old_port_listen
+            panel.load_config = old_load
+            panel.is_admin = old_admin
+            panel.detect_upstream = old_up
+            panel.time.sleep = old_sleep
+            panel.threading.Thread = old_thread
+            panel._emit_log = old_emit
+            panel.subprocess.Popen = old_popen
+            panel._kill_proxy_tree = old_kill
+            panel._START_READY_TIMEOUT = old_ready_timeout
+
+    def test_start_proxy_failure_message_decodes_child_output(self):
+        """启动失败时子进程输出必须解码为 str。
+
+        Popen 未开 text=True，p.stdout 读回的是 bytes；不解码会把面板错误提示
+        渲染成 b'...' 字节字面量（mitmdump 启动即崩溃是最常见的失败现场，
+        用户看到的第一条线索就是这段输出）。
+        """
+        old_popen = panel.subprocess.Popen
+        old_port_listen = panel._port_listen
+        old_lpp = panel._listening_port_pids
+        old_load = panel.load_config
+        old_admin = panel.is_admin
+        old_up = panel.detect_upstream
+        old_sleep = panel.time.sleep
+        old_thread = panel.threading.Thread
+        old_emit = panel._emit_log
+        old_kill = panel._kill_proxy_tree
+        killed = []
+        old_ready_timeout = panel._START_READY_TIMEOUT
+
+        class ExitedFakePopen:
+            pid = 22222
+            stdout = io.BytesIO(b"mitmdump failed to bind port 5802\n")
+
+            def poll(self):
+                # 已退出：走 p.stdout.read() 分支
+                return 1
+
+        class FakeThread:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        try:
+            panel._port_listen = lambda port: False
+            panel._listening_port_pids = lambda ports, fresh=False: {}
+            panel.load_config = lambda: {**panel.default_config(), "capture_mode": "local"}
+            panel.enabled_domains = lambda cfg: ["api.openai.com"]
+            panel.is_admin = lambda: True
+            panel.detect_upstream = lambda: ""
+            panel.time.sleep = lambda seconds: None
+            panel.threading.Thread = FakeThread
+            panel._emit_log = lambda line: None
+            panel.subprocess.Popen = lambda args, **kw: ExitedFakePopen()
+            panel._kill_proxy_tree = lambda pid: killed.append(pid)
+            panel._START_READY_TIMEOUT = 0.2
+
+            ok, err = panel.start_proxy()
+            self.assertFalse(ok)
+            self.assertIn("mitmdump failed to bind port 5802", err)
+            self.assertNotIn("b'", err, f"子进程输出必须解码为 str，不得出现字节字面量: {err!r}")
+            self.assertEqual(killed, [], "进程已自行退出，不应再走杀进程分支")
+        finally:
+            panel._listening_port_pids = old_lpp
+            panel.proc["p"] = None
+            panel.state["proxy_running"] = False
+            panel.state["proxy_pid"] = None
+            panel.PID_FILE.unlink(missing_ok=True)
+            panel._port_listen = old_port_listen
+            panel.load_config = old_load
+            panel.is_admin = old_admin
+            panel.detect_upstream = old_up
+            panel.time.sleep = old_sleep
+            panel.threading.Thread = old_thread
+            panel._emit_log = old_emit
+            panel.subprocess.Popen = old_popen
+            panel._kill_proxy_tree = old_kill
+            panel._START_READY_TIMEOUT = old_ready_timeout
 
 
 class TodayStatsTests(unittest.TestCase):

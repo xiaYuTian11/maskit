@@ -114,7 +114,7 @@ def main():
            "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
     proc = subprocess.Popen(
         ["mitmdump", "-s", str(TRANSPARENT_PY), "--listen-host", "127.0.0.1",
-         "-p", "5899", "--mode", f"reverse:http://127.0.0.1:{UPSTREAM_PORT}@{PROXY_PORT}",
+         "-p", str(PROXY_PORT), "--mode", f"reverse:http://127.0.0.1:{UPSTREAM_PORT}@{PROXY_PORT}",
          "--set", "flow_detail=0", "--set", "connection_strategy=lazy"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         encoding="utf-8", errors="replace", env=env,
