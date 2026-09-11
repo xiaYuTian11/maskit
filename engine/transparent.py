@@ -3161,6 +3161,11 @@ def _setter(obj, key):
     return _set
 
 
+def _sse_choice_index(choice, position):
+    index = choice.get("index")
+    return index if type(index) is int and index >= 0 else position
+
+
 def _sse_text_slots(data):
     """列出 SSE 事件里的增量文本槽位：[(channel, text, setter, escape)]。
 
@@ -3172,9 +3177,11 @@ def _sse_text_slots(data):
     if not isinstance(data, dict):
         return slots
     # OpenAI Chat Completions / Completions 流
-    for idx, c in enumerate(data.get("choices", []) or []):
+    for position, c in enumerate(data.get("choices", []) or []):
         if not isinstance(c, dict):
             continue
+        # Sparse chunks may each contain only one of several completion choices.
+        idx = _sse_choice_index(c, position)
         d = c.get("delta")
         if isinstance(d, dict):
             if isinstance(d.get("content"), str):
@@ -3230,27 +3237,30 @@ def _sse_text_slots(data):
     return slots
 
 
-def _sse_is_terminal(data):
-    """事件是否意味着某段输出到此为止（收尾前必须把缓冲吐净，否则吞字）。"""
+def _sse_terminal_prefixes(data):
+    """Channels ending in this event: None means all, () means none."""
     if not isinstance(data, dict):
-        return False
-    if data.get("type") in ("message_stop", "message_delta", "content_block_stop",
-                            "response.completed", "response.incomplete", "response.failed",
-                            "response.output_text.done"):
-        return True
-    for c in data.get("choices", []) or []:
-        if isinstance(c, dict) and c.get("finish_reason"):
-            return True
-    return False
+        return ()
+    if data.get("type") in ("message_stop", "message_delta", "response.completed",
+                            "response.incomplete", "response.failed"):
+        return None
+    if data.get("type") == "content_block_stop":
+        return (f"a{data.get('index', 0)}.",)
+    if data.get("type") == "response.output_text.done":
+        return (f"r{data.get('output_index', 0)}.text",)
+    return tuple(f"c{_sse_choice_index(c, position)}."
+                 for position, c in enumerate(data.get("choices", []) or [])
+                 if isinstance(c, dict) and c.get("finish_reason"))
 
 
-def _restore_sse_data(data, sid, final=False):
+def _restore_sse_data(data, sid, final=False, final_prefixes=()):
     """就地还原单个 SSE 事件的 JSON 负载。"""
     slots = _sse_text_slots(data)
     if slots:
         s = sessions.get(sid) or {}
         for channel, text, setter, escape in slots:
-            setter(restore(text, sid, channel=channel, escape=escape, final=final))
+            channel_final = final or final_prefixes is None or channel.startswith(final_prefixes)
+            setter(restore(text, sid, channel=channel, escape=escape, final=channel_final))
         # 只有真的留下半截占位符时才记模板（收尾补发用），正常路径零额外序列化
         pend = s.get("pending") or {}
         for channel, _t, _s, escape in slots:
@@ -3290,7 +3300,7 @@ def _build_flush_event(tmpl_json, channel, leftover):
     return prefix + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
 
 
-def _flush_pending(sid):
+def _flush_pending(sid, channel_prefixes=None):
     """把各通道滞留的半截占位符补发出去，返回待追加的 SSE 文本。
 
     补发前必须先把 leftover 还原成原文（final=True 清空通道缓冲），
@@ -3305,20 +3315,24 @@ def _flush_pending(sid):
     tmpl = s.get("flush_tmpl") or {}
     out = []
     for channel, leftover in list(pend.items()):
-        if not leftover:
+        if channel_prefixes is not None and not channel.startswith(channel_prefixes):
             continue
         pend.pop(channel, None)  # 先取出，避免 restore 内部把自身 pending 再拼一遍
+        tmpl_json = tmpl.pop(channel, "")
+        if not leftover:
+            continue
         try:
-            restored = restore(leftover, sid, channel=channel, final=True)
+            slots = _sse_text_slots(json.loads(tmpl_json)) if tmpl_json else []
+            escape = next((slot[3] for slot in slots if slot[0] == channel), False)
+            restored = restore(leftover, sid, channel=channel, escape=escape, final=True)
         except Exception:
             restored = leftover
-        evt = _build_flush_event(tmpl.get(channel, ""), channel, restored)
+        evt = _build_flush_event(tmpl_json, channel, restored)
         if evt:
             out.append(evt)
         elif restored:
             # 没有可用模板（非流式回退路径等）：退化为裸文本，至少不丢字
             out.append(restored)
-    pend.clear()
     return "".join(out)
 
 
@@ -3349,13 +3363,16 @@ def _restore_sse_event(block, sid, final=False):
             except json.JSONDecodeError:
                 out_lines.append("data: " + restore(payload, sid, channel="raw", final=final))
                 continue
-            if _sse_is_terminal(data):
-                tail = _flush_pending(sid)
+            ending = _sse_terminal_prefixes(data)
+            # A terminal chunk can contain the final text fragment. Restore it
+            # before flushing, and leave other choices' partial tokens buffered.
+            _restore_sse_data(data, sid, final=final, final_prefixes=ending)
+            if ending is None or ending:
+                tail = _flush_pending(sid, channel_prefixes=ending)
                 if tail:
                     out_lines.append("")
                     out_lines.extend(tail.rstrip("\n").split("\n"))
                     out_lines.append("")
-            _restore_sse_data(data, sid, final=final)
             out_lines.append("data: " + json.dumps(data, ensure_ascii=False))
             continue
         out_lines.append(line)
