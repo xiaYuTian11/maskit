@@ -148,10 +148,10 @@ jobs:
             patchelf libssl-dev libayatana-appindicator3-dev
 
       - name: Install Python and frontend dependencies
-        shell: pwsh
+        shell: ${{ matrix.shell }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip || python3 -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt || python3 -m pip install -r requirements-dev.txt
           npm --prefix frontend ci
           npm --prefix frontend run build
 
@@ -266,12 +266,21 @@ jobs:
             printf '%s\n' 'UNSIGNED: updater signature and metadata were intentionally not generated.' > src-tauri/target/release/bundle/UNSIGNED.txt
           fi
 
-      - name: Generate SHA-256 checksums
+      - name: Generate SHA-256 checksums (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           CHECKSUM_PLATFORM: ${{ matrix.platform }}
-          CHECKSUM_MODE: ${{ steps.mode_windows.outputs.mode || steps.mode_unix.outputs.mode }}
+          CHECKSUM_MODE: ${{ steps.mode_windows.outputs.mode }}
         run: python -c "import hashlib, os; from pathlib import Path; root=Path('src-tauri/target/release/bundle'); files=sorted(p for p in root.rglob('*') if p.is_file() and not p.name.startswith('SHA256SUMS-')); out=root/('SHA256SUMS-'+os.environ['CHECKSUM_PLATFORM']+'-'+os.environ['CHECKSUM_MODE']+'.txt'); out.write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(root).as_posix()+'\\n' for p in files), encoding='utf-8'); assert out.stat().st_size > 0"
+
+      - name: Generate SHA-256 checksums (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          CHECKSUM_PLATFORM: ${{ matrix.platform }}
+          CHECKSUM_MODE: ${{ steps.mode_unix.outputs.mode }}
+        run: python3 -c "import hashlib, os; from pathlib import Path; root=Path('src-tauri/target/release/bundle'); files=sorted(p for p in root.rglob('*') if p.is_file() and not p.name.startswith('SHA256SUMS-')); out=root/('SHA256SUMS-'+os.environ['CHECKSUM_PLATFORM']+'-'+os.environ['CHECKSUM_MODE']+'.txt'); out.write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(root).as_posix()+'\n' for p in files), encoding='utf-8'); assert out.stat().st_size > 0"
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
