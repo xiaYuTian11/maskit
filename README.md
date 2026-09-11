@@ -106,7 +106,7 @@
 - 填入你的真实 API Key（Maskit 在本地收到后安全转发给上游）。
 
 ### 2. Claude Code（配合 cc-switch 一键使用）
-- 在 **[cc-switch](https://github.com/super-l/cc-switch)** 中，将正在使用的 Claude 渠道 **Base URL** 修改为：
+- 在 **[cc-switch](https://github.com/farion1231/cc-switch)** 中，将正在使用的 Claude 渠道 **Base URL** 修改为：
   `http://127.0.0.1:18703`
 - 或通过终端环境变量启动：
   ```bash
