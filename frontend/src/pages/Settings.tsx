@@ -69,6 +69,7 @@ import { cn, copyText } from '@/lib/utils'
 import dayjs from 'dayjs'
 import { useI18n } from '@/lib/i18n'
 import { AboutUpdateCard } from '@/components/settings/AboutUpdateCard'
+import { EnvImportDialog } from '@/components/settings/EnvImportDialog'
 
 import { BackgroundCard } from '@/components/settings/BackgroundCard'
 
@@ -568,6 +569,8 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   // 词条搜索：跨分类过滤，词库多时快速定位
   const [wordSearch, setWordSearch] = useState('')
   const [newCatName, setNewCatName] = useState('')
+  // 从 .env 导入对话框
+  const [envImportOpen, setEnvImportOpen] = useState(false)
   const [newPrefix, setNewPrefix] = useState('')
   const [newDomain, setNewDomain] = useState('')
   const [newPath, setNewPath] = useState('')
@@ -1152,6 +1155,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <Plus className="mr-1 h-3 w-3" /> {t('settings.words.newCat')}
                 </Button>
               </div>
+              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setEnvImportOpen(true)}>
+                <FileText className="mr-1 h-3 w-3" /> {t('settings.words.envImport')}
+              </Button>
             </div>
           </div>
 
@@ -1369,6 +1375,16 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          {/* 从 .env 导入：目标分类候选取引擎内置标签（cfg.builtin_rules 的键），
+              这样用户不必先手工建分类；凭据行的可选范围由对话框内部收窄到凭据标签。 */}
+          <EnvImportDialog
+            open={envImportOpen}
+            onOpenChange={setEnvImportOpen}
+            words={words}
+            builtinLabels={Object.keys(builtinRules)}
+            onImport={(next, msg) => save({ sensitive: next }, msg)}
+          />
 
           <Card className="border bg-card">
             <CardHeader className="flex-row items-center justify-between space-y-0">

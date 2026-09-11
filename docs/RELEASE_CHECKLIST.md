@@ -30,6 +30,13 @@
 - [ ] 卸载后确认自启注册表项和本机捕获证书按预期清理。
 - [ ] 更新器只在用户主动检查或确认安装时运行；版本号和 Release 资产一致。
 
+## macOS 桌面包（Apple Silicon）
+
+- [ ] GitHub Actions `macos-arm64` 构建产物 `Maskit_<版本>_aarch64.dmg` 成功生成。
+- [ ] 挂载 DMG 拖入 Applications，验证启动、系统托盘、代理启停与主窗口呼出。
+- [ ] 验证开机自启动：在设置中开启后，检查 `~/Library/LaunchAgents/com.maskit.app.plist` 存在且生效。
+- [ ] 首次打开若触发 Gatekeeper 拦截，验证使用右键打开或 `xattr -cr /Applications/Maskit.app` 解除隔离后正常使用。
+
 ## GitHub 发布设置
 
 - [ ] `master` 分支保护仍要求 `python`、`frontend`、`rust`、`version` 四个 check、PR 和 Code Owner 审批。

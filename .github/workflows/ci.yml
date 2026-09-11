@@ -55,7 +55,9 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          # 22.x（Active LTS）。下限 22.6：scripts/check-env-import.mjs 依赖
+          # --experimental-strip-types 直接跑 TypeScript 源码，22.6 才引入该 flag。
+          node-version: 22
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -70,6 +72,11 @@ jobs:
 
       - name: i18n dictionary parity
         run: node ../scripts/check-i18n.mjs
+
+      # .env 导入的解析/分类规则是纯函数，前端没有单测框架，所以固化成 Node 用例跑在这里。
+      # 这些规则一旦被改坏（比如漏剥引号、误判凭据分类），脱敏会静默失效而不报错。
+      - name: .env import parser cases
+        run: node --experimental-strip-types ../scripts/check-env-import.mjs
 
   rust:
     name: rust

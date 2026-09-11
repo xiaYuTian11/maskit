@@ -14,7 +14,7 @@
   <a href="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml"><img src="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/Community-LINUX%20DO-2563eb?logo=linux&logoColor=white" alt="LINUX DO"></a>
   <a href="https://github.com/xiaYuTian11/maskit"><img src="https://img.shields.io/badge/QQ%20Group-489926214-12B7F5.svg" alt="QQ Group"></a>
-  <img src="https://img.shields.io/badge/Desktop-Windows%2010%2F11-blueviolet.svg" alt="Desktop: Windows">
+  <img src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS-blueviolet.svg" alt="Desktop: Windows | macOS">
   <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED.svg?logo=docker&logoColor=white" alt="Docker">
   <a href="README.md"><img src="https://img.shields.io/badge/Language-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-lightgrey.svg" alt="Chinese README"></a>
 </p>
@@ -153,10 +153,16 @@ print(response.choices[0].message.content)
 
 ## 🚀 Download & Deployment
 
-### Option A: Windows Desktop Client (Recommended for Personal Use)
-1. Head over to **[GitHub Releases](https://github.com/xiaYuTian11/maskit/releases)**;
-2. Download `Maskit_<version>_x64-setup.exe`;
-3. Run installer. Control from system tray with automated Minisign-verified updates.
+### Option A: Desktop Client (Windows / macOS, Recommended for Personal Use)
+
+Download the latest release package for your operating system from **[GitHub Releases](https://github.com/xiaYuTian11/maskit/releases)**:
+
+- **Windows Users**: Download `Maskit_<version>_x64-setup.exe` installer. Control from system tray with automated Minisign-verified updates;
+- **macOS Users (Apple Silicon M-Series)**: Download `Maskit_<version>_aarch64.dmg`, open it, and drag `Maskit.app` into your `Applications` folder.
+  > 💡 **macOS First Launch Notice**: If macOS Gatekeeper alerts that the app "cannot be opened because Apple cannot check it for malicious software", right-click `Maskit.app` in Finder and select **Open**, or run the following command in Terminal to clear the quarantine flag:
+  > ```bash
+  > xattr -cr /Applications/Maskit.app
+  > ```
 
 ---
 

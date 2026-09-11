@@ -670,11 +670,17 @@ def _rand_suffix():
 
 
 def _new_token(label):
-    """生成不与近期占位符冲突的新占位符。"""
+    """生成不与近期占位符冲突的新占位符。
+
+    冲突判定同时看**完整 token** 与**6 位后缀**：后缀索引按后缀反查，若两个
+    存活 token 共用一个后缀，标签被改写时就会把 A 的原文替换到 B 的位置上。
+    后缀空间 19^6≈4700 万、表内至多 _RECENT_MAX=2000 条，多一次后缀检查
+    换来「索引永远无歧义」，这个代价是值的。
+    """
     lab = _safe_label(label)
     for _ in range(20):
         token = "{{%s_%s}}" % (lab, _rand_suffix())
-        if token not in _RECENT_REV:
+        if token not in _RECENT_REV and _token_suffix(token) not in _RECENT_SUFFIX:
             return token
     # 兜底仍用 6 位：长度必须落在 _SUFFIX_PAT 认得的范围内。
     # 原来这里返回 secrets.token_hex(6)（12 个字符），而正则只认 6 个——
@@ -698,6 +704,36 @@ _RECENT_MAX = 2000
 # _RECENT_MAX 封顶，读再多也留不住，这个上限只是防止重度使用下几万条事件
 # 逐条 json.loads 把引擎启动拖慢。
 _WARMUP_MAX_EVENTS = 5000
+
+# 后缀索引：6 位后缀 -> 完整 token。**只是 _RECENT_REV 的指针，不存原文**，
+# 所以它不会延长原文在内存里的存活窗口，也不需要独立的 TTL。
+#
+# 解决什么：模型会把占位符的标签改写掉——`{{IPPRIVATE_x}}` 写成
+# `{{IP_PRIVATE_x}}`（自己补回下划线）或 `{{ipprivate_x}}`（整段小写）。
+# 标签一变，按完整 token 查表必然落空，而 6 位后缀是随机指纹、模型改不动它，
+# 于是「按后缀反查」就能把它们救回来。
+#
+# 三条硬约束（都来自实测，不是保守起见）：
+# 1. **只收录纯辅音后缀**。给正则加 IGNORECASE 之后，`config_abc123` /
+#    `sha_abcdef` 这类「小写标识符 + `_hex6`」会命中宽松形态（实测）。今天
+#    只是白查一次表，可一旦后缀索引介入就会把整段替换成明文，直接改坏用户
+#    代码。hex6 后缀是存量格式、且在代码里天然常见，所以一律不进索引，
+#    继续只走完整 token 精确匹配。
+# 2. **只在带花括号的调用点使用**（restore 的严格遍与转义遍）。流式响应里
+#    裸 token 被 chunk 切开后，残片（实测 `ATE_zwndfk`）会被宽松正则命中；
+#    后缀索引一旦介入就会把残片替换成明文，拼出一条错的命令。
+# 3. **标签归一化后必须相等**（见 _suffix_real_token）。后缀只有 47M 分之一的
+#    碰撞概率，但一旦碰撞就是静默替换错值（把 A 的内网 IP 填到 B 的位置）。
+#    所以 `{{HOST_x}}` 这种整段换名**不认**，宁可让它走 unresolved 让用户看见。
+#
+# 维护：_suffix_index_add / _suffix_index_del 是唯一入口，必须与
+# _RECENT_FWD / _RECENT_REV 的写入、淘汰**成对出现**（见 _prune_recent、
+# _warmup_recent_from_db、_recall_token 三处）。
+_RECENT_SUFFIX = {}
+# 后缀撞车标记：同一个后缀被两个存活 token 占用时写进索引值。
+# 撞车后**永不参与兜底匹配**——「保留先来的那个」会把 A 的原文答给 B，
+# 属于静默替换错值；拒答的代价只是这个后缀不再兜底，退化成改动前的行为。
+_SUFFIX_AMBIGUOUS = object()
 
 # 复用表用独立 TTL，不跟着 SESSION_TTL（默认 600s）走。
 #
@@ -728,18 +764,25 @@ def _recent_ttl():
 
 
 def _prune_recent(now=None):
-    """按 TTL + 条数上限清理复用表，防止无界增长。"""
+    """按 TTL + 条数上限清理复用表，防止无界增长。
+
+    后缀索引必须跟着一起删：它是指向 _RECENT_REV 的指针，留着指向已淘汰
+    token 的条目虽然不会答错（_lookup_by_suffix 还会回查 _RECENT_REV），
+    但会让 _new_token 白白避开一个已经空出来的后缀。
+    """
     now = now or time.time()
     ttl = _recent_ttl()
     stale = [k for k, v in list(_RECENT_FWD.items()) if now - v[2] > ttl]
     for k in stale:
         tok = _RECENT_FWD.pop(k, [None])[0]
         _RECENT_REV.pop(tok, None)
+        _suffix_index_del(tok)
     if len(_RECENT_FWD) > _RECENT_MAX:
         oldest = sorted(list(_RECENT_FWD.items()), key=lambda kv: kv[1][2])
         for k, v in oldest[: len(_RECENT_FWD) - _RECENT_MAX]:
             _RECENT_FWD.pop(k, None)
             _RECENT_REV.pop(v[0], None)
+            _suffix_index_del(v[0])
 
 
 def _warmup_recent_from_db():
@@ -802,6 +845,7 @@ def _warmup_recent_from_db():
                         continue
                     _RECENT_FWD[orig] = [tok, label, now]
                     _RECENT_REV[tok] = [orig, label, now]
+                    _suffix_index_add(tok)
                     count += 1
             except Exception:
                 pass
@@ -833,10 +877,13 @@ def _recall_token(orig, label):
         rev = _RECENT_REV.get(hit[0])
         if rev:
             rev[2] = now
+        # 幂等补登记：复用表里可能因预热撞车而没进索引（见 _suffix_index_add）
+        _suffix_index_add(hit[0])
         return hit[0]
     token = _new_token(label)
     _RECENT_FWD[orig] = [token, label, now]
     _RECENT_REV[token] = [orig, label, now]
+    _suffix_index_add(token)
     _prune_recent(now)
     return token
 
@@ -1767,11 +1814,170 @@ _PLACEHOLDER_RX = re.compile(r"\{\{[A-Z0-9]{1,12}_" + _SUFFIX_PAT + r"\}\}")
 # 这条只做兜底修复，且**只替换我们自己发过的 token**（必须能在会话/复用表里查到），
 # 所以不存在误伤：LABEL_hex6 这种组合正常文本里不会自然出现，何况还要求查得到。
 _LOOSE_PLACEHOLDER_RX = re.compile(r"\{{0,2}([A-Z0-9]{1,12}_" + _SUFFIX_PAT + r")\}{0,2}")
-_PARTIAL_RX = re.compile(r"\{\{?[A-Za-z0-9_]{0,20}\}?$")
-_PARTIAL_MAX = 24
+# 行尾半截占位符（流式时可能被切在两个 chunk 之间），需要扣住等下一块拼。
+#
+# `\\*` 让反斜杠也进入缓冲范围：模型输出 `\{\{X\}\}` 时，chunk 边界可能正好落在
+# 反斜杠与花括号之间（实测：不认反斜杠时 32 个切点里有 23 个会漏出 `\{\` 残渣，
+# 因为第一个 chunk 只被扣下 `{`、反斜杠已经发出去了）。反斜杠必须和花括号
+# 一起扣住才拼得回来。
+#
+# 花括号那一段必须写成 `(?:\\*\{){1,2}`，与 _ESCAPED_PLACEHOLDER_RX 同构：
+# 两个花括号之间也夹着反斜杠（`\ { \ {`），写成 `\{\{?` 只能从内层花括号开始
+# 匹配，外层反斜杠照样漏出去。
+#
+# 末尾那个 `\\*$` 分支单独列出，是为了「切点正好落在反斜杠与花括号之间」：
+# 此时 chunk 以裸反斜杠结尾，看不出来它后面要跟花括号，只能先扣住。代价是
+# 普通文本里以反斜杠结尾的 chunk（Windows 路径 `C:\Users\`、行继续符）也会
+# 多扣一个 chunk —— 内容不会丢，下一块或收尾时照常发出，只是晚一个 chunk。
+# 换来的是转义形态在**全部 32 个切点**上都还原干净（不扣反斜杠时实测 23 个
+# 切点会漏残渣，扣了之后为 0）。
+#
+# `{` 本身仍然是必需的——所以不含花括号的普通文本（`C:\Users\` 之外，
+# 比如「今天天气」）不会被扣住。
+_PARTIAL_RX = re.compile(r"(?:\\*\{){1,3}[A-Za-z0-9_]{0,20}\\*\}?\\*$|\\+$")
+# 扣留上限：必须 ≥ _PARTIAL_RX 能匹配出的最长片段，否则「扣不下」会退化成
+# 「就地处理半截占位符」——比如此前是 24，而二次转义的完整片段长 25，
+# 于是它总是不被扣留、还原后留下 `\\}` 残渣。模式加长后上限跟着放到 32。
+# 保持小而具体：只是「一段疑似半截占位符」，不是缓冲任意文本。
+_PARTIAL_MAX = 32
 # 从完整占位符里拆出 label 与后缀。多处要用，别再各写各的正则——
 # 0.1.12 就有三处各自写死 [0-9a-f]{6}，改格式时漏一处就是静默失效。
 _PLACEHOLDER_PARTS_RX = re.compile(r"^\{\{([A-Z0-9]{1,12})_(" + _SUFFIX_PAT + r")\}\}$")
+# 转义形态：模型把 {{ }} 当成需要转义的字符，输出 \{\{X\}\}。
+#
+# 反斜杠用 `\\*`（任意个）而不是 `\\?`（至多一个），两个原因都是实测/推演出来的：
+# - 反斜杠在**每个**花括号前后都要允许：真实输入是 `\ { \ { X \ } \ }`，两个
+#   花括号**之间也夹着反斜杠**，`(?:\\)?\{\{(?:\\)?(...)` 这种写法连门都进不去；
+# - 模型还会二次转义（`\\{\\{X\\}\\}`，它在按 JSON 的规则思考），只允许一个
+#   反斜杠会剩下 `\\{\\` 残渣 —— 与不修没区别。
+#
+# 花括号组写成 `{1,3}` 而不是 `{1,2}`：流式还原时 _PARTIAL_RX 会把行尾的裸
+# 反斜杠也扣住（否则切点落在反斜杠与花括号之间就漏残渣），于是下一块拼起来的
+# 文本可能多带一层反斜杠/花括号，这里要能容忍。
+#
+# 已知代价（写在这里以免日后当成 bug 追）：反斜杠紧贴在占位符左侧时会被一并
+# 吃掉，所以「Windows 路径分隔符 + 标签被改写过的占位符」这种组合会少一个 `\`。
+# 常规形态（标签完好）由严格遍先处理，走不到这里，所以暴露面很窄；而且一旦
+# 查不到原文就原样放回，不会误吃。
+#
+# 与 _LOOSE_PLACEHOLDER_RX 的分工：这一条**必须带花括号**，因此只用在严格遍
+# 与转义遍；不带花括号的形态仍交给宽松正则，且宽松正则不许走后缀索引
+# （理由见 _RECENT_SUFFIX 的注释）。
+_ESCAPED_PLACEHOLDER_RX = re.compile(
+    r"(?:\\*\{){1,3}(?:\\*)([A-Za-z0-9_]{1,12})_(" + _SUFFIX_PAT + r")(?:\\*\}){1,3}",
+    re.IGNORECASE,
+)
+# 从「带花括号但标签可能被改写」的形态里取后缀。标签允许含下划线：
+# 模型会自己把 `IPPRIVATE` 补成 `IP_PRIVATE`，用 _PLACEHOLDER_PARTS_RX
+# （标签字符类不含下划线）解析不了这种。
+_ANY_BRACED_SUFFIX_RX = re.compile(
+    r"^\{\{([A-Za-z0-9_]{1,12})_(" + _SUFFIX_PAT + r")\}\}$", re.IGNORECASE
+)
+
+
+def _token_suffix(token):
+    """取 token 的 6 位后缀（小写）；形态不对返回空串。
+
+    用字符串切分而不是正则：`{{LABEL_suffix}}` 里 label 由 _safe_label 保证
+    不含下划线，所以最后一个下划线之后就是后缀；对模型改写过的
+    `{{IP_PRIVATE_x}}` 同样成立。
+    """
+    if not isinstance(token, str) or not token.startswith("{{") or not token.endswith("}}"):
+        return ""
+    body = token[2:-2]
+    if "_" not in body:
+        return ""
+    return body.rsplit("_", 1)[1].lower()
+
+
+def _token_label(token):
+    """取 token 的标签部分（原样，未归一化）；形态不对返回空串。"""
+    if not isinstance(token, str) or not token.startswith("{{") or not token.endswith("}}"):
+        return ""
+    body = token[2:-2]
+    if "_" not in body:
+        return ""
+    return body.rsplit("_", 1)[0]
+
+
+def _suffix_indexable(suffix):
+    """该后缀是否允许进索引：必须 6 位纯辅音。
+
+    hex6 后缀不进索引，原因见 _RECENT_SUFFIX 注释（代码里 `_abc123` 太常见，
+    进索引就会误替换）。
+    """
+    return len(suffix) == 6 and all(c in _TOKEN_ALPHABET for c in suffix)
+
+
+def _suffix_index_add(token):
+    """登记后缀索引。**撞车即置为不可用，绝不覆盖、也绝不保留其一。**
+
+    新 token 由 _new_token 保证后缀不与索引冲突，所以撞车只可能来自事件库
+    预热/客户端历史带进来的历史 token。无论保留哪一个，都会让「按后缀反查」
+    把 A 的原文答到 B 的位置上，所以撞车后该后缀直接退出兜底匹配——代价只是
+    这个后缀不参与兜底，退化成改动前的行为。**替换错值比不替换危险得多。**
+    """
+    sfx = _token_suffix(token)
+    if not _suffix_indexable(sfx):
+        return
+    cur = _RECENT_SUFFIX.get(sfx)
+    if cur is None:
+        _RECENT_SUFFIX[sfx] = token
+    elif cur is not token:
+        _RECENT_SUFFIX[sfx] = _SUFFIX_AMBIGUOUS
+
+
+def _suffix_index_del(token):
+    """注销后缀索引。只删「确实指向本 token」的条目。
+
+    撞车标记不会被删：它本来就不指向任何具体 token，而恢复成「指向剩下的那个」
+    又会重新引入歧义。撞车只在预热历史数据时可能发生（新 token 已保证后缀唯一），
+    条数极少，留着不影响内存。
+    """
+    sfx = _token_suffix(token)
+    if sfx and _RECENT_SUFFIX.get(sfx) == token:
+        _RECENT_SUFFIX.pop(sfx, None)
+
+
+def _suffix_real_token(token):
+    """按后缀反查出**真实签发的 token**；不满足全部条件返回 None。
+
+    与 _lookup_by_suffix 拆开，是为了让调用方能拿到真实 token 去做记账
+    （restored_tokens 里存的是签发时的原 token，不是模型改写后的形态）。
+
+    调用点必须**已经保证 token 带花括号**（严格遍与转义遍）。裸 token 不许
+    走这里：流式响应里它可能只是被 chunk 切开的残片（实测 `ATE_zwndfk`），
+    按后缀命中后会把残片替换成明文，拼出一条错的命令。
+
+    **标签必须归一化后相等才认**（`_safe_label` 去大小写、去下划线）：
+    - `{{IP_PRIVATE_x}}` / `{{ipprivate_x}}` → 归一到 `IPPRIVATE`，命中；
+    - `{{HOST_x}}` → `HOST` != `IPPRIVATE`，**拒绝**，原样放回并计入 unresolved。
+
+    为什么不做「只看后缀、标签随便」的完全宽松匹配：后缀虽然只有 47M 分之一
+    的碰撞概率，但一旦碰撞就是**把 A 的原文（真实内网 IP、手机号）替换到 B 的
+    位置上**，属于静默替换错值。而拒绝的代价只是「这次没救回来」，用户能看见
+    裸占位符、命令失败得明明白白。宁可失败可见，不可静默替换——与 _lookup
+    「不做模糊匹配、不猜」的既有约定一致。
+    """
+    m = _ANY_BRACED_SUFFIX_RX.match(token)
+    if not m:
+        return None
+    real = _RECENT_SUFFIX.get(m.group(2).lower())
+    if not isinstance(real, str) or real == token:
+        # None = 没登记过；_SUFFIX_AMBIGUOUS = 该后缀撞车、已退出兜底；
+        # real == token 说明精确路径刚查过且落空，再查一次没意义
+        return None
+    if _safe_label(m.group(1)) != _safe_label(_token_label(real)):
+        return None
+    return real
+
+
+def _lookup_by_suffix(token, sid):
+    """按后缀反查原文（容错路径）。判定逻辑见 _suffix_real_token。"""
+    real = _suffix_real_token(token)
+    if real is None:
+        return None
+    return _lookup(real, sid)
 
 
 def _mask_excluding_placeholders(text, rx, sub_fn):
@@ -2034,6 +2240,17 @@ def restore(text, sid, channel="", escape=False, final=False):
     def _sub(m):
         token = m.group(0)
         orig = _lookup(token, sid)
+        via_suffix = False
+        if orig is None:
+            # 标签被模型改写（补回下划线 / 全小写 / 整段换名）时按后缀反查。
+            # 这里是严格遍，形态由 _PLACEHOLDER_RX 保证带花括号，可以安全走后缀索引。
+            #
+            # 按当前 _PLACEHOLDER_RX 的字符类（`[A-Z0-9]{1,12}`，不含下划线）这条路
+            # 其实到不了：能过严格正则的标签必然与签发时一致，_suffix_real_token 会因
+            # real == token 直接返回 None。保留它是因为一旦将来放宽严格正则（比如允许
+            # 标签含下划线，好让 `{{IP_PRIVATE_x}}` 在严格遍就命中），这里就是兜底。
+            orig = _lookup_by_suffix(token, sid)
+            via_suffix = orig is not None
         if orig is None:
             # 占位符查不到原文（复用表被淘汰/会话被扫掉/客户端历史带入的孤儿）：
             # 原样返回（不能猜），但必须计数，RESTORE 事件里能看见"有占位符没还原"
@@ -2041,12 +2258,44 @@ def restore(text, sid, channel="", escape=False, final=False):
             return token
         s["restored"] = s.get("restored", 0) + 1
         s["restored_tokens"].add(token)
+        if via_suffix:
+            # 靠改写容错救回来的，与宽松兜底同性质：是成功路径，但说明模型在
+            # 改写占位符，属于「哪天彻底还原不回来」的前兆，要能看见。
+            s["degraded"] = s.get("degraded", 0) + 1
         return json.dumps(orig, ensure_ascii=False)[1:-1] if escape else orig
 
     out = _PLACEHOLDER_RX.sub(_sub, confirmed)
 
-    # 第二遍：捞回被模型剥了花括号 / 只剩一半的占位符。
-    # 只在第一遍之后跑，且只认「查得到原文」的 token——查不到就原样放回，绝不猜。
+    # 第二遍：转义形态 `\{\{X\}\}`。
+    #
+    # 必须跑在宽松遍之前：宽松正则不带花括号匹配，在转义形态上只吃得到中间
+    # 一段，替换完会留下 `\{\` 与 `\}\}` 残渣 —— IP 出来了但命令仍然是坏的，
+    # 用户会误判成「还原成功」。这一遍把整个转义块（连同反斜杠）一起替换掉。
+    # 同样只认查得到原文的 token，查不到原样放回，绝不猜。
+    if "_" in out:
+        def _esc_sub(m):
+            whole = m.group(0)
+            canon = "{{%s_%s}}" % (m.group(1), m.group(2))
+            orig = _lookup(canon, sid)
+            real = canon if orig is not None else None
+            if orig is None:
+                real = _suffix_real_token(canon)
+                if real is not None:
+                    orig = _lookup(real, sid)
+            if orig is None:
+                return whole
+            s["restored"] = s.get("restored", 0) + 1
+            s["degraded"] = s.get("degraded", 0) + 1
+            # 记账用真实 token：RESTORE 明细按签发时的 token 比对 restored 标记，
+            # 存模型改写后的形态会查不到，该项被误标成「未还原」（假阴性）。
+            s["restored_tokens"].add(real)
+            return json.dumps(orig, ensure_ascii=False)[1:-1] if escape else orig
+        out = _ESCAPED_PLACEHOLDER_RX.sub(_esc_sub, out)
+
+    # 第三遍：捞回被模型剥了花括号 / 只剩一半的占位符。
+    # 只在前面两遍之后跑，且只认「查得到原文」的 token——查不到就原样放回，绝不猜。
+    # **这一遍不走后缀索引**：裸 token 可能只是被 chunk 切开的残片，按后缀命中
+    # 就会把残片替换成明文（见 _RECENT_SUFFIX 注释）。
     # degraded 计数进 RESTORE 事件（`degraded=` 参数，见 _restore_emit），
     # 让用户看得见「这次是靠兜底修回来的」。这句注释曾在此、而 _emit 里根本没这个
     # 参数——计数只加在会话 dict 里，从没发出去过，于是这条信息永远查不到。

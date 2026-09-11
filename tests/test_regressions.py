@@ -49,6 +49,7 @@ class MaskPathAwarenessTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"张三": "NAME"})
         tr.SENSITIVE_DISABLED = set()
@@ -273,6 +274,7 @@ class CredentialRedactionTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
         tr.SENSITIVE_WORD_DISABLED = {}
@@ -738,6 +740,7 @@ class ReverseRoutingPathPrefixTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
         tr.SENSITIVE_WORD_DISABLED = {}
@@ -1842,6 +1845,7 @@ class _RuleTestBase(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
         tr.SENSITIVE_WORD_DISABLED = {}
@@ -3273,6 +3277,7 @@ class ToolCorrelationIdTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"ACMECORP": "CUSTOMER"})
         tr.SENSITIVE_DISABLED = set()
@@ -3340,6 +3345,7 @@ class FailClosedCaptureModeTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"SENSITIVEPERSONXYZ": "NAME"})
         tr.SENSITIVE_DISABLED = set()
@@ -3538,6 +3544,7 @@ class CardFalsePositiveTests(unittest.TestCase):
         tr.sessions.pop(sid, None)
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
         tr._new_session(sid)
         return tr.mask(text, sid)
 
@@ -3626,6 +3633,7 @@ class LLMMutatedPlaceholderAutoHealTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
 
     def test_llm_mutated_ip_is_never_fabricated(self):
         """模型自造的占位符必须原样保留，绝不推算出一个用户没输入过的 IP。
@@ -3871,6 +3879,7 @@ class CoreChineseValidationTests(unittest.TestCase):
         tr._CUSTOM_WORD_RX_CACHE.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
 
     def test_idcard18_validation(self):
         """18位身份证：省份码 + 真实出生日期 + ISO 7064 MOD 11-2 校验位三重检验。
@@ -4171,3 +4180,271 @@ class ReverseRoutingQueryAndCompatTests(unittest.TestCase):
         self.assertEqual(flow.response.status_code, 503, "FAIL_CLOSED 下必须返回 503 阻断")
 
 
+
+
+class EscapedAndRewrittenPlaceholderTests(_RuleTestBase):
+    """转义残渣与标签改写（2026-09-11 实测后加固）。
+
+    两个真实故障：
+
+    1. **转义残渣**。模型把 `{{ }}` 当模板语法/需要转义的字符，输出
+       `\\{\\{X\\}\\}`。原有宽松兜底只吃得到中间一段，替换完留下 `\\{\\` 与
+       `\\}\\}` 残渣 —— IP 是出来了，但命令仍然是坏的。用户看到真值出现会判断成
+       「还原成功」，比彻底不还原更危险。这是本次加固的头号目标。
+    2. **标签被改写**。模型自己把 `IPPRIVATE` 补成 `IP_PRIVATE`、或整段小写
+       `ipprivate`。按完整 token 查表必然落空，而 6 位后缀是随机指纹、模型改不动，
+       所以按后缀反查能救回来。
+
+    后缀索引的两道门（都写死在用例里，防止日后被"顺手放宽"）：
+    - 只收录纯辅音后缀：hex6 后缀在代码里太常见，进索引会误替换；
+    - 只在带花括号的形态上用：裸 token 可能是被 chunk 切开的残片。
+    """
+
+    IP = "192.168.1.100"
+    BS = "\\"
+
+    def _mint(self, sid="esc"):
+        tr._new_session(sid)
+        masked = tr.mask(f"内网主机 {self.IP}", sid)
+        m = re.search(tr._PLACEHOLDER_RX, masked)
+        self.assertIsNotNone(m, f"样本必须真的被脱敏：{masked!r}")
+        tok = m.group(0)
+        suffix = tr._PLACEHOLDER_PARTS_RX.match(tok).group(2)
+        return sid, tok, suffix
+
+    def _restore(self, sid, text, escape=False):
+        s = tr.sessions[sid]
+        s["restored"] = s["degraded"] = s["unresolved"] = 0
+        return tr.restore_final(text, sid, escape=escape), s
+
+    # ---------- 一、转义残渣 ----------
+
+    def test_escaped_braces_leave_no_residue(self):
+        """核心回归：`\\{\\{X\\}\\}` 必须整块替换干净，一个反斜杠都不许剩。"""
+        sid, tok, _ = self._mint()
+        body = tok[2:-2]
+        text = "ssh root@" + self.BS + "{" + self.BS + "{" + body + self.BS + "}" + self.BS + "}"
+        out, s = self._restore(sid, text)
+        self.assertEqual(out, f"ssh root@{self.IP}", "转义形态必须还原成干净命令")
+        self.assertNotIn(self.BS, out, "不许留下任何反斜杠残渣")
+        self.assertNotIn("{", out, "不许留下花括号残渣")
+        self.assertEqual(s["degraded"], 1, "靠转义兜底修回来的必须计数")
+
+    def test_double_escaped_braces_leave_no_residue(self):
+        """二次转义（模型按 JSON 规则思考时会写成 `\\\\{\\\\{`）同样要清干净。"""
+        sid, tok, _ = self._mint("esc2")
+        body = tok[2:-2]
+        two = self.BS * 2
+        text = "ssh root@" + two + "{" + two + "{" + body + two + "}" + two + "}"
+        out, _ = self._restore(sid, text)
+        self.assertEqual(out, f"ssh root@{self.IP}")
+        self.assertNotIn(self.BS, out)
+
+    def test_escaped_form_in_tool_args_stays_valid_json(self):
+        """tool 参数槽位（escape=True）还原后必须仍是合法 JSON。"""
+        sid, tok, _ = self._mint("esc-json")
+        body = tok[2:-2]
+        text = ('{"cmd": "ssh root@' + self.BS + "{" + self.BS + "{" + body
+                + self.BS + "}" + self.BS + "}" + '"}')
+        out, _ = self._restore(sid, text, escape=True)
+        self.assertEqual(json.loads(out)["cmd"], f"ssh root@{self.IP}",
+                         "还原后的 JSON 必须可解析且值正确")
+
+    def test_escaped_unknown_token_is_untouched(self):
+        """没签发过的 token 即使带转义也一律原样放过——这是不误伤的唯一保证。"""
+        tr._new_session("esc-fp")
+        for text in [r"值 \{\{FAKE_abcdef\}\}", r"值 \{\{PHONE_a1b2c3\}\}",
+                     r"正则 \{2,3\} 与 \{a\}", r"路径 C:/dir/file.txt"]:
+            with self.subTest(text=text):
+                self.assertEqual(tr.restore_final(text, "esc-fp"), text)
+
+    def test_wellformed_placeholder_after_backslash_keeps_the_backslash(self):
+        """已知代价的边界：标签完好时走严格遍，反斜杠不会被吃掉。
+
+        转义遍允许反斜杠紧贴占位符（必须如此，否则 `\\{\\{` 清不干净），代价是
+        「反斜杠 + 标签被改写的占位符」会少一个 `\\`。标签完好的常规形态由严格遍
+        先处理，走不到转义遍，所以这条锁住「常规形态不受影响」。
+        """
+        sid, tok, _ = self._mint("esc-path")
+        out, _ = self._restore(sid, "C:" + self.BS + "dir" + self.BS + tok)
+        self.assertEqual(out, "C:" + self.BS + "dir" + self.BS + self.IP)
+
+    def test_all_forms_survive_every_chunk_boundary(self):
+        """把响应在**每一个**可能的位置切成两块，拼起来都必须还原干净。
+
+        流式接管下 chunk 边界是随机的，只在「完整响应」上断言等于没测边界。
+        加固前实测：转义形态 32 个切点里有 23 个会漏出 `\\{\\` 残渣（因为第一个
+        chunk 只扣下了 `{`、反斜杠已经发出去了），所以 _PARTIAL_RX 才要把反斜杠
+        一起纳入缓冲。这条用例把那批切点锁进 CI。
+        """
+        sid, tok, _ = self._mint("esc-cut")
+        body = tok[2:-2]
+        lower = body.lower()
+        forms = {
+            "严格": tok,
+            "单反斜杠": self.BS + "{" + self.BS + "{" + body + self.BS + "}" + self.BS + "}",
+            "双反斜杠": (self.BS * 2 + "{" + self.BS * 2 + "{" + body
+                         + self.BS * 2 + "}" + self.BS * 2 + "}"),
+            "三反斜杠": (self.BS * 3 + "{" + self.BS * 3 + "{" + body
+                         + self.BS * 3 + "}" + self.BS * 3 + "}"),
+            "标签小写": f"{{{{{lower}}}}}",
+        }
+        for name, frag in forms.items():
+            expected = "ssh root@" + self.IP
+            text = "ssh root@" + frag
+            for i in range(1, len(text)):
+                with self.subTest(形态=name, 切点=i):
+                    tr.sessions[sid]["pending"].clear()
+                    head = tr.restore(text[:i], sid)
+                    tail = tr.restore(text[i:], sid, final=True)
+                    self.assertEqual(head + tail, expected,
+                                     f"{name} 在切点 {i} 漏了残渣（前缀 {text[:i]!r}）")
+            # 收尾：同一形态整包还原也必须干净
+            self.assertEqual(self._restore(sid, text)[0], expected, f"{name} 整包还原失败")
+
+    def test_backslash_ending_chunk_is_delayed_not_dropped(self):
+        """已知代价的边界：行尾裸反斜杠会被多扣一个 chunk，但内容不许丢。
+
+        `\\+$` 分支是为了「切点正好落在反斜杠与花括号之间」才加的；代价是普通
+        文本里以反斜杠结尾的 chunk（Windows 路径、行继续符）也会被扣住。这里锁住
+        「只是晚一个 chunk，不是丢字符」。
+        """
+        sid, _tok, _ = self._mint("esc-backslash-tail")
+        first = "路径 C:" + self.BS + "Users" + self.BS
+        head = tr.restore(first, sid)
+        self.assertEqual(head, "路径 C:" + self.BS + "Users", "行尾反斜杠应被扣住")
+        tail = tr.restore("me" + self.BS + "file.txt", sid, final=True)
+        self.assertEqual(head + tail, first + "me" + self.BS + "file.txt",
+                         "扣住的内容必须原样补回")
+
+    # ---------- 二、标签改写 ----------
+
+    def test_underscore_inserted_by_model_still_restores(self):
+        """模型自己把 `IPPRIVATE` 补回 `IP_PRIVATE`（真实改写形态）。"""
+        sid, tok, suffix = self._mint("esc-underscore")
+        label = tok[2:-2].rsplit("_", 1)[0]
+        # 在第 2 个字符后插一个下划线：IPPRIVATE -> IP_PRIVATE（模型最典型的改写）
+        underscored = label[:2] + "_" + label[2:]
+        out, s = self._restore(sid, f"ssh root@{{{{{underscored}_{suffix}}}}}")
+        self.assertEqual(out, f"ssh root@{self.IP}")
+        self.assertEqual(s["degraded"], 1)
+        self.assertEqual(s["unresolved"], 0, "救回来了就不该再计 unresolved")
+
+    def test_lowercased_label_still_restores(self):
+        """整段小写的标签（严格正则的字符类是大写，只能靠转义遍 + 后缀索引）。"""
+        sid, tok, _ = self._mint("esc-lower")
+        out, s = self._restore(sid, f"ssh root@{{{{{tok[2:-2].lower()}}}}}")
+        self.assertEqual(out, f"ssh root@{self.IP}")
+        self.assertEqual(s["degraded"], 1)
+
+    def test_renamed_label_is_refused_not_guessed(self):
+        """标签被整段换名时必须**拒答**，不能只看后缀就把值填进去。
+
+        后缀虽然只有 47M 分之一的碰撞概率，但一旦碰撞就是静默替换错值
+        （把 A 的内网 IP 填到 B 的位置）。拒答的代价只是这次没救回来，用户能看见
+        裸占位符、命令失败得明明白白。宁可失败可见，不可静默替换。
+        """
+        sid, _tok, suffix = self._mint("esc-rename")
+        text = f"ssh root@{{{{HOST_{suffix}}}}}"
+        out, s = self._restore(sid, text)
+        self.assertEqual(out, text, "换名标签必须原样保留")
+        self.assertEqual(s["restored"], 0)
+        self.assertEqual(s["unresolved"], 1, "没还原的必须计入 unresolved")
+
+    def test_exact_token_is_not_counted_degraded(self):
+        """完好占位符走精确路径，不许被计成 degraded（计数器不能被污染）。"""
+        sid, tok, _ = self._mint("esc-exact")
+        out, s = self._restore(sid, f"主机 {tok}")
+        self.assertEqual(out, f"主机 {self.IP}")
+        self.assertEqual(s["degraded"], 0)
+        self.assertEqual(s["restored"], 1)
+
+    def test_escaped_restore_is_recorded_in_restored_tokens(self):
+        """转义形态救回来的必须记进 restored_tokens，且记**真实 token**。
+
+        RESTORE 明细按签发时的 token 比对 `restored` 标记（_emit_restore_summary），
+        这里若记成模型改写后的形态、或干脆不记，该项就被误标成「未还原」——
+        与「degraded 从来没发出去过」是同一类假阴性。
+        """
+        sid, tok, suffix = self._mint("esc-book")
+        s = tr.sessions[sid]
+        # (a) 标签完好的转义形态：canon 与签发 token 相同
+        body = tok[2:-2]
+        self._restore(sid, "A " + self.BS + "{" + self.BS + "{" + body
+                      + self.BS + "}" + self.BS + "}")
+        self.assertIn(tok, s["restored_tokens"])
+        # (b) 标签被改写的形态：必须记真实 token，而不是改写后的 canon
+        label = body.rsplit("_", 1)[0]
+        underscored = label[:2] + "_" + label[2:]
+        rewritten = f"{{{{{underscored}_{suffix}}}}}"
+        s["restored_tokens"].clear()
+        self._restore(sid, "B " + rewritten)
+        self.assertIn(tok, s["restored_tokens"], "记账必须是签发时的真实 token")
+        self.assertNotIn(rewritten, s["restored_tokens"], "不许记模型改写后的形态")
+
+    # ---------- 三、后缀索引的两道门 ----------
+
+    def test_brace_less_fragment_is_never_substituted(self):
+        """门二：裸 token 不走后缀索引。
+
+        流式响应里裸 token 会被 chunk 切开，残片（实测 `ATE_zwndfk`）能被宽松
+        正则命中；后缀索引一旦介入就会把残片替换成明文，拼出一条错的命令。
+        """
+        sid, tok, suffix = self._mint("esc-frag")
+        for frag in (f"IPPRIV ATE_{suffix}", f"HOST_{suffix}", f"ATE_{suffix}"):
+            with self.subTest(frag=frag):
+                out, _ = self._restore(sid, frag)
+                self.assertEqual(out, frag, "裸残片一律不许替换")
+        # 对照：同一后缀带上完整花括号就走得到后缀索引
+        self.assertEqual(self._restore(sid, f"{{{{IPPRIVATE_{suffix}}}}}")[0], self.IP)
+
+    def test_hex_suffix_is_never_indexed(self):
+        """门一：hex6 后缀不进索引。
+
+        `config_abc123` / `sha_abcdef` 这类「小写标识符 + _hex6」在代码里很常见，
+        进索引就会把整段替换成明文，直接改坏用户代码。
+        """
+        legacy = "{{PHONE_a1b2c3}}"
+        tr._RECENT_FWD["13800138000"] = [legacy, "PHONE", time.time()]
+        tr._RECENT_REV[legacy] = ["13800138000", "PHONE", time.time()]
+        tr._suffix_index_add(legacy)
+        self.assertNotIn("a1b2c3", tr._RECENT_SUFFIX, "hex 后缀不许进索引")
+        # 即使标签被改写，也不能靠 hex 后缀反查到
+        tr._new_session("hex-gate")
+        self.assertIsNone(tr._lookup_by_suffix("{{FAKE_a1b2c3}}", "hex-gate"))
+        self.assertEqual(tr.restore_final("{{FAKE_a1b2c3}}", "hex-gate"), "{{FAKE_a1b2c3}}")
+
+    def test_suffix_collision_blocks_both_tokens(self):
+        """后缀撞车时两边都拒答，绝不能「保留先来的那个」。
+
+        保留其一 = 把 A 的原文答给 B。新 token 由 _new_token 保证后缀唯一，撞车
+        只可能来自预热的历史数据，但答错值的后果一样严重。
+        """
+        sid, tok, suffix = self._mint("esc-collide")
+        other = f"{{{{PHONE_{suffix}}}}}"
+        tr._suffix_index_add(other)
+        self.assertIs(tr._RECENT_SUFFIX[suffix], tr._SUFFIX_AMBIGUOUS, "撞车后必须置为不可用")
+        self.assertIsNone(tr._lookup_by_suffix(tok, sid))
+        self.assertIsNone(tr._lookup_by_suffix(other, sid))
+        # 精确路径不受影响：A 自己的原文照常还原
+        self.assertEqual(tr.restore_final(f"主机 {tok}", sid), f"主机 {self.IP}")
+
+    def test_new_tokens_keep_suffixes_unique(self):
+        """连续签发不产生重复后缀，索引条数与复用表条数一致。"""
+        tr._new_session("esc-uniq")
+        toks = [tr._recall_token(f"10.0.0.{i}", "IP_PRIVATE") for i in range(300)]
+        sufs = [tr._PLACEHOLDER_PARTS_RX.match(t).group(2) for t in toks]
+        self.assertEqual(len(set(toks)), 300)
+        self.assertEqual(len(set(sufs)), 300, "后缀必须唯一，否则索引会产生歧义")
+        self.assertEqual(len(tr._RECENT_SUFFIX), 300)
+
+    def test_suffix_index_is_pruned_with_recent_tables(self):
+        """索引必须跟着复用表一起淘汰，否则 _new_token 会白白避开空出来的后缀。"""
+        tr._new_session("esc-prune")
+        tok = tr._recall_token("10.9.9.9", "IP_PRIVATE")
+        suffix = tr._PLACEHOLDER_PARTS_RX.match(tok).group(2)
+        self.assertIn(suffix, tr._RECENT_SUFFIX)
+        tr._RECENT_FWD["10.9.9.9"][2] = time.time() - 10 * 86400  # 造过期
+        tr._prune_recent()
+        self.assertNotIn(suffix, tr._RECENT_SUFFIX)
+        self.assertNotIn(tok, tr._RECENT_REV)

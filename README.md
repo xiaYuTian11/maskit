@@ -14,7 +14,7 @@
   <a href="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml"><img src="https://github.com/xiaYuTian11/maskit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://linux.do/"><img src="https://img.shields.io/badge/Community-LINUX%20DO-2563eb?logo=linux&logoColor=white" alt="LINUX DO"></a>
   <a href="https://github.com/xiaYuTian11/maskit"><img src="https://img.shields.io/badge/QQ%E7%BE%A4-489926214-12B7F5.svg" alt="QQ Group"></a>
-  <img src="https://img.shields.io/badge/Desktop-Windows%2010%2F11-blueviolet.svg" alt="Desktop: Windows">
+  <img src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS-blueviolet.svg" alt="Desktop: Windows | macOS">
   <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64-2496ED.svg?logo=docker&logoColor=white" alt="Docker">
   <a href="README_EN.md"><img src="https://img.shields.io/badge/Language-English-lightgrey.svg" alt="English README"></a>
 </p>
@@ -154,10 +154,16 @@ print(response.choices[0].message.content)
 
 ## 🚀 下载与部署
 
-### 方式 A：Windows 桌面客户端（推荐个人日常使用）
-1. 前往 **[GitHub Releases 发布页面](https://github.com/xiaYuTian11/maskit/releases)**；
-2. 下载最新的 `Maskit_<版本>_x64-setup.exe` 安装包；
-3. 双击安装运行，系统托盘右键即可启停，支持全自动数字签名（Minisign）无缝在线更新。
+### 方式 A：桌面客户端（Windows / macOS，推荐个人日常使用）
+
+前往 **[GitHub Releases 发布页面](https://github.com/xiaYuTian11/maskit/releases)** 下载对应平台的最新安装包：
+
+- **Windows 用户**：下载 `Maskit_<版本>_x64-setup.exe`，双击安装运行，系统托盘右键即可启停，支持全自动数字签名（Minisign）无缝在线更新；
+- **macOS 用户（Apple Silicon M系列）**：下载 `Maskit_<版本>_aarch64.dmg`，双击打开后将 `Maskit.app` 拖入“应用程序（Applications）”文件夹。
+  > 💡 **macOS 首次打开提示**：若打开时提示“无法打开，因为 Apple 无法检查其是否包含恶意软件”，只需在访达中**右键点击 Maskit 选择「打开」**，或在终端执行命令移除隔离属性即可正常运行：
+  > ```bash
+  > xattr -cr /Applications/Maskit.app
+  > ```
 
 ---
 

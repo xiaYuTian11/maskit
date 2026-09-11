@@ -4,6 +4,35 @@
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-11
+
+命令行工具调用中的占位符还原加固、敏感词管理页「从 .env 导入」，以及 macOS (Apple Silicon) 原生 DMG 发布与在线更新。  
+Release v0.2.7: Harden placeholder restoration in command-line tool calls, add ".env import" to the sensitive-word manager, and support native macOS (Apple Silicon) DMG release with OTA updates.
+
+### 新增 / Features
+- 敏感词管理页新增「📂 从 .env 导入」：粘贴或选择 `.env` 文件后自动解析（支持 `export` 前缀、单双引号、双引号转义、行内注释、BOM、CRLF、重复 key），按变量名与值形态**智能识别凭据**并推荐对应分类，可逐行勾选与调整目标分类后一键合入词库；解析时自动跳过空值、过短（< 3 字符，避免无边界子串匹配误伤代码）、超长（> 200 字符，后端会静默丢弃）与重复定义的行，并在预览区列明跳过原因。
+  *Feature: Added "Import from .env" to the sensitive-word manager. Paste or pick a `.env` file and it is parsed automatically (`export` prefix, single/double quotes, double-quote escapes, inline comments, BOM, CRLF, duplicate keys). Rows are heuristically classified as credentials by variable name and value shape, with a recommended category you can review and change per row before merging into the word list in one click. Blank, too-short (< 3 chars, which would substring-match and corrupt surrounding code), too-long (> 200 chars, silently dropped by the backend) and duplicate rows are skipped with the reason shown in the preview.*
+- **凭据类行的目标分类被收窄为 7 个凭据标签**（`API_KEY` / `TOKEN` / `SECRET` / `ACCESS_KEY` / `JWT` / `CONNSTR` / `PRIVATE_KEY`）：词库分类名会原样成为占位符标签，只有这 7 个标签才会让引擎对事件库**只写摘要与掩码、不写原文**；把密钥导入其它分类等于把明文写进本地 SQLite。
+  *Credential rows can only target the 7 credential labels (`API_KEY` / `TOKEN` / `SECRET` / `ACCESS_KEY` / `JWT` / `CONNSTR` / `PRIVATE_KEY`). A category name becomes the placeholder label verbatim, and only these 7 labels make the engine store a digest and mask — never the plaintext — in the local event database. Importing a secret under any other category would write it to SQLite in cleartext.*
+- 新增 `scripts/check-env-import.mjs`（27 项边界用例，含真实 `.env` 样例端到端），已接入 CI 门禁（`frontend` job，Node 22）。
+  *Added `scripts/check-env-import.mjs` (27 edge cases including an end-to-end real-world `.env` sample), now wired into the CI gate (`frontend` job, Node 22).*
+- 支持 macOS 原生 DMG 桌面安装包自动构建：GitHub Actions Release 工作流增加 `macos-latest` arm64 编译节点，正式 Release 自动附带 `Maskit_<版本>_aarch64.dmg`。
+  *Support native macOS DMG bundle compilation: Added `macos-latest` arm64 runner to GitHub Release workflow, producing `Maskit_<version>_aarch64.dmg` automatically on release.*
+- 统一跨平台自动更新元数据 `latest.json`，同时支持 Windows (`windows-x86_64`) 与 macOS (`darwin-aarch64`) 在线签名静默/增量升级。
+  *Unified multi-platform `latest.json` updater manifest supporting both Windows (`windows-x86_64`) and macOS (`darwin-aarch64`) OTA signature-verified updates.*
+
+### 修复 / Bug Fixes
+- 修复模型把占位符写成**转义形态**（`\{\{IPPRIVATE_x\}\}`）时还原不彻底、留下 `\{\` 与 `\}\}` 残渣的问题：真值确实出来了，但命令仍然是坏的，用户会误判成「还原成功」，比彻底不还原更危险。现在整个转义块连同反斜杠一并替换，且流式响应的 chunk 边界落在反斜杠与花括号之间时也不再漏残渣。
+  *Fix: Fully restore escaped placeholders (`\{\{X\}\}`) including their backslashes, instead of leaving `\{\` / `\}\}` residue that silently breaks the resulting command — previously the real value appeared while the command stayed broken, which is more dangerous than no restore at all.*
+- 修复模型改写占位符**标签**（`IPPRIVATE` → `IP_PRIVATE`、或整段小写）导致完全还原不了的问题：按 6 位随机后缀反查即可救回（仅纯辅音后缀入索引，标签被整段换名时仍拒绝猜测，宁可失败可见）。同时修正这类还原在事件明细里被误标成「未还原」的问题。
+  *Fix: Restore placeholders whose label the model rewrote (`IPPRIVATE` → `IP_PRIVATE`, or lowercased) via reverse-lookup on the 6-char random suffix. Only consonant suffixes are indexed, and renamed labels are still refused rather than guessed. Also corrects such restores being wrongly flagged as "not restored" in event details.*
+
+### 优化 / Improvements
+- 增强 `generate-latest-json.py` 多平台签名解析，提前绑定版本标签防止未绑定变量异常。
+  *Improve multi-platform signature parser in `generate-latest-json.py` to ensure robust manifest generation across platforms.*
+- 独立 Windows 与 Unix 平台的 Python 依赖安装步骤，规避跨 Shell 语法差异。
+  *Separate platform-specific Python installation steps in Release workflow to prevent shell syntax conflicts.*
+
 ## [0.2.6] - 2026-09-11
 
 注入请求头占位符覆盖客户端真实凭据（中转站 401）与 CI 单测死锁修复版本。  

@@ -28,10 +28,37 @@ def main():
         print(f"Directory not found: {root}", file=sys.stderr)
         return 1
 
+    repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "xiaYuTian11/maskit")
+
+    # 1. 查找签名文件
+    win_sigs = list(root.glob("**/*.exe.sig"))
+    mac_sigs = (
+        list(root.glob("**/*.app.tar.gz.sig"))
+        or list(root.glob("**/*aarch64*.sig"))
+        or list(root.glob("**/*darwin*.sig"))
+        or list(root.glob("**/*.dmg.sig"))
+        or [s for s in root.glob("**/*.sig") if not s.name.endswith(".exe.sig")]
+    )
+
+    if not win_sigs and not mac_sigs:
+        print(f"No *.sig signature files found in {root}; skipping latest.json", file=sys.stderr)
+        return 0
+
+    # 2. 确定 tag 版本
+    tag = args.tag or os.environ.get("GITHUB_REF_NAME", "")
+    if not tag:
+        sample = (win_sigs or mac_sigs)[0].name
+        import re
+        m = re.search(r"(\d+\.\d+\.\d+)", sample)
+        if m:
+            tag = f"v{m.group(1)}"
+        else:
+            tag = "latest"
+
+    # 3. 组装平台数据
     platforms = {}
 
-    # 1. Windows x86_64
-    win_sigs = list(root.glob("**/*.exe.sig"))
+    # 1) Windows x86_64
     if win_sigs:
         sig_path = win_sigs[0]
         sig_content = sig_path.read_text(encoding="utf-8").strip()
@@ -41,8 +68,7 @@ def main():
             "url": f"https://github.com/{repo}/releases/download/{tag}/{exe_name}",
         }
 
-    # 2. macOS aarch64 (Apple Silicon)
-    mac_sigs = list(root.glob("**/*aarch64*.sig")) or list(root.glob("**/*darwin*.sig")) or list(root.glob("**/*.dmg.sig"))
+    # 2) macOS aarch64 (Apple Silicon)
     if mac_sigs:
         sig_path = mac_sigs[0]
         sig_content = sig_path.read_text(encoding="utf-8").strip()
@@ -52,22 +78,6 @@ def main():
             "url": f"https://github.com/{repo}/releases/download/{tag}/{bundle_name}",
         }
 
-    if not platforms:
-        print(f"No *.sig signature files found in {root}; skipping latest.json", file=sys.stderr)
-        return 0
-
-    tag = args.tag or os.environ.get("GITHUB_REF_NAME", "")
-    if not tag:
-        # 从文件名尝试提取版本号
-        sample_name = list(platforms.values())[0]["url"].split("/")[-1]
-        import re
-        m = re.search(r"(\d+\.\d+\.\d+)", sample_name)
-        if m:
-            tag = f"v{m.group(1)}"
-        else:
-            tag = "latest"
-
-    repo = args.repo or os.environ.get("GITHUB_REPOSITORY", "xiaYuTian11/maskit")
     pub_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = {

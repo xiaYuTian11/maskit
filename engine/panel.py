@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.6'
+__version__ = '0.2.7'
 import json
 import copy
 import hashlib
@@ -464,21 +464,21 @@ def _no_window():
 
 
 def _run_console(argv, timeout=None):
-    """跑 Windows 控制台命令，返回 (returncode, stdout+stderr 文本)。
+    """跑系统控制台命令，返回 (returncode, stdout+stderr 文本)。
 
-    不能用 subprocess 的 text=True：netstat/tasklist/taskkill/wmic/certutil 按系统
-    代码页输出（中文 Windows 为 GBK），而 PYTHONUTF8=1 会把 text 模式默认编码定成
-    utf-8，解码异常抛在 subprocess 内部 _readerthread 中，调用方 except 捕不到，
-    只留下线程堆栈 —— 后果是端口占用探测返回空、PID 存活校验与 mitmdump 识别恒为
-    False（表现为"启动即网络异常"）。故取原始字节，交 console_decode 解码。
+    不能用 subprocess 的 text=True：Windows 下 netstat/tasklist/taskkill 按系统
+    代码页输出（中文为 GBK），而 PYTHONUTF8=1 会把 text 模式默认编码定成
+    utf-8 导致解码异常；故取原始字节，交 console_decode 跨平台安全解码。
 
     超时/启动失败按调用方既有语义抛出，由各调用点的 except 处理。
     """
-    proc = subprocess.run(
-        argv, capture_output=True,
-        timeout=_CMD_TIMEOUT if timeout is None else timeout,
-        creationflags=_no_window(),
-    )
+    kwargs = {
+        "capture_output": True,
+        "timeout": _CMD_TIMEOUT if timeout is None else timeout,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = _no_window()
+    proc = subprocess.run(argv, **kwargs)
     return proc.returncode, console_decode((proc.stdout or b"") + (proc.stderr or b""))
 
 

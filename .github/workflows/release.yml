@@ -147,11 +147,22 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
             patchelf libssl-dev libayatana-appindicator3-dev
 
-      - name: Install Python and frontend dependencies
-        shell: ${{ matrix.shell }}
+      - name: Install Python and frontend dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip || python3 -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt || python3 -m pip install -r requirements-dev.txt
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
+      - name: Install Python and frontend dependencies (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-dev.txt
           npm --prefix frontend ci
           npm --prefix frontend run build
 
@@ -176,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf dist_engine build_engine src-tauri/resources/engine
-          python -m PyInstaller engine/maskit-engine.spec --noconfirm --distpath dist_engine --workpath build_engine
+          python3 -m PyInstaller engine/maskit-engine.spec --noconfirm --distpath dist_engine --workpath build_engine
           mkdir -p src-tauri/resources/engine
           cp -a dist_engine/MaskitEngine/_internal src-tauri/resources/engine/_internal
           cp dist_engine/MaskitEngine/MaskitEngine src-tauri/resources/engine/MaskitEngine
@@ -285,7 +296,7 @@ jobs:
       - name: Upload desktop bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: maskit-${{ matrix.platform }}-${{ steps.mode_windows.outputs.mode || steps.mode_unix.outputs.mode }}
+          name: maskit-${{ matrix.platform }}-${{ steps.mode_windows.outputs.mode }}${{ steps.mode_unix.outputs.mode }}
           path: src-tauri/target/release/bundle
           if-no-files-found: error
           retention-days: 14
