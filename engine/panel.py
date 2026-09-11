@@ -579,7 +579,7 @@ def prune_event_log(now=None, retention_days=None):
     try:
         if retention_days is None:
             try:
-                retention_days = int(load_config().get("log_retention_days") or LOG_RETENTION_DAYS)
+                retention_days = _normalize_retention(load_config().get("log_retention_days", LOG_RETENTION_DAYS))
             except Exception:
                 retention_days = LOG_RETENTION_DAYS
         result = prune_events(now=now, retention_days=retention_days)
@@ -4371,7 +4371,7 @@ def api_logs():
     # 锁外做脱敏（避免持锁解析 JSON）：SHIELD 行只回传白名单字段
     tail = [_tail_line_sanitize(x) for x in raw_tail]
     try:
-        retention = int(load_config().get("log_retention_days") or LOG_RETENTION_DAYS)
+        retention = _normalize_retention(load_config().get("log_retention_days", LOG_RETENTION_DAYS))
     except Exception:
         retention = LOG_RETENTION_DAYS
     return jsonify({
