@@ -28,6 +28,8 @@ Release v0.2.7: Harden placeholder restoration in command-line tool calls, add "
   *Fix: Restore placeholders whose label the model rewrote (`IPPRIVATE` → `IP_PRIVATE`, or lowercased) via reverse-lookup on the 6-char random suffix. Only consonant suffixes are indexed, and renamed labels are still refused rather than guessed. Also corrects such restores being wrongly flagged as "not restored" in event details.*
 - 修复**流式响应中途出错时丢弃已扣留文本**的问题：还原函数默认只清空一个缓冲槽，正文、思考、工具参数各自通道里被扣住的半截占位符会被静默丢弃，客户端看到的文本凭空少一截（实测：`结尾{{NAME_ab` 之后直接跳到下一块）。现在异常分支会把各通道滞留一并补发，且补发事件独立成行——与残片粘成 `data: {…}data: {…}` 时，严格按行解析的 SDK 会整条丢弃，等于白补。
   *Fix: Stop dropping withheld text when a streaming response fails mid-stream. The restore call only flushed a single buffer slot, so half-placeholders held per channel (content / reasoning / tool arguments) were silently discarded and the client saw a gap in the text. The error path now flushes every channel, and each flush event is emitted on its own line — glued onto a fragment as `data: {…}data: {…}` a strict line-based SDK would discard the whole event.*
+- 修复「从 .env 导入」里**选了目标分类却忘了勾选该行**时的死角：确认按钮置灰、文案是「导入 0 项」，而页脚提示只覆盖「勾了但没选分类」这一种情况，用户完全无从判断为什么点不动（真机复现）。现在**选中目标分类即视为确认导入该行**，会自动把它勾上；用户仍可手动取消勾选。
+  *Fix: Selecting a target category now auto-checks that row. Previously, choosing a category without ticking the checkbox left the confirm button disabled and reading "Import 0" with no explanation — the footer hint only covered the opposite case (ticked but no category), so users had no way to tell why they could not proceed. The checkbox can still be unticked manually.*
 
 ### 优化 / Improvements
 - 增强 `generate-latest-json.py` 多平台签名解析，提前绑定版本标签防止未绑定变量异常。

@@ -305,9 +305,15 @@ export function EnvImportDialog({
                                 targets[i] ? 'border-input text-foreground' : 'border-dashed border-border text-muted-foreground',
                               )}
                               value={targets[i] ?? ''}
-                              onChange={(ev) =>
-                                setTargets((p) => p.map((v, k) => (k === i ? ev.target.value : v)))
-                              }
+                              onChange={(ev) => {
+                                const v = ev.target.value
+                                setTargets((p) => p.map((x, k) => (k === i ? v : x)))
+                                // 选了目标分类 = 明确要导入这一行，顺手勾上。
+                                // 不顺手勾会落进死角：页脚的 needCat 只统计「勾了但没选分类」，
+                                // 恰恰不覆盖「选了分类但没勾」—— 用户看到按钮置灰、文案又是
+                                // 「导入 0 项」，页脚还没有任何提示，只能自己猜（真机实测过）。
+                                if (v) setPicked((p) => p.map((x, k) => (k === i ? true : x)))
+                              }}
                             >
                               <option value="">—</option>
                               {options.map((c) => (
