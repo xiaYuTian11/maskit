@@ -2042,7 +2042,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 className="h-8 w-24 text-xs"
                 defaultValue={cfg?.log_retention_days ?? 7}
                 onBlur={(e) => {
-                  const v = Number(e.target.value) || 7
+                  const parsed = Number(e.target.value)
+                  // Zero means unlimited retention; only empty/invalid input uses the default.
+                  const v = e.target.value.trim() === '' || !Number.isFinite(parsed) ? 7 : parsed
                   if (v !== (cfg?.log_retention_days ?? 7)) save({ log_retention_days: v }, t('settings.toast.retentionUpdated'))
                 }}
               />
