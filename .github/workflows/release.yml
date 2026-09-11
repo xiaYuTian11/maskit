@@ -258,7 +258,7 @@ jobs:
           if (-not $bundle) { throw 'NSIS bundle missing' }
           $mode = '${{ steps.mode_windows.outputs.mode }}'
           if ($mode -eq 'signed' -and -not (Get-ChildItem src-tauri\target\release\bundle -Filter '*.sig' -Recurse -File)) { throw 'signed bundle has no .sig' }
-          if ($mode -eq 'unsigned') { 'UNSIGNED: updater signature and metadata were intentionally not generated.' | Set-Content src-tauri\target\release\bundle\UNSIGNED.txt }
+          if ($mode -eq 'unsigned') { 'UNSIGNED: no updater signature was generated for this bundle.' | Set-Content src-tauri\target\release\bundle\UNSIGNED.txt }
 
       - name: Validate desktop output (Unix)
         if: runner.os != 'Windows'
@@ -274,7 +274,7 @@ jobs:
             exit 1
           fi
           if [ "$mode" = unsigned ]; then
-            printf '%s\n' 'UNSIGNED: updater signature and metadata were intentionally not generated.' > src-tauri/target/release/bundle/UNSIGNED.txt
+            printf '%s\n' 'UNSIGNED: no updater signature was generated for this bundle.' > src-tauri/target/release/bundle/UNSIGNED.txt
           fi
 
       - name: Generate SHA-256 checksums (Windows)
@@ -330,9 +330,9 @@ jobs:
             fi
           else
             if [ "$unsigned_count" -gt 0 ]; then
-              note='At least one desktop bundle is UNSIGNED. Updater signatures and latest.json metadata were intentionally not generated; use the installer manually and do not enable automatic updates for these assets.'
+              note='At least one desktop bundle is UNSIGNED. No updater signature was produced for it, so automatic updates are not offered for those bundles; install them manually instead.'
             else
-              note='Desktop bundles were built and .sig files were verified where signing credentials were available. This workflow does not assemble or publish latest.json updater metadata; automatic update availability must be verified separately.'
+              note='Desktop bundles were built and signed. latest.json updater metadata is assembled from the .sig files and uploaded with this release, so the built-in updater can update to it automatically.'
             fi
             gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "Data Maskit $GITHUB_REF_NAME" --notes "$note"
           fi
