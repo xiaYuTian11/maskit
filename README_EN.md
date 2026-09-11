@@ -106,7 +106,7 @@ Go to `Settings` → `Models`:
 - Enter your API Key (Maskit forwards it securely to upstream).
 
 ### 2. Claude Code (with cc-switch)
-- In **[cc-switch](https://github.com/super-l/cc-switch)**, set the Claude channel **Base URL** to:
+- In **[cc-switch](https://github.com/farion1231/cc-switch)**, set the Claude channel **Base URL** to:
   `http://127.0.0.1:18703`
 - Or launch from terminal:
   ```bash

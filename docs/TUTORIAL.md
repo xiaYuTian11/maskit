@@ -160,7 +160,7 @@ docker run -d \
 
 ### 2. Claude Code 接入（结合 cc-switch 最简单）
 
-如果你平时使用社区广受好评的多渠道切换工具 **[cc-switch](https://github.com/super-l/cc-switch)**：
+如果你平时使用社区广受好评的多渠道切换工具 **[cc-switch](https://github.com/farion1231/cc-switch)**：
 
 1. 打开 `cc-switch` 客户端，找到你正在使用的 Claude 渠道；
 2. 点击编辑，将 **Base URL** 直接修改为 Maskit 的本地 Anthropic 端口：

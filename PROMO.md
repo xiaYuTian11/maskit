@@ -59,7 +59,7 @@ docker run -d \
 ### 🛠️ 常见开发工具配置（支持任意可配 Base URL 的工具）
 
 * **Cursor**：`Settings` → `Models` → `OpenAI Base URL` 改为 `http://127.0.0.1:18701/v1`
-* **Claude Code**：使用 **[cc-switch](https://github.com/super-l/cc-switch)** 将 Base URL 切换为 `http://127.0.0.1:18703`，或终端运行 `export ANTHROPIC_BASE_URL="http://127.0.0.1:18703"`
+* **Claude Code**：使用 **[cc-switch](https://github.com/farion1231/cc-switch)** 将 Base URL 切换为 `http://127.0.0.1:18703`，或终端运行 `export ANTHROPIC_BASE_URL="http://127.0.0.1:18703"`
 * **Codex / Pi / OpenCode / 命令行工具**：
   ```bash
   export OPENAI_BASE_URL="http://127.0.0.1:18701/v1"
