@@ -119,6 +119,15 @@ python scripts/check-version.py
 
 ## 5. 打包与发布规范
 
+- **发版日志中英双语规范（强制）**：
+  - 每次发版时，`CHANGELOG.md` 与 GitHub Release 说明必须提供**中英双语（Bilingual）对照**，方便海内外开发者理解变更细节；
+  - 格式遵循 Keep a Changelog，重大修复与破坏性变动需附带中英文说明。
+
+- **多平台构建矩阵**：
+  - **Windows 桌面端**：`x86_64` NSIS 安装包；
+  - **macOS 桌面端**：`arm64`（Apple Silicon）DMG 安装包，由 GitHub Actions `macos-latest` 原生编译；
+  - **Docker 容器**：`linux/amd64` 与 `linux/arm64` 双架构镜像（推送到 `ghcr.io`）。
+
 - **一键全自动发版（推荐）**：使用 `release.ps1`，自动编排「前置 git pull 对齐 -> build.ps1 打包与门禁验证 -> git commit -> git tag -> 推送主分支与 Tag」：
   ```powershell
   # 自动读取并按当前/指定版本号完成构建、提交流水线与推送
@@ -136,4 +145,6 @@ python scripts/check-version.py
   # 或指定正式版本号打包
   .\build.ps1 -ReleaseOnly -Version "1.0.0"
   ```
-- 打包产物位于：`src-tauri\target\release\bundle\nsis\Maskit_<版本>_x64-setup.exe`。
+- 打包产物位于：
+  - Windows: `src-tauri\target\release\bundle\nsis\Maskit_<版本>_x64-setup.exe`；
+  - macOS: `src-tauri/target/release/bundle/dmg/Maskit_<版本>_aarch64.dmg`。

@@ -106,13 +106,17 @@ jobs:
     needs: validate
     if: startsWith(github.ref, 'refs/tags/v')
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - platform: windows-x64
             os: windows-latest
             bundle: nsis
             shell: pwsh
+          - platform: macos-arm64
+            os: macos-latest
+            bundle: dmg
+            shell: bash
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -266,13 +270,13 @@ jobs:
         shell: pwsh
         env:
           CHECKSUM_PLATFORM: ${{ matrix.platform }}
-          CHECKSUM_MODE: ${{ steps.mode_windows.outputs.mode }}
+          CHECKSUM_MODE: ${{ steps.mode_windows.outputs.mode || steps.mode_unix.outputs.mode }}
         run: python -c "import hashlib, os; from pathlib import Path; root=Path('src-tauri/target/release/bundle'); files=sorted(p for p in root.rglob('*') if p.is_file() and not p.name.startswith('SHA256SUMS-')); out=root/('SHA256SUMS-'+os.environ['CHECKSUM_PLATFORM']+'-'+os.environ['CHECKSUM_MODE']+'.txt'); out.write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(root).as_posix()+'\\n' for p in files), encoding='utf-8'); assert out.stat().st_size > 0"
 
       - name: Upload desktop bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: maskit-${{ matrix.platform }}-${{ steps.mode_windows.outputs.mode }}
+          name: maskit-${{ matrix.platform }}-${{ steps.mode_windows.outputs.mode || steps.mode_unix.outputs.mode }}
           path: src-tauri/target/release/bundle
           if-no-files-found: error
           retention-days: 14

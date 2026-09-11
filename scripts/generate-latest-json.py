@@ -28,21 +28,40 @@ def main():
         print(f"Directory not found: {root}", file=sys.stderr)
         return 1
 
-    sigs = list(root.glob("**/*.exe.sig"))
-    if not sigs:
-        print(f"No *.exe.sig files found in {root}; skipping latest.json", file=sys.stderr)
-        return 0
+    platforms = {}
 
-    sig_path = sigs[0]
-    sig_content = sig_path.read_text(encoding="utf-8").strip()
-    exe_path = sig_path.with_suffix("")
-    exe_name = exe_path.name
+    # 1. Windows x86_64
+    win_sigs = list(root.glob("**/*.exe.sig"))
+    if win_sigs:
+        sig_path = win_sigs[0]
+        sig_content = sig_path.read_text(encoding="utf-8").strip()
+        exe_name = sig_path.with_suffix("").name
+        platforms["windows-x86_64"] = {
+            "signature": sig_content,
+            "url": f"https://github.com/{repo}/releases/download/{tag}/{exe_name}",
+        }
+
+    # 2. macOS aarch64 (Apple Silicon)
+    mac_sigs = list(root.glob("**/*aarch64*.sig")) or list(root.glob("**/*darwin*.sig")) or list(root.glob("**/*.dmg.sig"))
+    if mac_sigs:
+        sig_path = mac_sigs[0]
+        sig_content = sig_path.read_text(encoding="utf-8").strip()
+        bundle_name = sig_path.with_suffix("").name
+        platforms["darwin-aarch64"] = {
+            "signature": sig_content,
+            "url": f"https://github.com/{repo}/releases/download/{tag}/{bundle_name}",
+        }
+
+    if not platforms:
+        print(f"No *.sig signature files found in {root}; skipping latest.json", file=sys.stderr)
+        return 0
 
     tag = args.tag or os.environ.get("GITHUB_REF_NAME", "")
     if not tag:
-        # 从文件名尝试提取：Maskit_0.2.2_x64-setup.exe -> v0.2.2
+        # 从文件名尝试提取版本号
+        sample_name = list(platforms.values())[0]["url"].split("/")[-1]
         import re
-        m = re.search(r"(\d+\.\d+\.\d+)", exe_name)
+        m = re.search(r"(\d+\.\d+\.\d+)", sample_name)
         if m:
             tag = f"v{m.group(1)}"
         else:
@@ -55,12 +74,7 @@ def main():
         "version": tag,
         "notes": f"Data Maskit {tag} 发布更新。",
         "pub_date": pub_date,
-        "platforms": {
-            "windows-x86_64": {
-                "signature": sig_content,
-                "url": f"https://github.com/{repo}/releases/download/{tag}/{exe_name}",
-            }
-        },
+        "platforms": platforms,
     }
 
     out_path = root / "latest.json"

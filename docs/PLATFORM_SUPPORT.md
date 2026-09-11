@@ -8,7 +8,7 @@
 | Docker 无头服务 | linux/amd64 | 支持 | Web 控制台和反向代理端口，适合 Linux 服务器、NAS 或 Windows/macOS 上的 Docker Desktop。 |
 | Docker 无头服务 | linux/arm64 | 支持 | 由 Release 工作流构建，多数 ARM64 NAS/服务器可用；请确认 Docker 主机支持对应架构。 |
 | 源码引擎 + Web 控制台 | Windows / Linux / macOS | 可启动 | Python 3.13 + Flask；基础反向代理/Web 控制台可运行，系统代理/证书等平台特性请按目标系统单独验证。 |
-| 原生 macOS 桌面安装包 | arm64 | 暂未发布 | 官方桌面端目前仅支持 Windows；macOS 建议使用 Docker 镜像或源码形态。 |
+| 原生 macOS 桌面安装包 | arm64 (Apple Silicon) | 支持 | 由 GitHub Actions Release 工作流自动编译生成 DMG 安装包；内置 Python 引擎 sidecar 与开机自启（LaunchAgent）。 |
 | 原生 Linux 桌面安装包 | x86_64 | 暂未发布 | 官方桌面端目前仅支持 Windows；Linux 建议使用 Docker 官方多架构镜像部署。 |
 
 ## Docker 验证
