@@ -147,7 +147,7 @@ print(response.choices[0].message.content)
 1. 在「客户端管理」点击「添加客户端」；
 2. **目标网关**：填入中转商地址（如 `https://api.your-relay.com`）；
 3. **本地端口**：填一个未被占用的端口（如 `18709`）；
-4. **脱敏路径**：**直接填 `/v1` 即可**（前缀通配，自动覆盖所有 `/v1/chat/completions`、`/v1/models` 等子路径）；
+4. **脱敏路径**：默认已预置主流路径（如 `/v1/chat/completions` 等），直接按需勾选即可；
 5. 保存后，外部工具的 Base URL 填 `http://127.0.0.1:18709/v1` 即可正常使用！
 
 ---
@@ -170,14 +170,47 @@ docker run -d \
   --name maskit \
   --restart unless-stopped \
   -p 127.0.0.1:5801:5801 \
-  -p 127.0.0.1:18701-18710:18701-18710 \
+  -p 127.0.0.1:18701:18701 \
   -v maskit_data:/data \
-  -e MASKIT_PANEL_TOKEN="请替换为你的随机控制台密码" \
+  -e MASKIT_PANEL_TOKEN="YourSecretToken123456" \
   ghcr.io/xiayutian11/maskit:latest
 ```
 
-浏览器打开 `http://<服务器IP>:5801/?token=<你的密码>` 即可直接管理！
-> **安全建议**：命令默认绑定 `127.0.0.1` 本机回环，保护反代端口不直接暴露到公网。如需局域网共享，建议配置 Nginx 反代加 TLS，或显式绑定到受信任的内网 IP。
+> 💡 **端口映射与网络访问说明**：
+> - `5801`：**Web 控制台端口（必开）**，用于查看仪表盘、管理规则与客户端配置；
+> - `18701` 起：**大模型反代端口（按需开启）**。例如默认 18701 对应 OpenAI、18702 对应 DeepSeek。**用几个客户端就开几个端口**（如仅用一个就只映射 18701，用三个就 `-p 127.0.0.1:18701-18703:18701-18703`），不要盲目映射一大排无用端口；
+> - **访问地址绑定**：若服务器前置有 Nginx 或仅供本机访问，推荐绑定 `-p 127.0.0.1:5801:5801`；若内网/局域网直接通过 IP 访问容器，去掉 `127.0.0.1:` 前缀改为 `-p 5801:5801 -p 18701:18701`；
+> - **控制台令牌（密码）**：`-e MASKIT_PANEL_TOKEN="YourSecretToken123456"` 必须为 **≥16 位纯 ASCII 字符**（请勿包含中文字符，否则引擎将安全回退为启动日志随机 token）。
+
+浏览器打开 `http://<服务器IP>:5801` 即可直接访问，并在弹出的登录窗口中输入你设置的密码即可管理（亦可使用 `http://<服务器IP>:5801/#token=<你的密码>` 快捷免密进入，fragment 不随请求发送、不会进代理访问日志，进入后 Token 会自动从地址栏抹除）。
+
+> **安全建议与反向代理（Nginx 配置参考）**：
+> 默认绑定 `127.0.0.1` 本机回环，保护代理端口不直接暴露到公网。若在外部通过 Nginx 挂域名并配置 TLS 反代，**Docker 启动时请务必添加环境变量 `-e MASKIT_TRUST_PROXY=1`**（使面板信任前置 Nginx 传递的 `X-Forwarded-Proto: https` 头部，防止 API 请求被 Origin 校验拦截），参考配置如下：
+> ```nginx
+> server {
+>     listen 443 ssl;
+>     server_name maskit.example.com;
+>     # ssl 证书配置省略...
+>
+>     # 1. 控制面板（直接访问域名，在弹出的窗口输入 Token 登录）
+>     location / {
+>         proxy_pass http://127.0.0.1:5801;
+>         proxy_set_header Host $host;
+>         proxy_set_header X-Real-IP $remote_addr;
+>         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+>         proxy_set_header X-Forwarded-Proto $scheme;  # 关键：告知后端外部协议为 https
+>         proxy_set_header X-Forwarded-Host $host;
+>     }
+>
+>     # 2. 模型反代端口（如 OpenAI，关闭缓存保证打字机流式顺畅；建议配合内网白名单）
+>     location /openai/ {
+>         proxy_pass http://127.0.0.1:18701/;
+>         proxy_set_header Host $host;
+>         proxy_buffering off;
+>         proxy_read_timeout 600s;
+>     }
+> }
+> ```
 
 ---
 
@@ -190,11 +223,12 @@ cd maskit
 # 1. 安装核心依赖
 pip install -r requirements.txt
 
-# 2. 启动引擎与 Web 控制台（浏览器打开 http://127.0.0.1:5801，密码见 engine/proxy_token）
+# 2. 构建前端并启动引擎（若仅需控制台 API，可跳过前端构建）
+cd frontend && npm install && npm run build && cd ..
 python engine/panel.py
 
-# 3. 前端界面二次开发（Vite 热重载）
-cd frontend && npm install && npm run dev
+# 3. 前端界面二次开发（Vite 热重载，推荐）
+cd frontend && npm run dev
 ```
 
 ---

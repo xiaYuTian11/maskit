@@ -972,19 +972,37 @@ def is_target(host, path):
 # ========== 反向代理路由 ==========
 
 def _parse_upstream_target(target):
-    """'https://api.openai.com' -> ('api.openai.com', 443, 'https', '')
-    'https://api.example.com/v1' -> (host, 443, 'https', '/v1')
+    """'https://api.openai.com' -> ('api.openai.com', 443, 'https', '', '')
+    'https://api.example.com/v1?api-version=2024-02-15' -> (host, 443, 'https', '/v1', 'api-version=2024-02-15')
 
     target 带路径时（如 /v1、/zen/go/v1），透传层（panel）会拼回路径前缀；
-    这里同样返回 path_prefix，反向代理路由转发时拼回，保证保护态与透传态
-    上游地址完全一致（审计实测：曾丢失前缀导致"透传能用、保护 404"）。
+    这里同样返回 path_prefix 与 query_prefix，反向代理路由转发时拼回，
+    保证 Azure OpenAI、Gemini 或带版本号的上游 query 参数不丢失。
     """
     parsed = urlparse(target)
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     scheme = parsed.scheme or "https"
     path_prefix = parsed.path.rstrip("/")
-    return host, port, scheme, path_prefix
+    query_prefix = parsed.query or ""
+    return host, port, scheme, path_prefix, query_prefix
+
+
+def _merge_path_and_query(path_prefix, target_query, client_path):
+    """合并上游 target 前缀/query 与客户端请求路径/query，保证 api-version 等参数绝不丢失。"""
+    if "?" in (client_path or ""):
+        client_pure, client_q = client_path.split("?", 1)
+    else:
+        client_pure, client_q = client_path or "", ""
+
+    if path_prefix:
+        merged_path = path_prefix + (client_pure if client_pure.startswith("/") else "/" + client_pure)
+    else:
+        merged_path = client_pure or "/"
+
+    queries = [q for q in (target_query, client_q) if q]
+    merged_q = "&".join(queries)
+    return merged_path + ("?" + merged_q if merged_q else "")
 
 
 def _listener_port(flow):
@@ -1031,17 +1049,18 @@ def _match_upstream_by_port(port):
 def _match_upstream(path):
     """单端口前缀模式：按请求路径前缀匹配反向代理 upstream。
     返回 (upstream_dict, stripped_path) 或 (None, path)。
-    base_path=/openai, 请求 /openai/v1/chat/completions -> 剩余 /v1/chat/completions
+    base_path=/openai, 请求 /openai/v1/chat/completions?api-version=1 -> 剩余 /v1/chat/completions?api-version=1
     """
     clean = (path or "").split("?", 1)[0]
+    query = ("?" + (path or "").split("?", 1)[1]) if "?" in (path or "") else ""
     for up in UPSTREAMS:
         base = (up.get("base_path") or "").rstrip("/")
         if not base:
             continue
         if clean == base:
-            return up, "/"
+            return up, "/" + query
         if clean.startswith(base + "/"):
-            return up, clean[len(base):] or "/"
+            return up, (clean[len(base):] or "/") + query
     return None, path
 
 
@@ -1071,7 +1090,7 @@ def apply_reverse_routing(flow):
     port = _listener_port(flow)
     up = _match_upstream_by_port(port)
     if up:
-        host, up_port, scheme, path_prefix = _parse_upstream_target(up["target"])
+        host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
         try:
             flow.request.host = host
             flow.request.port = up_port
@@ -1079,8 +1098,7 @@ def apply_reverse_routing(flow):
             flow.request.headers["Host"] = host
         except Exception:
             pass
-        # 多端口不剥前缀，但 target 自带路径前缀时拼回（透传层同口径）
-        final = (path_prefix + path) if path_prefix else path
+        final = _merge_path_and_query(path_prefix, query_prefix, path)
         try:
             flow.request.path = final
         except Exception:
@@ -1090,7 +1108,7 @@ def apply_reverse_routing(flow):
     up, stripped = _match_upstream(path)
     if not up:
         return None, path
-    host, up_port, scheme, path_prefix = _parse_upstream_target(up["target"])
+    host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
     try:
         flow.request.host = host
         flow.request.port = up_port
@@ -1103,7 +1121,7 @@ def apply_reverse_routing(flow):
             flow.request.path = stripped
         except Exception:
             pass
-    final = (path_prefix + stripped) if path_prefix else stripped
+    final = _merge_path_and_query(path_prefix, query_prefix, stripped)
     try:
         flow.request.path = final
     except Exception:
@@ -2559,7 +2577,25 @@ def request(flow: http.HTTPFlow):
         # 出口代理必须在任何 return 之前挂上（含下面的 passthrough_unlisted_path 分支）
         _apply_egress_proxy(flow, matched_up)
         if not _upstream_path_ok(matched_up, path):
-            if method in _READONLY_METHODS or not _looks_like_llm_request(flow):
+            if method in _READONLY_METHODS:
+                _emit_skip(host, method, path, "passthrough_unlisted_path", source=source, upstream=up_name)
+                return
+            # 无论是否在白名单，非只读请求只要像 LLM 请求就继续进入脱敏流程；
+            # 但若未在白名单路径且并非标准 LLM 文本补全请求：
+            # 若是声明非 JSON（如 multipart/form-data 音频上传、二进制流），在 FAIL_CLOSED 下绝不能静默透传，必须阻断；
+            # 若是常规 JSON 管理调用（如创建微调任务 /v1/files 等结构化数据），允许按 passthrough 转发。
+            if not _looks_like_llm_request(flow):
+                ct_unlisted = (flow.request.headers.get("content-type", "") or "").lower()
+                if "json" not in ct_unlisted and FAIL_CLOSED:
+                    _emit("BLOCK", host=host, method=method, path=path.split("?")[0],
+                          reason="unlisted_non_json_blocked", upstream=up_name, **source)
+                    flow.response = http.Response.make(
+                        503,
+                        json.dumps({"error": "shield_mask_failed", "reason": "unlisted_non_json_blocked"},
+                                   ensure_ascii=False).encode("utf-8"),
+                        {"content-type": "application/json"},
+                    )
+                    return
                 _emit_skip(host, method, path, "passthrough_unlisted_path", source=source, upstream=up_name)
                 return
     else:
@@ -2589,7 +2625,7 @@ def request(flow: http.HTTPFlow):
         )
         return
 
-    ct = flow.request.headers.get("content-type", "")
+    ct = (flow.request.headers.get("content-type", "") or "").lower()
     if "json" not in ct:
         # 声明非 JSON（multipart 上传、二进制等）：脱敏管线处理不了。
         # fail_closed 下阻断（无法确认里面没有原文）；仅排查问题时
@@ -3713,22 +3749,63 @@ def _read_settings():
     ups = []
     raw_ups = cfg.get("upstreams")
     if isinstance(raw_ups, list):
+        seen_names = set()
+        seen_base = set()
+        seen_port = set()
         for u in raw_ups:
             if not isinstance(u, dict):
                 continue
             name = str(u.get("name") or "").strip()
             base = str(u.get("base_path") or "").strip()
             target = str(u.get("target") or "").strip()
-            if not name or not base or not target:
+            if not name or not target:
                 continue
+            name_key = name.lower()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+
+            slug = re.sub(r"[^A-Za-z0-9_\-]", "", name).lower()[:40]
+            if not base or not re.fullmatch(r"/[A-Za-z0-9_\-/]{1,60}", base):
+                base = "/" + (slug or f"up_{len(ups) + 1}")
             if not base.startswith("/"):
                 base = "/" + base
+            candidate_base = base
+            idx = 2
+            while candidate_base in seen_base:
+                candidate_base = f"{base}_{idx}"
+                idx += 1
+            base = candidate_base
+            seen_base.add(base)
+
             port = int(u.get("port") or 0)
+            if port == 0:
+                port = 18701 + len(ups)
+            if port < 1024 or port > 65535 or port in seen_port:
+                port = 18701 + len(ups)
+                while port in seen_port:
+                    port += 1
+            seen_port.add(port)
+
             paths = u.get("paths") or DEFAULT_PATHS
             if not isinstance(paths, list):
                 paths = DEFAULT_PATHS
+
+            extra_headers = {}
+            raw_extra = u.get("extra_headers")
+            if isinstance(raw_extra, dict):
+                for k, v in raw_extra.items():
+                    kk = str(k or "").strip()
+                    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", kk):
+                        continue
+                    vv = str(v or "")
+                    if len(vv) > 2048:
+                        continue
+                    extra_headers[kk] = vv
+
             ups.append({"name": name, "base_path": base, "port": port, "target": target,
-                        "paths": list(paths), "use_proxy": bool(u.get("use_proxy"))})
+                        "paths": list(paths), "use_proxy": bool(u.get("use_proxy")),
+                        "extra_headers": extra_headers})
     if not ups:
         ups = list(DEFAULT_UPSTREAMS)
     # 出口代理：enabled 关闭时直接置 None，省得 request() 每次都判两个字段。

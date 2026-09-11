@@ -33,7 +33,7 @@ Windows 安装包由根目录流水线生成：
 .\build.ps1 -ReleaseOnly
 ```
 
-构建前请安装 Python 3.13、Node.js 20+、Rust stable 和 WebView2。Windows 发布产物位于 `src-tauri/target/release/bundle/nsis/`；macOS/Linux 产物由 tag CI 在对应 runner 构建。没有配置更新签名密钥时，工作流会明确标记 `UNSIGNED.txt`，这类包只能手动安装，不能启用自动更新。
+构建前请安装 Python 3.13、Node.js 20+、Rust stable 和 WebView2。Windows 发布产物位于 `src-tauri/target/release/bundle/nsis/`（目前官方 Release 工作流仅构建 Windows 桌面安装包；macOS/Linux 推荐使用 Docker 或源码形态）。没有配置更新签名密钥时，工作流会明确标记 `UNSIGNED.txt`，这类包只能手动安装，不能启用自动更新。
 
 ## 源码运行
 

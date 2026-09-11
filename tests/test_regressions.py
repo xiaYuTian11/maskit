@@ -1133,6 +1133,34 @@ class ConfigConcurrencyTests(unittest.TestCase):
         finally:
             panel.CONFIG_PATH = old_cfg
 
+    def test_api_config_endpoint_concurrent_posts_do_not_lose_updates(self):
+        """测试 /api/config 真实接口在并发 POST 提交部分字段时，读改写原子性保证字段不丢失。"""
+        import concurrent.futures
+        old_cfg = panel.CONFIG_PATH
+        tmp = Path(tempfile.mkdtemp())
+        client = panel.app.test_client()
+        headers = {"X-Shield-Token": panel.API_TOKEN}
+        try:
+            panel.CONFIG_PATH = tmp / "config.json"
+            panel.save_config(panel.default_config())
+
+            def post_field(data):
+                return client.post("/api/config", json=data, headers=headers)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(post_field, {"origin_check": False})
+                f2 = executor.submit(post_field, {"debug": True})
+                r1 = f1.result(timeout=10)
+                r2 = f2.result(timeout=10)
+
+            self.assertEqual(r1.status_code, 200)
+            self.assertEqual(r2.status_code, 200)
+            final = panel.load_config()
+            self.assertFalse(final["origin_check"], "origin_check 必须为 False，绝不能被另一个请求覆盖成旧值")
+            self.assertTrue(final["debug"], "debug 必须为 True，绝不能被另一个请求覆盖成旧值")
+        finally:
+            panel.CONFIG_PATH = old_cfg
+
     def test_cfg_lock_is_reentrant(self):
         """load_config 内部会调 save_config 落迁移标记，锁必须可重入，否则自死锁。"""
         self.assertIsInstance(panel.cfg_lock, type(threading.RLock()))
@@ -4051,5 +4079,95 @@ class CoreChineseValidationTests(unittest.TestCase):
         # 默认配置里只剩 IDCARD
         self.assertIn("IDCARD", sd.DEFAULT_BUILTIN_RULES)
         self.assertNotIn("IDCARD18", sd.DEFAULT_BUILTIN_RULES)
+
+class ReverseRoutingQueryAndCompatTests(unittest.TestCase):
+    def test_apply_reverse_routing_preserves_query_params(self):
+        """反代模式下必须完整保留客户端请求中的 Query 参数，且正确合并 Target 自带的 Query。"""
+        # 1. 多端口模式
+        tr.UPSTREAMS = [{
+            "name": "azure", "port": 18701, "base_path": "/azure",
+            "target": "https://resource.openai.azure.com/openai/deployments/gpt4?api-version=2024-02-15",
+            "paths": ["/v1/chat/completions"],
+        }]
+        req = SimpleNamespace(
+            method="POST", path="/chat/completions?stream=true&user=test", host="127.0.0.1",
+            port=18701, scheme="http", headers={"Host": "127.0.0.1:18701"},
+        )
+        flow = SimpleNamespace(request=req, client_conn=SimpleNamespace(sockname=("127.0.0.1", 18701)))
+        up, final = tr.apply_reverse_routing(flow)
+        self.assertIsNotNone(up)
+        self.assertIn("api-version=2024-02-15", flow.request.path)
+        self.assertIn("stream=true", flow.request.path)
+        self.assertIn("user=test", flow.request.path)
+        self.assertEqual(flow.request.host, "resource.openai.azure.com")
+
+        # 2. 单端口前缀模式
+        tr.UPSTREAMS = [{
+            "name": "openai", "port": 18702, "base_path": "/openai",
+            "target": "https://api.openai.com/v1",
+            "paths": ["/v1/chat/completions"],
+        }]
+        req2 = SimpleNamespace(
+            method="POST", path="/openai/chat/completions?model=gpt-4o", host="127.0.0.1",
+            port=5802, scheme="http", headers={"Host": "127.0.0.1:5802"},
+        )
+        flow2 = SimpleNamespace(request=req2, client_conn=SimpleNamespace(sockname=("127.0.0.1", 5802)))
+        up2, final2 = tr.apply_reverse_routing(flow2)
+        self.assertIsNotNone(up2)
+        self.assertEqual(flow2.request.path, "/v1/chat/completions?model=gpt-4o")
+
+    def test_case_insensitive_content_type_json(self):
+        """Content-Type 为 Application/JSON 大小写混合时不可被误判为 non_json_body 503 阻断。"""
+        tr.UPSTREAMS = [{
+            "name": "test-up", "port": 18701, "base_path": "/test-up",
+            "target": "https://api.openai.com/v1",
+            "paths": ["/v1/chat/completions"],
+        }]
+        payload = json.dumps({"messages": [{"role": "user", "content": "hello"}]}).encode()
+        req = SimpleNamespace(
+            method="POST", path="/chat/completions", host="127.0.0.1",
+            port=18701, scheme="http", headers={"content-type": "Application/JSON; charset=utf-8"},
+            content=payload, text=payload.decode(), pretty_host="127.0.0.1", pretty_url="",
+        )
+        flow = SimpleNamespace(request=req, response=None, metadata={},
+                               client_conn=SimpleNamespace(sockname=("127.0.0.1", 18701)),
+                               server_conn=SimpleNamespace(via=None))
+        old_emit, old_reload = tr._emit, tr._maybe_reload
+        try:
+            tr._emit = lambda *a, **k: None
+            tr._maybe_reload = lambda force=False: None
+            tr.request(flow)
+        finally:
+            tr._emit, tr._maybe_reload = old_emit, old_reload
+        # 只要没有被 503 阻断，说明成功通过 Content-Type 检查
+        if flow.response is not None:
+            self.assertNotEqual(flow.response.status_code, 503, "Application/JSON 绝不可被 503 阻断")
+
+    def test_unlisted_path_blocked_under_fail_closed(self):
+        """P1 隐私旁路防御：在 FAIL_CLOSED 下，反代端口未列入白名单的非只读请求（如 multipart/audio）必须被 503 阻断。"""
+        tr.UPSTREAMS = [{
+            "name": "openai-test", "port": 18701, "base_path": "/openai",
+            "target": "https://api.openai.com/v1",
+            "paths": ["/v1/chat/completions"],
+        }]
+        req = SimpleNamespace(
+            method="POST", path="/v1/audio/transcriptions", host="127.0.0.1",
+            port=18701, scheme="http", headers={"content-type": "multipart/form-data; boundary=xyz"},
+            content=b"--xyz\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\nfakeaudio\r\n--xyz--",
+            text="", pretty_host="127.0.0.1", pretty_url="",
+        )
+        flow = SimpleNamespace(request=req, response=None, metadata={},
+                               client_conn=SimpleNamespace(sockname=("127.0.0.1", 18701)),
+                               server_conn=SimpleNamespace(via=None))
+        old_emit, old_reload, old_fc = tr._emit, tr._maybe_reload, tr.FAIL_CLOSED
+        try:
+            tr._emit = lambda *a, **k: None
+            tr._maybe_reload = lambda force=False: None
+            tr.FAIL_CLOSED = True
+            tr.request(flow)
+        finally:
+            tr._emit, tr._maybe_reload, tr.FAIL_CLOSED = old_emit, old_reload, old_fc
+        self.assertIsNotNone(flow.response, "未配置路径的 POST 请求必须被拦截，绝不能静默透传放行")
+        self.assertEqual(flow.response.status_code, 503, "FAIL_CLOSED 下必须返回 503 阻断")
 
 

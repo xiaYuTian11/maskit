@@ -168,14 +168,47 @@ docker run -d \
   --name maskit \
   --restart unless-stopped \
   -p 127.0.0.1:5801:5801 \
-  -p 127.0.0.1:18701-18710:18701-18710 \
+  -p 127.0.0.1:18701:18701 \
   -v maskit_data:/data \
   -e MASKIT_PANEL_TOKEN="change-me-to-a-strong-token" \
   ghcr.io/xiayutian11/maskit:latest
 ```
 
-Open `http://<server-ip>:5801/?token=<your-token>` in your browser!
-> **Security Tip**: Bound to `127.0.0.1` by default to avoid exposing unauthenticated proxy ports to the public internet. Place behind a reverse proxy (with TLS) for LAN sharing.
+> 💡 **Port Mapping & Network Guide**:
+> - `5801`: **Web Console Port (Required)** for dashboard, rules, and client management;
+> - `18701` onwards: **LLM Reverse Proxy Ports (Map on demand)**. For example, 18701 for OpenAI and 18702 for DeepSeek. **Only map the ports you actively use** (e.g. `-p 127.0.0.1:18701-18703:18701-18703` for three upstreams); do not blindly expose a wide port range;
+> - **Host Binding**: Bind to `-p 127.0.0.1:5801:5801` when behind Nginx or for local-only use. For direct IP access across a private LAN/intranet without Nginx, drop the `127.0.0.1:` prefix (`-p 5801:5801 -p 18701:18701`);
+> - **Console Token**: `MASKIT_PANEL_TOKEN` must be **≥16 ASCII characters** (avoid non-ASCII/CJK characters to prevent falling back to random log tokens).
+
+Open `http://<server-ip>:5801` directly in your browser and enter your configured token in the login dialog (or use `http://<server-ip>:5801/#token=<your-token>` for quick sign-in; the fragment is never sent in the request and never lands in proxy access logs, and the token is stripped from the URL once loaded).
+
+> **Security Tip & Reverse Proxy (Nginx Config)**:
+> Bound to `127.0.0.1` by default to avoid exposing unauthenticated proxy ports to the public internet. If placing behind an Nginx reverse proxy with TLS, **make sure to pass `-e MASKIT_TRUST_PROXY=1` in your docker run command** (so the panel trusts the forwarded `X-Forwarded-Proto: https` header and avoids CSRF/Origin rejections):
+> ```nginx
+> server {
+>     listen 443 ssl;
+>     server_name maskit.example.com;
+>     # ssl certificates...
+>
+>     # 1. Web Console (Sign-in via Token dialog)
+>     location / {
+>         proxy_pass http://127.0.0.1:5801;
+>         proxy_set_header Host $host;
+>         proxy_set_header X-Real-IP $remote_addr;
+>         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+>         proxy_set_header X-Forwarded-Proto $scheme;  # Crucial: informs backend that external proto is https
+>         proxy_set_header X-Forwarded-Host $host;
+>     }
+>
+>     # 2. Model Proxy Port (e.g. OpenAI; disable buffering for real-time streaming; restrict to private LAN if possible)
+>     location /openai/ {
+>         proxy_pass http://127.0.0.1:18701/;
+>         proxy_set_header Host $host;
+>         proxy_buffering off;
+>         proxy_read_timeout 600s;
+>     }
+> }
+> ```
 
 ---
 
@@ -188,11 +221,12 @@ cd maskit
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run engine & WebUI (token in engine/proxy_token)
+# 2. Build frontend & start engine (skip frontend build if only using console API)
+cd frontend && npm install && npm run build && cd ..
 python engine/panel.py
 
-# 3. Frontend dev server (Vite hot-reload)
-cd frontend && npm install && npm run dev
+# 3. Frontend dev server (Vite hot-reload, recommended)
+cd frontend && npm run dev
 ```
 
 ---

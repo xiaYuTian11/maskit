@@ -23,6 +23,13 @@ export function saveConfig(cfg: Partial<ShieldConfig>): Promise<SaveConfigRespon
   })
 }
 
+export function emergencyDisableOriginCheck(customToken?: string): Promise<{ ok: boolean; message: string; config?: ShieldConfig }> {
+  return shieldFetch<{ ok: boolean; message: string; config?: ShieldConfig }>('/api/config/disable_origin_check', {
+    method: 'POST',
+    headers: customToken ? { 'X-Shield-Token': customToken } : undefined,
+  })
+}
+
 export function getTodayStats(range?: '7d' | '30d' | string): Promise<TodayStats> {
   const qs = range ? `?range=${range}` : ''
   return shieldFetch<TodayStats>(`/api/stats/today${qs}`)

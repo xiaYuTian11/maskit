@@ -6,7 +6,7 @@
  * - 系统安全：证书安装 / 数据目录 / 审计配置
  * 保存走 POST /api/config 全量提交，warnings 必须展示（端口变化自动重启提示）
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVisibility } from '@/lib/useVisibility'
@@ -100,7 +100,7 @@ const BUILTIN_RULE_GROUPS: { key: string; labelKey: string; rules: string[] }[] 
 const CLIENT_TYPE_PRESETS: Record<string, { labelKey: string; paths: string[]; headers: [string, string][] }> = {
   openai: {
     labelKey: 'settings.clientType.openai',
-    paths: ['/v1', '/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings'],
+    paths: ['/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/embeddings', '/v1/models'],
     headers: [['Authorization', 'Bearer <YOUR_API_KEY>']],
   },
   anthropic: {
@@ -151,10 +151,9 @@ function UpstreamForm({
   const applyType = (t: string) => {
     setClientType(t)
     if (t === 'custom') return
-    // 选类型 → 自动带上该类型的预设路径 + 预设 header
+    // 选类型 → 切换为该类型的预设路径 + 预设 header（不保留其他协议的旧路径）
     const p = CLIENT_TYPE_PRESETS[t]
-    const merged = [...new Set([...(form.paths ?? []), ...p.paths])]
-    set('paths', merged)
+    set('paths', [...p.paths])
     const h = { ...extraHeaders }
     for (const [k, v] of p.headers) {
       if (!(k in h)) h[k] = v
@@ -636,24 +635,35 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     return raw ?? {}
   }, [cfg])
 
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+
   const save = async (next: Partial<ShieldConfig>, msg?: string) => {
-    if (!cfg) return
     setSaving(true)
+    // 串行化保存请求队列：后一个保存必须等待前一个完成后执行，且总是从 queryClient 或返回结果获取最新状态
+    const task = saveQueueRef.current.then(async () => {
+      try {
+        const r = await saveConfig(next)
+        if (!r.ok) {
+          toast(r.error || t('settings.toast.saveFailed'), 'error')
+          return
+        }
+        if (r.warnings?.length) {
+          r.warnings.forEach((w) => toast(w, 'error'))
+        }
+        if (r.proxy_restarted) toast(t('settings.toast.restarted'))
+        else toast(msg || t('settings.toast.saved'))
+        if (r.config) {
+          queryClient.setQueryData(['config'], r.config)
+        }
+        queryClient.invalidateQueries({ queryKey: ['config'] })
+        queryClient.invalidateQueries({ queryKey: ['proxyStatus'] })
+      } catch (e) {
+        toast(`${t('settings.toast.saveFailed')}：${String(e)}`, 'error')
+      }
+    })
+    saveQueueRef.current = task.catch(() => {})
     try {
-      const r = await saveConfig(next)
-      if (!r.ok) {
-        toast(r.error || t('settings.toast.saveFailed'), 'error')
-        return
-      }
-      if (r.warnings?.length) {
-        r.warnings.forEach((w) => toast(w, 'error'))
-      }
-      if (r.proxy_restarted) toast(t('settings.toast.restarted'))
-      else toast(msg || t('settings.toast.saved'))
-      queryClient.invalidateQueries({ queryKey: ['config'] })
-      queryClient.invalidateQueries({ queryKey: ['proxyStatus'] })
-    } catch (e) {
-      toast(`${t('settings.toast.saveFailed')}：${String(e)}`, 'error')
+      await task
     } finally {
       setSaving(false)
     }
@@ -666,9 +676,10 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     const clean: UpstreamConfig = { ...u, extra_headers: Object.keys(cleanExtra).length ? cleanExtra : undefined }
     // 编辑：按原 name 匹配（改名/改端口都更新而非新增）；新增：无匹配则添加
     const isEdit = editing != null
+    const currentUps = queryClient.getQueryData<ShieldConfig>(['config'])?.upstreams ?? upstreams
     const next = isEdit
-      ? upstreams.map((x) => (x.name === editing!.name ? clean : x))
-      : [...upstreams, clean]
+      ? currentUps.map((x) => (x.name === editing!.name ? clean : x))
+      : [...currentUps, clean]
     save({ upstreams: next }, isEdit ? t('settings.toast.clientUpdated') : t('settings.toast.clientAdded'))
     setEditing(null)
     setAdding(false)
@@ -676,7 +687,8 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const removeUpstream = (name: string) => {
-    save({ upstreams: upstreams.filter((u) => u.name !== name) }, tf('settings.toast.deleted', { name }))
+    const currentUps = queryClient.getQueryData<ShieldConfig>(['config'])?.upstreams ?? upstreams
+    save({ upstreams: currentUps.filter((u) => u.name !== name) }, tf('settings.toast.deleted', { name }))
     setConfirmDelete(null)
   }
 
@@ -885,6 +897,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" style={{ alignItems: 'stretch' }}>
             {upstreams.filter((u) => !clientSearch || u.name.includes(clientSearch) || String(u.port).includes(clientSearch) || (u.target ?? '').includes(clientSearch)).map((u) => {
               const baseUrl = `http://127.0.0.1:${u.port}`
+              // SDK Base URL 规范化：
+              // 1. OpenAI 兼容体系：官方 SDK 要求带 /v1（例如 http://127.0.0.1:18701/v1）
+              // 2. Anthropic、Gemini 体系：官方 SDK 明确要求根地址（例如 http://127.0.0.1:18703），SDK 内部会自动请求 /v1/messages 等，追加 /v1 会导致 /v1/v1/messages 404
+              const cType = detectClientType(u)
+              const isStandardOpenAI = cType === 'openai' && (u.paths ?? []).some((p) => p.startsWith('/v1'))
+              const standardBaseUrl = isStandardOpenAI ? `${baseUrl}/v1` : baseUrl
               const paths: string[] = (u.paths ?? []).length > 0 ? (u.paths as string[]) : ['/v1/chat/completions', '/v1/completions', '/v1/messages', '/v1/responses']
               return (
               <Card key={u.port} className="flex h-full flex-col border bg-card shadow-[var(--shadow-card)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[var(--shadow-card-hover)]">
@@ -915,13 +933,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       </Button>
                     </div>
                   </div>
-                  {/* Base URL 行：一键复制纯链接（不带'base URL'字样） */}
+                  {/* Base URL 行：一键复制符合 SDK 规范的 Base URL（OpenAI 规范带 /v1） */}
                   <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-2.5 py-1.5">
                     <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('settings.clients.baseUrl')}</span>
-                    <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">{baseUrl}</code>
+                    <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">{standardBaseUrl}</code>
                     <Button
                       size="sm" variant="ghost" className="h-6 shrink-0 gap-1 px-2 text-[11px]"
-                      onClick={() => triggerCopy(`url:${u.name}`, baseUrl)}
+                      onClick={() => triggerCopy(`url:${u.name}`, standardBaseUrl)}
                     >
                       {copiedMap[`url:${u.name}`] ? (
                         <>
@@ -2022,6 +2040,20 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         <TabsContent value="security" className="space-y-4">
           {/* 配置备份与回滚 */}
           <ConfigBackupCard />
+          {/* 控制面访问安全：Origin 校验开关（反代/CDN 回源 403 逃生舱） */}
+          <Card className="border bg-card">
+            <CardHeader>
+              <CardTitle className="text-sm font-semibold">{t('settings.security.access')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <SettingToggle
+                label={t('settings.security.originCheck')}
+                desc={t('settings.security.originCheckDesc')}
+                checked={cfg?.origin_check ?? true}
+                onChange={(v) => save({ origin_check: v }, v ? t('settings.toast.originCheckOn') : t('settings.toast.originCheckOff'))}
+              />
+            </CardContent>
+          </Card>
           {/* 证书安装：reverse 模式不需要证书，隐藏避免误操作。
               explicit/local 模式需要证书，未来如果启用这些模式再恢复此卡片 */}
           <Card className="border bg-card">
@@ -2147,7 +2179,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
       {(editing || adding) && (
         <UpstreamForm
-          initial={editing ?? { name: '', port: nextPort, target: '', use_proxy: false, paths: ['/v1'], base_path: '' }}
+          initial={editing ?? { name: '', port: nextPort, target: '', use_proxy: false, paths: ['/v1/chat/completions', '/v1/completions'], base_path: '' }}
           onSave={onSaveUpstream}
           onClose={() => { setEditing(null); setAdding(false) }}
           captureMode={cfg?.capture_mode ?? 'reverse'}

@@ -193,6 +193,8 @@ export interface ShieldConfig {
   fail_closed: boolean
   filter_enabled: boolean
   response_scan: boolean
+  /** 控制面 Origin 校验开关（默认 true）。反代/CDN 回源 Origin 不匹配致面板 403 时可关 */
+  origin_check?: boolean
   /** 敏感词统计是否记录明文（默认 true）。关闭后 daily_words 只存打码形态 */
   record_plaintext_words: boolean
   stream_response: boolean

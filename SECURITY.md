@@ -55,6 +55,8 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 
 如果 HTTPS 在可信反向代理处终止，请显式设置 `MASKIT_TRUST_PROXY=1`，并让代理覆盖单跳 `X-Forwarded-Proto` / `X-Forwarded-Host`；应用默认不信任这些头。浏览器登录推荐打开根路径后粘贴令牌，临时链接使用 `/#token=...`（fragment 不进访问日志）；`?token=...` 仅为旧版本兼容。
 
+`/api/*` 除令牌外还有一层 Origin 同源校验（CSRF 纵深防御）。若前置代理/CDN 回源时改写了 `Origin`，校验会拒绝这些请求；**静态资源（HTML / JS / CSS）不参与该校验**，因此即使校验拒绝也只会影响接口调用，不会导致页面白屏。遇到拒绝时优先排查代理是否正确透传 `X-Forwarded-Proto` / `X-Forwarded-Host` 并配合 `MASKIT_TRUST_PROXY=1`；仅在确实无法对齐时才关闭校验：环境变量 `MASKIT_DISABLE_ORIGIN_CHECK=1`（需在启动前设置，日志会打印警告）或设置页的 `origin_check` 开关（默认开启）。**关闭后 `/api/*` 的跨源防御只剩 `X-Shield-Token` 单层**，此时必须确保面板端口只暴露给可信网络。
+
 ### 信任边界（明确不防什么）
 
 - **不防本机恶意程序**：任何以当前用户权限运行的进程都可以读事件库/配置。数据目录 ACL 只挡其他用户，不挡同用户进程。

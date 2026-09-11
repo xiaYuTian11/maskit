@@ -35,11 +35,13 @@ export function isTauri(): boolean {
 export class ShieldApiError extends Error {
   status: number
   body: string
+  code?: string
 
-  constructor(status: number, body: string, message?: string) {
+  constructor(status: number, body: string, message?: string, code?: string) {
     super(message || `HTTP ${status}: ${body.slice(0, 200)}`)
     this.status = status
     this.body = body
+    this.code = code
   }
 }
 
@@ -75,10 +77,26 @@ export async function shieldFetch<T>(
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => '')
-    // 浏览器模式 403：令牌错误/过期，清掉本 tab 保存的 token 让 App 重新弹出输入框
+    let errCode: string | undefined
+    try {
+      const parsed = JSON.parse(body)
+      if (parsed && typeof parsed.error === 'string') {
+        errCode = parsed.error
+      }
+    } catch {
+      // 非 JSON 响应忽略解析
+    }
+
+    // 浏览器模式 403：若是令牌错误/过期，清掉本 tab 保存的 token 让 App 重新弹出输入框；
+    // 若是因为反向代理 Origin 校验拦截 (origin_rejected)，绝不清空 token，避免死锁踢出！
     if (resp.status === 403 && !options.noToken && !isTauri()) {
-      clearBrowserToken()
-      useAuthStore.getState().setToken('')
+      if (errCode === 'invalid_token' || (!errCode && !body.includes('origin_rejected'))) {
+        clearBrowserToken()
+        useAuthStore.getState().setToken('')
+      }
+    }
+    if (errCode === 'origin_rejected' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('shield:origin_rejected'))
     }
     // 403：引擎重启后 token 过期，自动重读一次再试（时序竞态兜底）
     if (resp.status === 403 && !options.noToken && isTauri()) {
@@ -95,13 +113,13 @@ export async function shieldFetch<T>(
             return (await retry.json()) as T
           }
           const retryBody = await retry.text().catch(() => '')
-          throw new ShieldApiError(retry.status, retryBody)
+          throw new ShieldApiError(retry.status, retryBody, undefined, errCode)
         }
       } catch {
         // 重读失败走原错误
       }
     }
-    throw new ShieldApiError(resp.status, body)
+    throw new ShieldApiError(resp.status, body, undefined, errCode)
   }
   if (raw) return resp as unknown as T
   return (await resp.json()) as T

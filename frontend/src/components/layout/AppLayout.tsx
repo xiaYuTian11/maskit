@@ -24,9 +24,12 @@ import {
   ArrowUpCircle,
   Check,
   Languages,
+  AlertTriangle,
+  X,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStatus, startProxy, stopProxy } from '@/api/proxy'
+import { emergencyDisableOriginCheck } from '@/api/settings'
 import { useAuthStore } from '@/stores/authStore'
 import { Button } from '@/components/ui/button'
 import { ErrorBoundary } from '@/components/common/ErrorBoundary'
@@ -101,9 +104,29 @@ export function AppLayout({ children }: { children: ReactNode }) {
   }, [])
 
   const [checkingUpdate, setCheckingUpdate] = useState(false)
-  // 启停代理进行中：start/stop 是异步 HTTP（start 要拉 mitmdump 可能好几秒），
-  // 期间按钮必须显示 loading 并禁用，否则点击后毫无反馈像没反应一会。
   const [proxyBusy, setProxyBusy] = useState(false)
+  const [originBlocked, setOriginBlocked] = useState(false)
+  const [rescuingOrigin, setRescuingOrigin] = useState(false)
+
+  useEffect(() => {
+    const onOriginRejected = () => setOriginBlocked(true)
+    window.addEventListener('shield:origin_rejected', onOriginRejected)
+    return () => window.removeEventListener('shield:origin_rejected', onOriginRejected)
+  }, [])
+
+  const handleRescueOrigin = async () => {
+    setRescuingOrigin(true)
+    try {
+      await emergencyDisableOriginCheck()
+      setOriginBlocked(false)
+      toast(t('settings.toast.saved'))
+      queryClient.invalidateQueries()
+    } catch (e) {
+      toast(String(e), 'error')
+    } finally {
+      setRescuingOrigin(false)
+    }
+  }
 
   // 代理状态轮询（方案 §5：TanStack Query refetchInterval 替代 setInterval）
   // 页面隐藏时停止轮询，正常 5s 轮询。
@@ -462,6 +485,33 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </Button>
           </div>
         </header>
+
+        {originBlocked && (
+          <div className="flex items-center justify-between border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <span>{t('layout.originRejectedBanner')}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 border-amber-500/50 text-[11px] hover:bg-amber-500/20"
+                onClick={handleRescueOrigin}
+                disabled={rescuingOrigin}
+              >
+                {rescuingOrigin ? t('common.loading') : t('layout.disableOriginCheckNow')}
+              </Button>
+              <button
+                type="button"
+                onClick={() => setOriginBlocked(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 内容区：不自己滚（子页按需管理；Logs 页要固定高度让虚拟滚动生效） */}
         <main className="min-h-0 flex-1 overflow-hidden">

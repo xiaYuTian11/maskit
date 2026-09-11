@@ -76,16 +76,18 @@
 docker run -d \
   --name maskit \
   --restart unless-stopped \
-  -p 127.0.0.1:5801:5801 \
-  -p 127.0.0.1:18701-18710:18701-18710 \
+  -p 5801:5801 \
+  -p 18701:18701 \
   -v maskit_data:/data \
-  -e MASKIT_PANEL_TOKEN="my-secret-token-123456" \
+  -e MASKIT_PANEL_TOKEN="YourSecretToken123456" \
   ghcr.io/xiayutian11/maskit:latest
 ```
 
+> 💡 **提示**：若前置配合 Nginx 反代或仅供本机使用，建议加上 `127.0.0.1:` 保护端口（`-p 127.0.0.1:5801:5801`）；大模型端口（如 `18701`）按需映射即可，用几个大模型就映射几个端口。
+
 启动后，在浏览器中打开：
-`http://<服务器IP>:5801/?token=my-secret-token-123456`
-即可进入完整的 Web 控制台！
+`http://<服务器IP>:5801/#token=YourSecretToken123456`
+（或直接访问 `http://<服务器IP>:5801` 在弹出的输入框中输入密码）即可进入完整的 Web 控制台！
 
 ---
 

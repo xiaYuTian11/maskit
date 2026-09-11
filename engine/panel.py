@@ -11,7 +11,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.2'
+__version__ = '0.2.3'
 import json
 import copy
 import hashlib
@@ -190,6 +190,17 @@ PANEL_HOST = os.environ.get("MASKIT_PANEL_HOST", "127.0.0.1").strip() or "127.0.
 # 远程模式 = 监听地址不是回环：Host 校验放开、Origin 改为同源校验，
 # X-Shield-Token 仍是唯一主防线（面板可改上游/注入头，绝不可免 token）。
 REMOTE_MODE = PANEL_HOST not in {"127.0.0.1", "localhost", "::1"}
+# 控制面 Origin 校验逃生舱（环境变量，容器/反代场景用）。
+# EdgeOne/CDN 回源时 Origin 与源站 scheme://host 不一致会让面板 403，
+# 用户连 UI 都进不去，只能靠环境变量在启动前关闭校验（UI 开关见 config.origin_check）。
+# 默认关闭：宁可先排查反代透传 X-Forwarded-*，也不要整体关掉 CSRF 防线。
+_DISABLE_ORIGIN_CHECK_ENV = os.environ.get("MASKIT_DISABLE_ORIGIN_CHECK", "").strip() == "1"
+if _DISABLE_ORIGIN_CHECK_ENV:
+    print("[panel] 警告：已设置 MASKIT_DISABLE_ORIGIN_CHECK=1，控制面 Origin 校验已关闭"
+          f"（适用于受信任反向代理/CDN 场景）；API 仍受 X-Shield-Token 保护）")
+# 配置级 Origin 校验开关（默认开；与 UI 开关 origin_check 同步）。与
+# _DISABLE_ORIGIN_CHECK_ENV 是「或」关系：任一关闭即放行。
+_origin_check_enabled = True
 # 反代 HTTPS 终止时显式信任单跳 X-Forwarded-*。默认关闭，避免直接暴露面板时
 # 客户端伪造转发头绕过 Origin 同源校验；启用者必须确保前置代理覆盖而非追加这些头。
 TRUST_PROXY_ENV = "MASKIT_TRUST_PROXY"
@@ -328,6 +339,9 @@ def _normalize_origin(value):
 
 
 def _origin_ok():
+    # 逃生舱/配置开关：任一关闭即放行（仅作 CSRF 纵深防御；API 主防线仍是 X-Shield-Token）。
+    if _DISABLE_ORIGIN_CHECK_ENV or not _origin_check_enabled:
+        return True
     origin = request.headers.get("Origin")
     if not origin:
         return True
@@ -350,23 +364,45 @@ def _origin_ok():
 
 @app.before_request
 def api_guard():
-    if not _host_ok():
-        return jsonify({"ok": False, "error": "非法本地来源"}), 403
-    # Origin 校验对 "/" 同样适用：浏览器顶层导航不带 Origin（_origin_ok 放行），
-    # 只有跨源 fetch/XHR 才带，理应拒绝——页面内嵌了 API token，没有任何理由
-    # 响应外站发起的请求。此前 "/" 直接 return None 跳过了这道检查。
-    if not _origin_ok():
-        return jsonify({"ok": False, "error": "非法本地来源"}), 403
-    if request.path == "/":
-        return None
     # 存活探针：不需要 token（Docker HEALTHCHECK 拿不到随机 token），只回 ok，不泄露任何状态
     if request.path == "/healthz":
         return jsonify({"ok": True})
-    if request.path.startswith("/api/"):
-        token = request.headers.get("X-Shield-Token", "")
-        # compare_digest 对非 ASCII str 会抛 TypeError → 500，先转 bytes
-        if not secrets.compare_digest(token.encode("utf-8", "replace"), API_TOKEN.encode("utf-8")):
-            return jsonify({"ok": False, "error": "无效请求令牌"}), 403
+    # 静态托管资源（SPA HTML、JS/CSS assets/*、favicon 等由 serve_spa 托管）：
+    # 纯静态文件无状态且无副作用，生产 bundle 不含 token。现代浏览器在加载
+    # <script type="module" crossorigin> 静态资源时规范强制附带 Origin 头；
+    # 若在反向代理（Nginx/EdgeOne 等）HTTPS 终止环境下对其做 Origin/Host 校验，
+    # 会因协议/回源域名不一致误判 403 导致 JS 被拦、页面一片死白（实测事故）。
+    # 因此静态资源直接放行，仅 /api/* 控制面接口进入安全防线。
+    if not request.path.startswith("/api/"):
+        return None
+    if not _host_ok():
+        return jsonify({"ok": False, "error": "host_rejected", "message": "非法请求来源 Host"}), 403
+
+    # API 令牌校验（主防线）：任何外部未授权请求在第一道防线直接阻断
+    token = request.headers.get("X-Shield-Token", "")
+    # compare_digest 对非 ASCII str 会抛 TypeError → 500，先转 bytes
+    if not secrets.compare_digest(token.encode("utf-8", "replace"), API_TOKEN.encode("utf-8")):
+        return jsonify({"ok": False, "error": "invalid_token", "message": "无效请求令牌"}), 403
+
+    if not _origin_ok():
+        # 管理员紧急自救放行：
+        # 若操作者已持有经过强密码校验合法的 X-Shield-Token，且本次请求是关闭 Origin 校验的自救操作，
+        # 允许放行，杜绝反代 Origin 配置错误导致设置页陷入无法自救的死锁。
+        if request.method == "POST" and (
+            request.path == "/api/config/disable_origin_check"
+            or (request.path == "/api/config" and isinstance(request.get_json(silent=True), dict) and request.get_json(silent=True).get("origin_check") is False)
+        ):
+            return None
+        origin = request.headers.get("Origin", "")
+        scheme, host = _effective_request_origin() if REMOTE_MODE else ("http", f"127.0.0.1:{PANEL_PORT}")
+        return jsonify({
+            "ok": False,
+            "error": "origin_rejected",
+            "message": "Origin 校验未通过",
+            "current_origin": origin,
+            "expected_origin": f"{scheme}://{host}",
+        }), 403
+
     return None
 
 
@@ -375,10 +411,9 @@ def security_headers(resp):
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
-    # script-src：页面 index 响应带 nonce（由 index() 路由注入，见下方 index()），
-    # 其余 API 响应无需执行脚本，'self' 即可。模板内联事件属性已清零
-    # （审计 P2-2 收口：曾因 10 处 onclick= 被迫保留 'unsafe-inline'）。
-    # style-src 保留 'unsafe-inline'：模板有大量 <style> 块与 style 属性，
+    # script-src 只给 'self'：SPA 的脚本全部来自同源 /assets/*，无需 nonce，
+    # 也不需要 'unsafe-inline'（模板内联事件属性已清零，审计 P2-2 收口）。
+    # style-src 保留 'unsafe-inline'：页面有大量 <style> 块与 style 属性，
     # 收紧会禁掉整页样式，收益与风险不成比例。
     resp.headers.setdefault(
         "Content-Security-Policy",
@@ -824,6 +859,7 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
     host = parsed.hostname
     port = parsed.port or (443 if use_https else 80)
     path_prefix = parsed.path.rstrip("/")
+    target_query = parsed.query or ""
 
     proxy_parsed = urlparse(proxy_url) if proxy_url else None
     proxy_host = proxy_parsed.hostname if proxy_parsed else None
@@ -903,7 +939,14 @@ def _make_passthrough_handler(target, proxy_url=None, upstream_name=None):
                 conn = (http.client.HTTPSConnection(host, port, timeout=900)
                         if use_https else http.client.HTTPConnection(host, port, timeout=900))
             try:
-                upstream_path = path_prefix + self.path
+                # 合并 Target 与客户端请求的 Query 参数，绝不丢失 api-version 等必要参数
+                if "?" in self.path:
+                    client_pure, client_q = self.path.split("?", 1)
+                else:
+                    client_pure, client_q = self.path, ""
+                merged_path = (path_prefix + client_pure) if path_prefix else client_pure
+                queries = [q for q in (target_query, client_q) if q]
+                upstream_path = merged_path + ("?" + "&".join(queries) if queries else "")
                 conn.request(self.command, upstream_path, body=body, headers=headers)
                 resp = conn.getresponse()
                 self.send_response(resp.status)
@@ -2722,6 +2765,10 @@ def default_config():
         "filter_enabled": True,
         "fail_closed": True,
         "response_scan": True,
+        # 控制面 Origin 校验开关（默认开）。反代/CDN 回源时 Origin 与源站
+        # scheme://host 不一致会导致面板 403——无法进 UI 时用环境变量
+        # MASKIT_DISABLE_ORIGIN_CHECK=1 逃生；能进 UI 时关这个开关等效。
+        "origin_check": True,
         # 敏感词统计是否记录明文。默认开：打码 preview（1**@***.com）排出来的
         # 排行榜没有信息量，而数据只落本机 SQLite、不出网。关掉后库里永不出现明文。
         "record_plaintext_words": True,
@@ -2944,6 +2991,7 @@ def normalize_config(raw, warnings=None):
     ups = []
     raw_ups = raw.get("upstreams", base["upstreams"])
     if isinstance(raw_ups, list):
+        seen_names = set()
         seen_base = set()
         seen_port = set()
         for u in raw_ups:
@@ -2952,24 +3000,49 @@ def normalize_config(raw, warnings=None):
             name = str(u.get("name") or "").strip()
             base_path = str(u.get("base_path") or "").strip()
             target = str(u.get("target") or "").strip()
-            # name/base_path 限安全字符集（防 DOM XSS）
+            # name 限安全字符集（防 DOM XSS，允许中英文字母、数字、下划线、减号）
             if not name or not re.fullmatch(r"[A-Za-z0-9_\-\u4e00-\u9fff]{1,40}", name):
-                warn.append(f"\u5ba2\u6237\u7aef\u540d\u79f0\u300c{name[:20] or '(\u7a7a)'}\u300d\u542b\u4e0d\u652f\u6301\u7684\u5b57\u7b26\uff08\u53ea\u80fd\u4e2d\u82f1\u6587\u3001\u6570\u5b57\u3001_ \u548c -\uff09\uff0c\u8be5\u6761\u5df2\u5ffd\u7565")
+                warn.append(f"客户端名称「{name[:20] or '(空)'}」含不支持的字符（只能中英文、数字、_ 和 -），该条已忽略")
                 continue
-            if not base_path or not re.fullmatch(r"/[A-Za-z0-9_\-/]{1,60}", base_path):
-                # \u5185\u90e8\u6807\u8bc6\u4e0d\u5408\u6cd5\u5c31\u6309\u540d\u79f0\u91cd\u65b0\u751f\u6210\uff0c\u4e0d\u80fd\u56e0\u6b64\u628a\u7528\u6237\u65b0\u589e\u7684\u5ba2\u6237\u7aef\u6574\u6761\u4e22\u6389
-                base_path = "/" + (re.sub(r"[^A-Za-z0-9_\-]", "", name).lower()[:40] or "up")
             if not target:
-                warn.append(f"\u5ba2\u6237\u7aef\u300c{name}\u300d\u672a\u586b\u771f\u5b9e\u4e0a\u6e38\u5730\u5740\uff0c\u8be5\u6761\u5df2\u5ffd\u7565")
+                warn.append(f"客户端「{name}」未填真实上游地址，该条已忽略")
                 continue
+            name_key = name.lower()
+            if name_key in seen_names:
+                warn.append(f"客户端「{name}」名称与已有条目重复，该条已忽略")
+                continue
+            seen_names.add(name_key)
+
+            # base_path 规范化与自动冲突消解：
+            # 纯中文或特殊字符无英数字符时，使用序号前缀（如 /up_2），避免全部塌缩成 /up；
+            # 出现冲突时自动追加序号消解冲突，绝不因为内部路径前缀碰撞而把用户合法配置的客户端整条丢掉。
+            # user_base 记录「用户显式填过且合法」的值：只有它被改名才告警——单端口前缀
+            # 模式下 base_path 就是客户端 base_url 的路径，改名等于改契约，用户必须同步改
+            # 客户端配置；静默改名会让他对着 404 找不到原因。自动生成的 /up_N 不告警（本就没契约）。
+            slug = re.sub(r"[^A-Za-z0-9_\-]", "", name).lower()[:40]
+            user_base = base_path
+            if not base_path or not re.fullmatch(r"/[A-Za-z0-9_\-/]{1,60}", base_path):
+                base_path = "/" + (slug or f"up_{len(ups) + 1}")
+                user_base = ""
             if not base_path.startswith("/"):
                 base_path = "/" + base_path
-            if base_path in seen_base:
-                warn.append(f"\u5ba2\u6237\u7aef\u300c{name}\u300d\u4e0e\u5df2\u6709\u6761\u76ee\u91cd\u590d\uff0c\u8be5\u6761\u5df2\u5ffd\u7565")
-                continue
+            candidate_base = base_path
+            idx = 2
+            while candidate_base in seen_base:
+                candidate_base = f"{base_path}_{idx}"
+                idx += 1
+            if candidate_base != base_path and user_base:
+                warn.append(
+                    f"客户端「{name}」的路径前缀 {base_path} 与已有条目冲突，已自动改为 {candidate_base}"
+                    "（单端口前缀模式下请同步更新该客户端的 base_url）"
+                )
+            base_path = candidate_base
             seen_base.add(base_path)
-            # 端口：18700-18799 冷门段，未配则自动分配
-            raw_port = int(u.get("port") or 0)
+            # 端口：18700-18799 冷门段，未配或非法字符串则自动分配
+            try:
+                raw_port = int(u.get("port") or 0)
+            except (ValueError, TypeError):
+                raw_port = 0
             port = raw_port
             if port == 0:
                 port = 18701 + len(ups)
@@ -3070,6 +3143,7 @@ def normalize_config(raw, warnings=None):
         "filter_enabled": bool(raw.get("filter_enabled", True)),
         "fail_closed": bool(raw.get("fail_closed", True)),
         "response_scan": bool(raw.get("response_scan", True)),
+        "origin_check": bool(raw.get("origin_check", True)),
         "record_plaintext_words": bool(raw.get("record_plaintext_words", True)),
         "stream_response": bool(raw.get("stream_response", True)),
         "stream_exclude_hosts": _normalize_host_list(raw.get("stream_exclude_hosts")),
@@ -3078,7 +3152,7 @@ def normalize_config(raw, warnings=None):
         "model_prices": _normalize_model_prices(raw.get("model_prices")),
         "price_sync_enabled": bool(raw.get("price_sync_enabled", False)),
         "price_sync_url": str(raw.get("price_sync_url") or DEFAULT_PRICE_SYNC_URL).strip(),
-        "price_sync_interval_days": max(1, min(90, int(raw.get("price_sync_interval_days", 7) or 7))),
+        "price_sync_interval_days": max(1, min(90, (int(raw.get("price_sync_interval_days", 7) or 7) if str(raw.get("price_sync_interval_days", "")).isdigit() else 7))),
         # 日志保留天数：0 = 永久保留（付费版「日志不限期」权益）。
         # 原来钳成 max(1, min(90, ...))，而 PAID_QUOTA 声明的是 None（不限）——
         # 承诺在代码里结构上就兑现不了，付费用户设 365 会被静默压成 90（2026-08-17 审计）。
@@ -3160,18 +3234,29 @@ def _normalize_audit(raw):
     }
 
 
+def _sync_runtime_config(cfg):
+    """把持久化配置同步给面板进程内直接依赖的运行时全局状态。
+
+    load_config() 与 save_config() 写盘后均原子调用本函数，确保 UI 保存、
+    API 调用与配置回滚后，内存中的开关（如 _origin_check_enabled）
+    与明文统计设置 100% 立即生效，杜绝下一次读盘前的时序空窗期。
+    """
+    global _origin_check_enabled
+    if isinstance(cfg, dict):
+        _origin_check_enabled = bool(cfg.get("origin_check", True))
+        try:
+            set_record_plaintext_words(cfg.get("record_plaintext_words", True))
+        except Exception:
+            pass
+
+
 def load_config():
     # 整个「读文件 → normalize → 迁移写回」必须在锁内完成：迁移分支会写盘，
     # 与并发的 /api/config 保存交错会互相覆盖。RLock 允许内部再调 save_config。
+    # 内存状态（如 _origin_check_enabled）必须在锁内原子同步，避免读-写交错覆盖刚保存的值。
     with cfg_lock:
         cfg = _load_config_locked()
-    # 敏感词统计明文开关同步给存储层：面板进程也走 enqueue_event 写事件
-    # （mitmdump 进程那侧由 transparent._maybe_reload 各自同步）。
-    # 放在锁外：set_ 只赋一个模块级 bool，不需要持配置锁。
-    try:
-        set_record_plaintext_words(cfg.get("record_plaintext_words", True))
-    except Exception:
-        pass
+        _sync_runtime_config(cfg)
     return cfg
 
 
@@ -3230,10 +3315,20 @@ def _load_config_locked():
                     save_config(cfg)
                 except Exception:
                     pass
+            # 若归一化对配置进行了清洗修正（如端口冲突、base_path 冲突消解、缺失默认值等），
+            # 必须在锁内原子持久化写回磁盘，确保盘上数据与面板内存权威 100% 同步，
+            # 避免 sidecar 进程从磁盘读取到未归一化的冲突数据。
+            if json.dumps(raw, sort_keys=True) != json.dumps(cfg, sort_keys=True):
+                try:
+                    save_config(cfg, allow_shrink=True)
+                except Exception as e:
+                    _emit_log(f"[panel] 归一化配置持久化写回失败: {e}")
             return cfg
         except Exception as e:
             _emit_log(f"[panel] 配置解析失败，使用默认配置: {e}")
-    return default_config()
+    d = default_config()
+    _sync_runtime_config(d)
+    return d
 
 
 def _read_config_raw():
@@ -3371,6 +3466,8 @@ def save_config(cfg, warnings=None, allow_shrink=False):
             tmp = CONFIG_PATH.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(tmp, CONFIG_PATH)
+            # 锁内原子同步运行时内存开关，杜绝多线程写盘与状态同步的交错竞态
+            _sync_runtime_config(cfg)
         except Exception:
             if tmp is not None:
                 try:
@@ -3459,16 +3556,15 @@ def api_set_config():
         incoming = request.get_json(force=True)
         if not isinstance(incoming, dict):
             return jsonify({"ok": False, "error": "配置必须是 JSON 对象"}), 400
-        # 合并语义：只提交部分字段时，未提供的字段保留当前值，
-        # 避免单字段 POST 把整个配置重置成默认（曾实测发生：审计时 curl 传
-        # 单个字段，upstreams/sensitive 全被默认值覆盖，用户 9 客户端 47 词丢失）。
-        # 前端全量提交不受影响（覆盖全部字段）。
-        merged = load_config()
-        if isinstance(merged, dict):
-            for k, v in incoming.items():
-                merged[k] = v
-            incoming = merged
-        cfg = save_config(incoming, warnings)
+        # 整个「读当前配置 → 合并字段 → 校验写盘 → 同步内存」必须在 cfg_lock 临界区内原子完成！
+        # 避免并发请求各自拿到旧快照后互相覆盖（实测两个并发 POST 各改一字段会丢掉一个更新）。
+        with cfg_lock:
+            merged = _load_config_locked()
+            if isinstance(merged, dict):
+                for k, v in incoming.items():
+                    merged[k] = v
+                incoming = merged
+            cfg = save_config(incoming, warnings)
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
     _emit_log("[panel] 配置已保存（词表/规则/域名等热重载即时生效）")
@@ -3569,6 +3665,20 @@ def api_config_restore():
         _emit_log(f"[panel] 回滚后端口检测失败: {e}")
     return jsonify({"ok": True, "config": cfg, "warnings": warnings,
                     "proxy_restarted": restarted, "restored_from": name})
+
+
+@app.post("/api/config/disable_origin_check")
+def api_disable_origin_check():
+    """管理员自救接口：在提供有效 Token 的前提下，一键关闭 Origin 校验。"""
+    try:
+        with cfg_lock:
+            cfg = load_config()
+            cfg["origin_check"] = False
+            saved = save_config(cfg)
+        _emit_log("[panel] 管理员通过自救接口关闭了 Origin 校验")
+        return jsonify({"ok": True, "message": "Origin 校验已成功关闭", "config": saved})
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.get("/api/status")
@@ -4832,7 +4942,18 @@ def api_cert():
     return jsonify({"ok": rc == 0, "scope": scope, "output": safe_out, "installed": rc == 0})
 
 
-WEB_DIST_DIR = Path(os.environ.get("MASKIT_WEB_DIST") or (_BUNDLE_ROOT / "web_dist"))
+def _find_web_dist():
+    """按优先级寻找 Web 控制台静态资源目录：环境变量 → 打包内置 web_dist → 源码构建 frontend/dist。"""
+    env_dist = os.environ.get("MASKIT_WEB_DIST")
+    if env_dist and Path(env_dist).exists():
+        return Path(env_dist)
+    for cand in (_BUNDLE_ROOT / "web_dist", ROOT / "frontend" / "dist", ROOT / "web_dist"):
+        if cand.exists() and (cand / "index.html").exists():
+            return cand
+    return _BUNDLE_ROOT / "web_dist"
+
+
+WEB_DIST_DIR = _find_web_dist()
 
 
 @app.route("/", defaults={"path": ""})
@@ -5412,6 +5533,7 @@ def start_panel_server(open_browser_on_start=True):
         restore_client_env()
     _migrate_data_files()
     init_db()
+    load_config()  # 预热配置并同步运行时全局状态
     prune_event_log()
     preload_events()
     # 价格目录后台自动同步（启动时 + 每 7 天过期刷新；失败静默，不阻塞启动）
@@ -5435,10 +5557,10 @@ def start_panel_server(open_browser_on_start=True):
     if REMOTE_MODE:
         # 远程模式下用户只能从这里拿到 token（随机时打印明文；固定时只提示来源）
         if _env_token:
-            print("[panel] remote mode: token from MASKIT_PANEL_TOKEN; open http://<host>:%d/?token=<MASKIT_PANEL_TOKEN>" % PANEL_PORT)
+            print("[panel] remote mode: token from MASKIT_PANEL_TOKEN; open http://<host>:%d (enter token in WebUI, or quick access: .../#token=<MASKIT_PANEL_TOKEN>)" % PANEL_PORT)
         else:
             print(f"[panel] remote mode: MASKIT_PANEL_TOKEN not set, generated token = {API_TOKEN}")
-            print(f"[panel] open http://<host>:{PANEL_PORT}/?token={API_TOKEN}  (set MASKIT_PANEL_TOKEN to keep it stable)")
+            print(f"[panel] open http://<host>:{PANEL_PORT} (enter token in WebUI, or quick access: .../#token={API_TOKEN})")
     print("[proxy] stopped; click Start in the panel when needed")
     try:
         app.run(host=PANEL_HOST, port=PANEL_PORT, debug=False, use_reloader=False)

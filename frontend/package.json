@@ -2,7 +2,7 @@
   "name": "maskit-frontend",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "scripts": {
     "dev": "vite",

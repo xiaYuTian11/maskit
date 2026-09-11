@@ -92,6 +92,7 @@
   "filter_enabled": true,
   "fail_closed": true,
   "response_scan": true,
+  "origin_check": true,
   "record_plaintext_words": true,
   "stream_response": true,
   "stream_exclude_hosts": [],

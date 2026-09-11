@@ -2102,6 +2102,107 @@ class PanelConfigTests(unittest.TestCase):
         self.assertEqual(panel.normalize_config({"capture_mode": "local"})["capture_mode"], "local")
         self.assertEqual(panel.normalize_config({"capture_mode": "bad"})["capture_mode"], "reverse")
 
+    def test_normalize_config_chinese_upstreams_auto_dedup_base_path(self):
+        """回归测试：多个纯中文名称客户端绝不可因内部 base_path 塌缩为 /up 而被当作重复条目忽略。"""
+        warns = []
+        raw = {
+            "upstreams": [
+                {"name": "通义千问", "target": "https://dashscope.aliyuncs.com"},
+                {"name": "智谱清言", "target": "https://open.bigmodel.cn"},
+                {"name": "百度文心", "target": "https://aip.baidubce.com"},
+            ]
+        }
+        cfg = panel.normalize_config(raw, warns)
+        self.assertEqual(len(cfg["upstreams"]), 3, f"3 个客户端必须全部保留，当前警告: {warns}")
+        names = [u["name"] for u in cfg["upstreams"]]
+        self.assertEqual(names, ["通义千问", "智谱清言", "百度文心"])
+        base_paths = [u["base_path"] for u in cfg["upstreams"]]
+        self.assertEqual(len(base_paths), len(set(base_paths)), "base_path 必须自动去重")
+        self.assertEqual(warns, [])
+
+    def test_load_config_persists_normalized_differences(self):
+        """回归测试：load_config 发现磁盘数据与归一化结果不一致时，必须持久化写回磁盘。"""
+        import tempfile
+        old_cfg = panel.CONFIG_PATH
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            tmp_path = Path(f.name)
+        try:
+            panel.CONFIG_PATH = tmp_path
+            # 写入一个包含重复 base_path 与冲突端口的原始配置
+            raw_data = {
+                "upstreams": [
+                    {"name": "up1", "target": "https://api1.com", "base_path": "/same", "port": 18701},
+                    {"name": "up2", "target": "https://api2.com", "base_path": "/same", "port": 18701},
+                ]
+            }
+            tmp_path.write_text(json.dumps(raw_data), encoding="utf-8")
+            loaded = panel.load_config()
+            self.assertEqual(len(loaded["upstreams"]), 2)
+            self.assertNotEqual(loaded["upstreams"][0]["base_path"], loaded["upstreams"][1]["base_path"])
+            # 验证磁盘上的文件已经被持久化更新为归一化后的数据
+            on_disk = json.loads(tmp_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["upstreams"][0]["base_path"], loaded["upstreams"][0]["base_path"])
+            self.assertEqual(on_disk["upstreams"][1]["base_path"], loaded["upstreams"][1]["base_path"])
+            self.assertNotEqual(on_disk["upstreams"][0]["port"], on_disk["upstreams"][1]["port"])
+        finally:
+            panel.CONFIG_PATH = old_cfg
+            tmp_path.unlink(missing_ok=True)
+
+    def test_sidecar_read_settings_dedups_base_path(self):
+        """回归测试：sidecar 读取包含冲突 base_path 的磁盘配置时必须自动消解冲突，且正确提取 extra_headers。"""
+        import tempfile
+        old_data_root = tr._DATA_ROOT
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            cfg_file = p / "config.json"
+            cfg_file.write_text(json.dumps({
+                "upstreams": [
+                    {"name": "up1", "target": "https://api1.com", "base_path": "/same", "port": 18701, "extra_headers": {"x-api-key": "secret-1"}},
+                    {"name": "up2", "target": "https://api2.com", "base_path": "/same", "port": 18701},
+                ]
+            }), encoding="utf-8")
+            tr._DATA_ROOT = p
+            try:
+                s = tr._read_settings()
+                self.assertIsNotNone(s)
+                ups = s["upstreams"]
+                self.assertEqual(len(ups), 2)
+                self.assertNotEqual(ups[0]["base_path"], ups[1]["base_path"])
+                self.assertNotEqual(ups[0]["port"], ups[1]["port"])
+                self.assertEqual(ups[0].get("extra_headers"), {"x-api-key": "secret-1"}, "sidecar 必须正确解析并注入 extra_headers")
+            finally:
+                tr._DATA_ROOT = old_data_root
+
+    def test_normalize_config_base_path_conflict_renames_and_warns(self):
+        """用户显式填写的 base_path 撞车时：自动改名保命，且必须告警（单端口前缀模式契约变了）。"""
+        warns = []
+        raw = {
+            "upstreams": [
+                {"name": "openai", "target": "https://api.openai.com", "base_path": "/v1"},
+                {"name": "relay", "target": "https://relay.example.com", "base_path": "/v1"},
+            ]
+        }
+        cfg = panel.normalize_config(raw, warns)
+        self.assertEqual(len(cfg["upstreams"]), 2, f"两条都必须保留，当前警告: {warns}")
+        self.assertEqual(cfg["upstreams"][0]["base_path"], "/v1")
+        self.assertEqual(cfg["upstreams"][1]["base_path"], "/v1_2", "冲突条目应自动追加序号而非被丢弃")
+        self.assertEqual(len(warns), 1, f"改名必须告警一次，当前警告: {warns}")
+        self.assertIn("/v1_2", warns[0])
+
+    def test_normalize_config_generated_base_path_conflict_stays_silent(self):
+        """自动生成的 /up_N 之间撞车（如名字本身就是 up_1）不应告警：用户没填过，无契约可破。"""
+        warns = []
+        raw = {
+            "upstreams": [
+                {"name": "通义千问", "target": "https://dashscope.aliyuncs.com"},
+                {"name": "up_1", "target": "https://relay.example.com"},
+            ]
+        }
+        cfg = panel.normalize_config(raw, warns)
+        base_paths = [u["base_path"] for u in cfg["upstreams"]]
+        self.assertEqual(len(base_paths), len(set(base_paths)), "base_path 必须唯一")
+        self.assertEqual(warns, [], f"自动生成前缀的改名不该打扰用户，当前警告: {warns}")
+
     def test_parse_system_proxy_ignores_self_and_uses_http_segment(self):
         self.assertEqual(
             panel.parse_system_proxy("http=127.0.0.1:7890;https=127.0.0.1:7891"),
