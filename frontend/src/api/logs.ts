@@ -20,7 +20,7 @@ export interface LogsParams {
   slim?: boolean
 }
 
-export function getLogs(params: LogsParams): Promise<LogsResponse> {
+export function getLogs(params: LogsParams, signal?: AbortSignal): Promise<LogsResponse> {
   const search = new URLSearchParams()
   if (params.since) search.set('since', String(params.since))
   if (params.limit) search.set('limit', String(params.limit))
@@ -30,7 +30,7 @@ export function getLogs(params: LogsParams): Promise<LogsResponse> {
   if (params.fulltext) search.set('fulltext', '1')
   if (params.slim !== false) search.set('slim', '1')
   const qs = search.toString()
-  return shieldFetch<LogsResponse>(`/api/logs${qs ? `?${qs}` : ''}`)
+  return shieldFetch<LogsResponse>(`/api/logs${qs ? `?${qs}` : ''}`, { signal })
 }
 
 /** 单条事件全量（含 original/dialog 明文，仅详情弹窗调用） */
