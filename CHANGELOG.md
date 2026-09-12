@@ -2,7 +2,10 @@
 
 本文件记录对用户可见的变更；格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
-## [Unreleased]
+## [0.2.8] - 2026-09-12
+
+修复占位符「按后缀反查」兜底在预热后失效、反向代理非白名单路径明文上行安全漏洞，以及 Responses API 流式响应多 part 通道缓冲隔离。  
+Release v0.2.8: Fix false-positive suffix index collision disabling placeholder fallback after warm-up, resolve cleartext forwarding on non-whitelisted reverse-proxy paths under fail-closed, and isolate multi-part Responses SSE buffers.
 
 ### 修复 / Bug Fixes
 - 修复**占位符「按后缀反查」兜底在启动预热后大面积失效**的问题：后缀索引登记时用对象身份比较（`is not`）判断是否撞车，而预热从事件库 `json.loads` 出来的 token 与索引里已存的那个**值相等但对象不同**——同一个 token 被登记两次就会被误判成撞车，后缀被永久标记为不可用。复用表的设计目的就是跨请求复用同一占位符，因此事件库里同一 token 出现多条事件是常态，预热覆盖的事件越多、失效面越大；且该状态**无法自愈**，运行时的补登记也救不回来。表现为模型改写花括号、标签大小写或尾部残缺的占位符还原不出来，且没有任何日志，用户只能看到裸占位符。现改为值比较（`!=`）；真撞车（两个不同 token 抢同一后缀）的处理语义完全不变（感谢 @duncan0k 报告 #27）。

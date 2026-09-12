@@ -35,6 +35,7 @@ htmlcov/
 .pi/
 .pi-subagents/
 .codex/
+.workbuddy-ai/
 .vscode/
 .idea/
 dist/
