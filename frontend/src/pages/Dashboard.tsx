@@ -70,7 +70,7 @@ const fmtMs = (ms?: number | null) => {
 
 export default function Dashboard() {
   const queryClient = useQueryClient()
-  const { t, tf } = useI18n()
+  const { t, tf, lang } = useI18n()
   // 页面隐藏时停止轮询；可见时自动刷新
   const { hidden } = useVisibility()
 
@@ -706,7 +706,7 @@ export default function Dashboard() {
       {(status?.egress_proxy_users ?? []).length > 0 && (
         <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-2.5 text-xs text-amber-600 dark:text-amber-400">
           <Globe className="h-3.5 w-3.5 shrink-0" />
-          <span>{t('dash.egressOn')}{status!.egress_proxy_users.join('、')}</span>
+          <span>{t('dash.egressOn')}{status!.egress_proxy_users.join(lang === 'en' ? ', ' : '、')}</span>
         </div>
       )}
 

@@ -53,7 +53,7 @@ export function exportLogs(params: {
   if (params.fulltext) search.set('fulltext', '1')
   if (params.limit) search.set('limit', String(params.limit))
   const qs = search.toString()
-  return shieldFetch<Response>(`/api/logs/export${qs ? `?${qs}` : ''}`, { raw: true })
+  return shieldFetch<Response>(`/api/logs/export${qs ? `?${qs}` : ''}`, { raw: true, timeoutMs: 0 })
 }
 
 export function clearLogs(): Promise<{ ok: boolean; error?: string }> {

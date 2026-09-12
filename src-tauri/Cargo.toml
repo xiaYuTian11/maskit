@@ -1,6 +1,6 @@
 [package]
 name = "maskit"
-version = "0.2.8"
+version = "0.2.9"
 description = "数据面具 Maskit — 本地 LLM 敏感信息脱敏代理（Tauri 壳 + Python 引擎 sidecar）"
 authors = ["TMW"]
 license = "AGPL-3.0-only"

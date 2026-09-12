@@ -1,3 +1,13 @@
+# Dependabot 配置
+#
+# open-pull-requests-limit: 0 = **关闭该生态的常规版本更新 PR**（合法取值 0-10，
+# 0 是官方的关闭方式），安全更新不受此限制、仍由仓库的 Dependabot alerts 驱动。
+#
+# 这是有意为之，不是漏填：0.2.1 时把四个生态统一从 weekly/limit=5 改成
+# monthly/limit=0 并去掉 groups，目的就是止住依赖升级 PR 的噪音 —— 本项目对依赖
+# 版本敏感（引擎/壳/前端三处版本号与 lock 必须同步，见 scripts/check-version.py），
+# 自动升级 PR 很容易把版本线搅乱。因此下面的 schedule 只是形式上的兜底，实际不会
+# 产生版本更新 PR；要重新开启就把 limit 改成 1-3 并补回 groups 分组。
 version: 2
 updates:
   - package-ecosystem: pip

@@ -9,7 +9,7 @@
 | Docker 无头服务 | linux/arm64 | 支持 | 由 Release 工作流构建，多数 ARM64 NAS/服务器可用；请确认 Docker 主机支持对应架构。 |
 | 源码引擎 + Web 控制台 | Windows / Linux / macOS | 可启动 | Python 3.13 + Flask；基础反向代理/Web 控制台可运行，系统代理/证书等平台特性请按目标系统单独验证。 |
 | 原生 macOS 桌面安装包 | arm64 (Apple Silicon) | 支持 | 由 GitHub Actions Release 工作流自动编译生成 DMG 安装包；内置 Python 引擎 sidecar 与开机自启（LaunchAgent）。 |
-| 原生 Linux 桌面安装包 | x86_64 | 暂未发布 | 官方桌面端目前仅支持 Windows；Linux 建议使用 Docker 官方多架构镜像部署。 |
+| 原生 Linux 桌面安装包 | x86_64 | 暂未发布 | 官方桌面端目前只发布 Windows 与 macOS 两种原生包；Linux 建议使用 Docker 官方多架构镜像部署（源码引擎 + Web 控制台在 Linux 上可运行）。 |
 
 ## Docker 验证
 
@@ -45,7 +45,8 @@ Windows 安装包由根目录流水线生成：
 .\build.ps1 -ReleaseOnly
 ```
 
-构建前请安装 Python 3.13、Node.js 20+、Rust stable 和 WebView2。Windows 发布产物位于 `src-tauri/target/release/bundle/nsis/`；macOS 发布产物位于 `src-tauri/target/release/bundle/dmg/`（官方 GitHub Actions Release 工作流现已同时构建并发布 Windows x86_64 与 macOS Apple Silicon 原生桌面安装包）。没有配置更新签名密钥时，工作流会明确标记 `UNSIGNED.txt`，这类包只能手动安装，不能启用自动更新。
+构建前请安装 Python 3.13、Node.js 20.19+ 或 22.12+（CI 用 22；`scripts/check-env-import.mjs`
+依赖 `--experimental-strip-types`，需 ≥22.6）、Rust stable 和 WebView2。Windows 发布产物位于 `src-tauri/target/release/bundle/nsis/`；macOS 发布产物位于 `src-tauri/target/release/bundle/dmg/`（官方 GitHub Actions Release 工作流现已同时构建并发布 Windows x86_64 与 macOS Apple Silicon 原生桌面安装包）。没有配置更新签名密钥时，工作流会明确标记 `UNSIGNED.txt`，这类包只能手动安装，不能启用自动更新。
 
 ## 源码运行
 

@@ -9,7 +9,7 @@
     3. crash-dumps 目录无新增（无崩溃现场 = 无崩溃）
     4. 代理进程存活（无自动重启风暴：watchdog restarts 计数不激增）
 
-脱敏正确性由单测覆盖（254 项）；本脚本专注「长期跑不崩」。
+脱敏正确性由 `tests/` 下的单测覆盖；本脚本专注「长期跑不崩」。
 任何检查失败：记录时间点，不中断继续巡检（观察自动恢复能力）。
 """
 import argparse
@@ -23,8 +23,33 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "LLMShield"
-PANEL_URL = "http://127.0.0.1:5801"
+
+
+def _data_dir() -> Path:
+    """引擎数据目录，与 panel.py `_default_data_root()` 同口径。
+
+    优先 `LLM_SHIELD_DATA_DIR`（panel.py 给子进程设置的就是它，Docker 与测试也用它做隔离）；
+    否则按平台约定推导。
+
+    曾硬编码 `%APPDATA%\\LLMShield`：产品更名为 Data Maskit 后数据目录已变成
+    `%APPDATA%\\Maskit`，脚本读的是不存在的目录，事件库计数恒为 -1、
+    token 永远读不到，整份巡检结果失真却不会报错。
+    """
+    env = os.environ.get("LLM_SHIELD_DATA_DIR")
+    if env:
+        return Path(env)
+    home = Path.home()
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        return (Path(base) if base else home / "AppData" / "Roaming") / "Maskit"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Maskit"
+    base = os.environ.get("XDG_DATA_HOME")
+    return (Path(base) if base else home / ".local" / "share") / "maskit"
+
+
+DATA_DIR = _data_dir()
+PANEL_URL = f"http://127.0.0.1:{os.environ.get('LLM_SHIELD_PANEL_PORT') or os.environ.get('SHIELD_ENGINE_PORT') or 5801}"
 DB_PATH = DATA_DIR / "shield-events.sqlite3"
 CRASH_DIR = DATA_DIR / "crash-dumps"
 

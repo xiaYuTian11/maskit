@@ -78,43 +78,35 @@ Data Maskit 是一款专为大模型打造的**100% 本地隐私脱敏与还原�
 
 ## 4. 验证与测试流程
 
-代码变更后必须按序通过以下四道门禁：
+代码变更后必须通过全量门禁。**唯一清单是 `scripts/verify-all.py`**（本地与 CI 共用，13 项）：
 
 ```powershell
-# 1. Python 语法编译与单元测试
-python -m py_compile engine/*.py
-python -m unittest discover -s tests
-
-# 2. 流式与出口代理冒烟测试
-python tests/smoke_stream.py
-python tests/smoke_egress.py
-
-# 3. 前端类型检查、构建、Lint、中英文字典对齐（0 error）
-cd frontend
-npm run build
-npm run lint
-node ../scripts/check-i18n.mjs
-cd ..
-
-# 4. Rust 桌面壳测试（改动 src-tauri 时必跑）
-cd src-tauri
-cargo check
-cargo test --lib
-cd ..
-
-# 5. 版本号四处一致（panel.py / tauri.conf.json / Cargo.toml / package.json）
-python scripts/check-version.py
-python scripts/audit-public-release.py
-
-# 6. workflow 校验（改动 .github/workflows 时必跑；依赖 pyyaml）
-python scripts/check-workflows.py
+python scripts/verify-all.py                 # 全跑
+python scripts/verify-all.py --only python,version
+python scripts/verify-all.py --list          # 打印清单（供漂移比对）
 ```
 
-与 CI（`.github/workflows/ci.yml` 的 `python` / `frontend` / `rust` / `version` 四个 job）完全对应。
+分组与 `.github/workflows/ci.yml` 的 job 一一对应：
+
+| 组 | 对应 ci.yml job | 内容 |
+|---|---|---|
+| `python` | `python` | `py_compile engine/*.py`、`unittest discover -s tests`、`smoke_stream.py`、`smoke_egress.py` |
+| `frontend` | `frontend` | `npm run build`、`npm run lint`、`check-i18n.mjs`、`check-env-import.mjs`（工作目录 `frontend/`） |
+| `rust` | `rust` + `rust-macos` | `cargo check`、`cargo test --lib`（工作目录 `src-tauri/`） |
+| `version` | `version` | `check-version.py`、`audit-public-release.py`、`check-workflows.py` |
+
+> **为什么要有统一入口**：门禁原先散在 `build.ps1`（只跑「py_compile + 单测 + 前端构建」三样）
+> 与 `ci.yml`（全量）两处，本地「过了 build.ps1 却被 CI 拦下」时 tag 已经推到远端了。
+> 现在 `build.ps1` 直接调本脚本，`scripts/check-workflows.py` 会**双向比对**
+> `verify-all.py` 与 `ci.yml`，任一侧漏加/多加都会在 PR 阶段报错。
+> **新增门禁只需改 `verify-all.py` 的 `GATES` 与 `ci.yml` 两处**，不要再往文档里抄命令清单。
 
 > `check-workflows.py` 是唯一需要额外依赖的校验脚本（`pyyaml`）：CI 不 lint workflow，
 > YAML 或 `run` 块写坏只会在「推送后 Actions 页报错」才暴露，最坏拖到打 tag 发版时才炸。
 > 只校验显式 `shell: bash` 的步骤（`shell: pwsh` 拿 bash 语法验必然误报）。
+
+> Windows 本地若 `bash` 被解析成 WSL 垫片，用 `MASKIT_BASH=<PortableGit>\usr\bin\bash.exe` 覆盖；
+> 找不到时脚本会跳过 shell 校验并告警（CI 在 ubuntu 上必跑）。
 
 ### 运行时文件约定
 

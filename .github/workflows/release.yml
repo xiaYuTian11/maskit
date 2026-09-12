@@ -20,6 +20,7 @@ jobs:
     name: validate release tag
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -37,6 +38,7 @@ jobs:
     needs: validate
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build local smoke image
@@ -65,9 +67,14 @@ jobs:
 
   docker:
     name: Docker image (ghcr.io, amd64 + arm64)
-    needs: docker-smoke
+    # 必须等桌面端全部构建成功再推镜像：ghcr 上会打 `latest` 与 `vX.Y.Z` 两个 tag，
+    # 若桌面端（Tauri 打包）失败导致整次发版中止，镜像却已经推上去了 ——
+    # 于是 ghcr 上躺着一个「没有对应 GitHub Release」的版本，用户 pull latest
+    # 拿到的就是未发布产物。docker-smoke 仍然保留（镜像自身能不能跑）。
+    needs: [docker-smoke, desktop]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -118,6 +125,7 @@ jobs:
             bundle: 'app,dmg'
             shell: bash
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -314,6 +322,7 @@ jobs:
     needs: [docker, desktop]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
@@ -370,6 +379,23 @@ jobs:
             echo "Uploaded latest.json for $GITHUB_REF_NAME"
           fi
 
-          # 所有资产上传完成后自动发布，避免长期停留 Draft
-          gh release edit "$GITHUB_REF_NAME" --draft=false
-          echo "Published release $GITHUB_REF_NAME"
+          # 所有资产上传完成后自动发布，避免长期停留 Draft —— 但**仅限签名完整时**。
+          # 签名缺失时必须留在 Draft：generate-latest-json.py 没有 .sig 就不产出
+          # latest.json，而新 Release 会立刻成为 releases/latest，于是全体现网用户的
+          # releases/latest/download/latest.json 立刻 404 → 自动更新静默断更，
+          # 用户端没有任何提示（审计 P0）。宁可停在草稿等人处理。
+          if [ "$unsigned_count" -gt 0 ]; then
+            {
+              echo "## ⚠️ Release 保持草稿（存在未签名产物）"
+              echo ""
+              echo "有 $unsigned_count 个桌面安装包没有生成更新签名，因此 **没有产出 latest.json**。"
+              echo "此时若转正，\`releases/latest/download/latest.json\` 会对所有已安装用户返回 404，自动更新静默失效。"
+              echo ""
+              echo "处理方式：修好签名 secret 后重跑该 tag，或手工补上 latest.json 后再手动发布。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=未签名 Release 已保持草稿::$unsigned_count 个安装包未签名、未生成 latest.json；为避免全量用户更新检查 404，Release 保持 Draft。"
+            echo "Kept release $GITHUB_REF_NAME as draft (unsigned artifacts)."
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+            echo "Published release $GITHUB_REF_NAME"
+          fi

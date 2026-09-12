@@ -1,8 +1,11 @@
 /**
  * 敏感词打码工具（Stats 排行榜 / Dashboard 脱敏明细共用）
- * 凭据类标签：永远只显示打码（安全红线，与引擎口径一致：凭据原文不落库）
+ *
+ * 凭据类标签：永远只显示打码（安全红线，与引擎口径一致：凭据原文不落库）。
+ * 集合的唯一定义源在 `credential-labels.ts` —— 以前这里自己写了一份 5 元素的
+ * 集合，少了 CONNSTR / PRIVATE_KEY，导致这两类词能被「显示明文」开关展示。
  */
-export const CRED_LABELS = new Set(['API_KEY', 'TOKEN', 'SECRET', 'ACCESS_KEY', 'JWT'])
+export { CRED_LABELS } from './credential-labels.ts'
 
 /** 打码显示：超长串保留首尾，中间打星（明文切换仅在非凭据词上生效）。 */
 export function maskWord(w: string): string {

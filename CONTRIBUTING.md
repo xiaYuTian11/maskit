@@ -7,31 +7,53 @@
 1. 从 `master` 新建功能分支：`git checkout -b feat/<描述>`
 2. 提交使用 Conventional Commits：`feat:` / `fix:` / `perf:` / `docs:` / `chore:`
 3. 推送后创建 PR 到 `master`（使用 `.github/PULL_REQUEST_TEMPLATE.md` 模板）
-4. CI 四个 job（`python` / `frontend` / `rust` / `version`）全绿 + 维护者审批后合并
+4. CI 五个 job（`python` / `frontend` / `rust` / `rust-macos` / `version`）全绿 + 维护者审批后合并
 
 分支保护规则见 [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md)。
 
 ## 验证标准（合并前必须全过）
 
+门禁清单的**唯一来源是 `scripts/verify-all.py`**（与 `ci.yml` 双向比对，漂移会在 PR 阶段报错），
+本地跑这一条就等价于全量 CI：
+
 ```bash
 # 0. Python 3.13 + pip install -r requirements.txt（其它版本未验证）
 python -V   # 3.13.x
 
-# 1. 语法 + 单测 + 流式/出口冒烟（Windows pwsh 下单引号或遍历）
+# 1. 全量门禁（python / frontend / rust / version 四组共 13 项）
+python scripts/verify-all.py
+
+# 只想跑某几组 / 看清单
+python scripts/verify-all.py --only python,version
+python scripts/verify-all.py --list
+```
+
+单独跑各组时（等价于上面的分组）：
+
+```bash
+# python：语法 + 单测 + 流式/出口冒烟（Windows pwsh 下单引号或遍历）
 python -c "import py_compile, glob; [py_compile.compile(f) for f in glob.glob('engine/*.py')]"
 python -m unittest discover -s tests
 python tests/smoke_stream.py
 python tests/smoke_egress.py
 
-# 2. 前端类型检查 + 构建 + Lint + 中英文字典对齐
-cd frontend && npm ci && npm run build && npm run lint && node ../scripts/check-i18n.mjs && cd ..
+# frontend：类型检查 + 构建 + Lint + 中英文字典对齐 + .env 导入解析用例
+cd frontend && npm ci && npm run build && npm run lint \
+  && node ../scripts/check-i18n.mjs \
+  && node --experimental-strip-types ../scripts/check-env-import.mjs && cd ..
 
-# 3. Rust 壳编译与单测（改了 src-tauri 时；先 mkdir src-tauri/resources/engine 占位）
+# rust：壳编译与单测（先 mkdir src-tauri/resources/engine 占位）
 cd src-tauri && cargo check && cargo test --lib && cd ..
 
-# 4. 版本号四处一致
+# version：版本号 7 处一致（panel.py / tauri.conf.json / Cargo.toml / package.json
+#          + Cargo.lock / package-lock.json / package-lock 根字段）
 python scripts/check-version.py
+python scripts/audit-public-release.py
+python scripts/check-workflows.py   # 依赖 pyyaml；改动 .github/workflows 时必跑
 ```
+
+> 本地跑门禁前若 `frontend/dist` 已存在，某些带安全删除守卫的环境会拦截 vite 清空
+> 输出目录（批量删除阈值）。先删掉 `frontend/dist` 即可，它是构建产物、已 gitignore。
 
 首次运行源码态引擎：`python engine/panel.py` 会在 `engine/` 下生成 `config.json`（已 gitignore），
 模板见 `engine/config.example.json`。

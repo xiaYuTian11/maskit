@@ -1,6 +1,10 @@
 """
 Data Maskit 控制面板 - 本地 Flask 服务
-双击 panel.bat 启动，浏览器访问 http://127.0.0.1:5801
+
+由桌面壳（Tauri）作为 sidecar 拉起，也可手动运行：
+    python engine/panel.py            # 源码态
+    MaskitEngine.exe                  # 打包态
+浏览器访问 http://127.0.0.1:5801
 管：启停本地显式代理 / 配置站点敏感词 / 实时日志 / 紧急恢复 / 装证书
 """
 # Data Maskit — 本地 LLM 敏感信息脱敏代理
@@ -11,10 +15,11 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.2.8'
+__version__ = '0.2.9'
 import json
 import copy
 import hashlib
+import logging
 import math
 import os
 import platform
@@ -48,6 +53,7 @@ from shield_defaults import (
     extract_usage,
     SSEUsageAccumulator,
 )
+from credential_labels import CREDENTIAL_LABELS
 
 # 资源目录（打包后随 exe 发布的只读资源：templates、transparent.py、shield_defaults.py）
 # PyInstaller onefire 时为 sys._MEIPASS；开发时为脚本所在目录。
@@ -162,13 +168,14 @@ from event_store import (
     stats_range,
     set_record_plaintext_words,
     fetch_restore_items,
+    _ensure_db,
 )
 import audit_engine as audit_eng
 ROOT = DATA_ROOT  # 兼容旧引用（CONFIG_PATH/PID_FILE/ENV_BACKUP_PATH 等可写文件）
 CONFIG_PATH = DATA_ROOT / "config.json"
 SCRIPTS_DIR = _BUNDLE_ROOT  # transparent.py / shield_defaults.py 所在目录（只读资源）
 HOSTS_FILE = r"C:\Windows\System32\drivers\etc\hosts"
-MARKER = "# LLM-Shield"
+MARKER = "# LLM-Shield"  # 紧急恢复脚本 scripts/emergency-restore.bat 依赖此标记定位 hosts 块，改动须同步
 CA_CERT = Path(os.path.expanduser("~")) / ".mitmproxy" / "mitmproxy-ca-cert.cer"
 def _default_panel_port() -> int:
     """面板端口：默认 5801，可用环境变量 LLM_SHIELD_PANEL_PORT 覆盖（测试/冲突规避）。"""
@@ -367,6 +374,21 @@ def _origin_ok():
     }
 
 
+def _guard_reject(reason, resp, status=403):
+    """拒绝控制面请求时留一条**结构化**日志。
+
+    关掉 werkzeug 访问日志后（见 run_panel 末尾），这里就是「谁被拒了、为什么」
+    的唯一现场。只记方法/路径/原因/来源 Host 与 Origin —— 绝不记 token，
+    连长度都不记（长度也是信息）。
+    """
+    try:
+        _emit_log(f"[panel] 拒绝 {request.method} {request.path} reason={reason} "
+                  f"host={request.headers.get('Host', '')} origin={request.headers.get('Origin', '')}")
+    except Exception:
+        pass
+    return resp, status
+
+
 @app.before_request
 def api_guard():
     # 存活探针：不需要 token（Docker HEALTHCHECK 拿不到随机 token），只回 ok，不泄露任何状态
@@ -381,13 +403,17 @@ def api_guard():
     if not request.path.startswith("/api/"):
         return None
     if not _host_ok():
-        return jsonify({"ok": False, "error": "host_rejected", "message": "非法请求来源 Host"}), 403
+        return _guard_reject("host_rejected",
+                             jsonify({"ok": False, "error": "host_rejected",
+                                      "message": "非法请求来源 Host"}))
 
     # API 令牌校验（主防线）：任何外部未授权请求在第一道防线直接阻断
     token = request.headers.get("X-Shield-Token", "")
     # compare_digest 对非 ASCII str 会抛 TypeError → 500，先转 bytes
     if not secrets.compare_digest(token.encode("utf-8", "replace"), API_TOKEN.encode("utf-8")):
-        return jsonify({"ok": False, "error": "invalid_token", "message": "无效请求令牌"}), 403
+        return _guard_reject("invalid_token",
+                             jsonify({"ok": False, "error": "invalid_token",
+                                      "message": "无效请求令牌"}))
 
     if not _origin_ok():
         # 管理员紧急自救放行：
@@ -400,13 +426,13 @@ def api_guard():
             return None
         origin = request.headers.get("Origin", "")
         scheme, host = _effective_request_origin() if REMOTE_MODE else ("http", f"127.0.0.1:{PANEL_PORT}")
-        return jsonify({
+        return _guard_reject("origin_rejected", jsonify({
             "ok": False,
             "error": "origin_rejected",
             "message": "Origin 校验未通过",
             "current_origin": origin,
             "expected_origin": f"{scheme}://{host}",
-        }), 403
+        }))
 
     return None
 
@@ -730,6 +756,14 @@ def _backup_values():
 
 
 def apply_client_env():
+    """把命令行/系统代理环境变量指向本地代理（Windows）。
+
+    ⚠️ 当前**没有生产调用点**（仅 `tests/test_shield.py` 引用）：这个「自动改用户
+    环境变量」的能力还没有 UI 入口，接线与否属产品决定，所以先留着而不是删掉。
+    配套的 `restore_client_env()` 在生产路径上是活的（退出、`/api/restore` 紧急
+    恢复都要还原用户环境，包括清理更早版本写下的备份），删掉本函数会让那套还原
+    逻辑失去写入方、无从验证。
+    """
     if os.environ.get("LLM_SHIELD_AUTO_ENV", "1") == "0":
         return
     if os.name != "nt" and ENV_BACKUP_PATH.name == "env_backup.json":
@@ -828,7 +862,13 @@ _passthrough = {"servers": {}, "lock": threading.Lock(), "mode": ""}
 
 
 def _read_chunked_body(rfile, limit=64 * 1024 * 1024):
-    """读取 Transfer-Encoding: chunked 请求体并解码（BaseHTTPRequestHandler 不自动解）。"""
+    """读取 Transfer-Encoding: chunked 请求体并解码（BaseHTTPRequestHandler 不自动解）。
+
+    必须先判后读：chunk 头里的 `size` 由客户端完全控制，`rfile.read(size)` 会按它
+    分配并阻塞读取。以前是「先读后判」（读完再比 limit），一个 `FFFFFFFF` 的 chunk
+    头就能让进程分配几个 GB 或长时间挂住。透传层在 Docker 下会监听
+    0.0.0.0（MASKIT_LISTEN_HOST），是网络可达的，所以这条要按不可信输入处理。
+    """
     body = b""
     while True:
         try:
@@ -851,10 +891,10 @@ def _read_chunked_body(rfile, limit=64 * 1024 * 1024):
                 if t in (b"\r\n", b"\n", b""):
                     break
             break
+        if size < 0 or len(body) + size > limit:
+            raise ValueError("request body too large")
         body += rfile.read(size)
         rfile.read(2)  # 块尾 CRLF
-        if len(body) > limit:
-            raise ValueError("request body too large")
     return body
 
 
@@ -2099,7 +2139,7 @@ def _start_proxy_locked():
     cfg = load_config()
     capture_mode = cfg.get("capture_mode", "reverse")
     if capture_mode == "local" and not is_admin():
-        return False, "本机透明捕获需要管理员权限，请用桌面快捷方式或右键以管理员身份运行 panel.bat"
+        return False, "本机透明捕获需要管理员权限，请以管理员身份重新启动 Maskit（或右键 → 以管理员身份运行）"
     if capture_mode == "explicit" and _port_listen(PROXY_PORT):
         return False, f"本地代理端口 {PROXY_PORT} 已被占用"
     if capture_mode != "reverse":
@@ -2379,6 +2419,19 @@ def _db_size_mib():
         return 0.0
 
 
+# 「本产品引擎进程」的命令行特征：入口脚本名（源码态）+ 打包后的可执行文件名
+# （与 src-tauri/src/lib.rs 的 ENGINE_NAMES 保持一致）。全部小写，比对前统一 lower()。
+# 刻意**不含**裸产品名 "maskit" / "llmshield"：子串匹配会把「在仓库目录下跑起来、
+# 又恰好占用 18701-18719 或某个 upstream 端口」的无关进程误判成本产品面板，进而
+# taskkill /T /F 连子孙进程一起杀掉（数据丢失风险，审计 P1）。
+_SHIELD_ENGINE_CMDLINE_MARKERS = (
+    "panel.py",
+    "engine_entry.py",
+    "maskitengine",      # MaskitEngine.exe（打包态，新名）
+    "llmshieldengine",   # LLMShieldEngine.exe（更名前；新旧版本可能共存于同一台机器）
+)
+
+
 def _is_shield_panel_pid(pid):
     """识别「另一个本产品面板」进程（源码 panel.py 或打包 MaskitEngine.exe）。
 
@@ -2390,6 +2443,11 @@ def _is_shield_panel_pid(pid):
 
     产品名要同时认新旧两套（maskit / llmshield）：更名后新旧版本可能共存于同一台
     机器，只认新名会让「旧版占着端口」重新变成认不出的僵局。
+
+    但**不能用裸产品名做子串匹配**：那等于「命令行里出现 maskit 四个字母」就算数，
+    任何在仓库目录（`D:\\work\\...\\maskit`）下跑起来、又恰好监听 18701-18719 或
+    某个 upstream 端口的无关进程都会被 `taskkill /T /F` 连子孙一起杀掉。这里改成
+    只认具体的入口脚本名与打包后的可执行文件名（与 lib.rs 的 ENGINE_NAMES 一致）。
     """
     try:
         pid = int(pid)
@@ -2401,7 +2459,7 @@ def _is_shield_panel_pid(pid):
         low = _read_process_cmdline(pid).lower()
         if "mitmdump" in low or "mitmproxy.tools" in low or "transparent.py" in low:
             return False
-        return any(mark in low for mark in ("panel.py", "engine_entry.py", "maskit", "llmshield"))
+        return any(mark in low for mark in _SHIELD_ENGINE_CMDLINE_MARKERS)
     try:
         _rc, out = _run_console(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
@@ -2412,7 +2470,7 @@ def _is_shield_panel_pid(pid):
     low = (out or "").lower()
     if "mitmdump" in low or "transparent.py" in low:
         return False  # mitmdump 类进程走 _is_mitmdump_pid，不在这里重复识别
-    return "panel.py" in low or "maskit" in low or "llmshield" in low
+    return any(mark in low for mark in _SHIELD_ENGINE_CMDLINE_MARKERS)
 
 
 def _free_upstream_ports():
@@ -3644,6 +3702,173 @@ def api_set_builtin_rules():
     return jsonify({"ok": True, "config": cfg, "warnings": warnings, "proxy_restarted": False})
 
 
+# ---- 配置增量端点（POST /api/config/patch）----------------------------------
+# 背景：POST /api/config 的合并只发生在**顶层**（`merged[k] = v`），因此凡是
+# 「值本身是容器」的字段（audit / egress_proxy / sensitive / upstreams /
+# target_domains …），前端只能提交整份快照。快照一旦过期（多标签页、另一个
+# 客户端、后端自身写入），并发修改就会被整对象覆盖且毫无提示。
+# 本端点让前端下发「路径 + 操作」的增量，服务端在 cfg_lock 内完成局部修改，
+# 消除覆盖窗口；同时它也是唯一能表达「删掉这一项」而无需回传整表的通道。
+_CONFIG_PATCH_OPS = frozenset({
+    "set",          # 覆盖指定路径的值（path 为空 = 覆盖整个键）
+    "merge",        # 目标为对象：批量更新其中的键
+    "map_del",      # 目标为对象：删除 value 列出的键
+    "list_add",     # 目标为数组：追加 value 中尚不存在的标量项
+    "list_remove",  # 目标为数组：移除 value 中存在的标量项
+    "list_upsert",  # 目标为对象数组：按 name 就地更新或追加（支持 match 指定旧名）
+    "list_del",     # 目标为对象数组：按 name 移除
+})
+
+
+def _config_patch_node(cfg, key, path, create_leaf=False):
+    """在 cfg[key] 内按 path 下钻，返回该路径指向的节点。
+
+    path 为空表示 cfg[key] 本身；中间节点必须是已存在的对象，否则视为非法路径
+    （避免把拼写错误变成静默新建的键）。create_leaf=True 时允许末段缺失并就地
+    建为空数组 —— 这是 list_add 需要的语义（往一个尚不存在的分类里加词）。
+    """
+    if key not in cfg:
+        raise ValueError(f"未知配置项：{key}")
+    node = cfg[key]
+    for i, seg in enumerate(path):
+        if not isinstance(seg, str) or not seg:
+            raise ValueError("配置路径段必须是非空字符串")
+        if not isinstance(node, dict):
+            raise ValueError(f"配置路径 {path[:i]} 不是对象，无法继续下钻")
+        if seg not in node:
+            if create_leaf and i == len(path) - 1:
+                node[seg] = []
+            else:
+                raise ValueError(f"配置路径 {path[:i + 1]} 不存在")
+        node = node[seg]
+    return node
+
+
+def _apply_config_patch(cfg, key, op, path, value, match=None):
+    """把一条增量操作应用到 cfg 上（就地修改），返回修改后的 cfg。"""
+    if op not in _CONFIG_PATCH_OPS:
+        raise ValueError(f"不支持的配置操作：{op}")
+    if not isinstance(key, str) or not key:
+        raise ValueError("key 必须是非空字符串")
+    if key not in cfg:
+        raise ValueError(f"未知配置项：{key}")
+    if not isinstance(path, list):
+        raise ValueError("path 必须是数组")
+    # 先把整条路径校验一遍：set 只用得到 path[:-1] 下钻，若在这里漏检末段，
+    # 非字符串段会被当成对象键写进去（json 再序列化成 "1" 这种垃圾键）。
+    if any(not isinstance(seg, str) or not seg for seg in path):
+        raise ValueError("配置路径段必须是非空字符串")
+    if op == "set":
+        if not path:
+            cfg[key] = value
+            return cfg
+        # path 非空时允许创建末段（用于「新建一个敏感词分类」这类场景）；
+        # 中间段仍必须已存在，拼错中间层会直接报错而不是静默建出一串空对象。
+        parent = _config_patch_node(cfg, key, path[:-1])
+        if not isinstance(parent, dict):
+            raise ValueError(f"配置路径 {path[:-1]} 不是对象，无法赋值")
+        parent[path[-1]] = value
+        return cfg
+
+    node = _config_patch_node(cfg, key, path, create_leaf=(op == "list_add"))
+    if op == "merge":
+        if not isinstance(node, dict) or not isinstance(value, dict):
+            raise ValueError("merge 要求目标与取值都是对象")
+        node.update(value)
+    elif op == "map_del":
+        if not isinstance(node, dict) or not isinstance(value, list):
+            raise ValueError("map_del 要求目标是对象、取值是数组")
+        if any(not isinstance(k, str) for k in value):
+            raise ValueError("map_del 的取值必须是字符串数组")
+        for k in value:
+            node.pop(k, None)
+    elif op in ("list_add", "list_remove"):
+        if not isinstance(node, list) or not isinstance(value, list):
+            raise ValueError(f"{op} 要求目标与取值都是数组")
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{op} 的取值必须是字符串数组")
+        if op == "list_add":
+            for item in value:
+                if item not in node:
+                    node.append(item)
+        else:
+            node[:] = [x for x in node if x not in value]
+    elif op == "list_upsert":
+        if not isinstance(node, list) or not isinstance(value, dict):
+            raise ValueError("list_upsert 要求目标是对象数组、取值是对象")
+        if match is not None and not isinstance(match, str):
+            raise ValueError("match 必须是字符串")
+        val_name = value.get("name")
+        target_name = match if match is not None else val_name
+        if not isinstance(target_name, str) or not target_name:
+            raise ValueError("list_upsert 需要 name 或 match 指明要更新的条目")
+        if val_name is None:
+            # 带 match 但 value 没传 name 时自动继承目标名，防止成为无名对象在 normalize 时被丢弃
+            value = dict(value, name=target_name)
+        elif not isinstance(val_name, str) or not val_name:
+            raise ValueError("list_upsert 的条目必须包含非空字符串 name")
+        for i, item in enumerate(node):
+            if isinstance(item, dict) and item.get("name") == target_name:
+                node[i] = value
+                break
+        else:
+            node.append(value)
+    else:  # list_del
+        if not isinstance(node, list) or not isinstance(value, str) or not value:
+            raise ValueError("list_del 要求目标是对象数组、取值是条目名")
+        node[:] = [x for x in node if not (isinstance(x, dict) and x.get("name") == value)]
+    return cfg
+
+
+@app.post("/api/config/patch")
+def api_patch_config():
+    """按「路径 + 操作」增量修改单个配置项，避免整对象覆盖并发写入。
+
+    请求体：{"key": "audit", "op": "set", "path": ["signals", "INJECTION"], "value": true}
+    响应体与 POST /api/config 完全一致，便于前端复用同一套保存/提示逻辑。
+    """
+    try:
+        ports_before = set(_expected_listen_ports())
+    except Exception as e:
+        _emit_log(f"[panel] 读取当前监听端口失败: {_safe_public_text(e, 240)}")
+        ports_before = set()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+    key = body.get("key")
+    op = body.get("op")
+    if not isinstance(key, str) or not key:
+        return jsonify({"ok": False, "error": "key 必须是非空字符串"}), 400
+    if not isinstance(op, str):
+        return jsonify({"ok": False, "error": "op 必须是字符串"}), 400
+    if "value" not in body:
+        return jsonify({"ok": False, "error": "缺少 value"}), 400
+    path = body.get("path", [])
+    warnings = []
+    try:
+        with cfg_lock:
+            cfg = _load_config_locked()
+            cfg = _apply_config_patch(cfg, key, op, path, body["value"], body.get("match"))
+            cfg = save_config(cfg, warnings)
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
+    _emit_log(f"[panel] 配置增量已保存（{key} / {op}）")
+    for w in warnings:
+        _emit_log(f"[panel] 配置调整：{w}")
+    restarted = False
+    try:
+        ports_after = set(_expected_listen_ports(cfg))
+        running = bool(proc["p"] and proc["p"].poll() is None)
+        if running and ports_after != ports_before:
+            _emit_log(f"[panel] upstream 端口变化 {sorted(ports_before)} -> {sorted(ports_after)}，"
+                      f"自动重启代理使新端口生效")
+            restarted = bool(_restart_proxy_locked("upstream 端口变化"))
+    except Exception as e:
+        _emit_log(f"[panel] 端口变化检测失败: {_safe_public_text(e, 240)}")
+    return jsonify({"ok": True, "config": cfg, "warnings": warnings,
+                    "proxy_restarted": restarted})
+
+
 @app.get("/api/config/backups")
 def api_config_backups():
     """列出可用配置备份（config.json.bak-*），带结构摘要供用户判断该回滚到哪份。
@@ -3948,8 +4173,15 @@ def _sync_prices_now(background=True, force=False):
     """同步在线价格目录到本地缓存。
 
     background=True 时后台线程执行（不阻塞调用方）；False 前台执行（手动同步）。
-    force=True 时跳过开关校验（手动触发视同用户明确授权），成功后自动启用开关。
+    force=True 时跳过开关校验（手动触发视同用户明确授权本次出站请求）。
     成功更新 _price_cache + _price_sync_state；失败只记 last_error，不清缓存。
+
+    这里**不写配置**。原先手动同步成功后会把整份 `cfg`（同步开始时读的陈旧快照）
+    写回磁盘，两个问题：
+      1. 出站请求可能耗时 20-40 秒，窗口内用户在设置页的任何改动都会被整份覆盖；
+      2. 它还会静默把 `price_sync_enabled` 置为 true，等于替用户打开「周期性出站」，
+         而这个开关在设置页本来就有独立控件（且未登记在 SECURITY.md 出站清单）。
+    手动同步就是一次同步，是否开启周期同步由用户自己拨那个开关。
     """
     def _do():
         with _price_sync_lock:
@@ -3978,12 +4210,6 @@ def _sync_prices_now(background=True, force=False):
                         _price_sync_state.update({
                             "last_error": "", "last_sync": time.time(), "model_count": len(prices),
                         })
-                        if force and not cfg.get("price_sync_enabled", False):
-                            try:
-                                cfg["price_sync_enabled"] = True
-                                save_config(cfg)
-                            except Exception:
-                                pass
                         break
                 except Exception as e:
                     last_err = f"{_safe_target(url)}: {_safe_public_text(e, 120)}"
@@ -4130,6 +4356,18 @@ def api_audit_run():
         if profile not in ("general", "web3", "full"):
             profile = "general"
         cfg = load_config()
+        # 主动探针开关必须为真，否则整轮扫描是「花钱买一份假报告」：
+        # 探针会真的发出请求并消耗 token，但 transparent 只在 AUDIT_ACTIVE_PROBES
+        # 为真时才评估跨请求污染（D1/S7），关着的时候 D1 恒判「无异常」。
+        # 与其给出一个从未执行的检查的「通过」，不如先拒绝并告诉用户怎么开。
+        audit_cfg = cfg.get("audit") if isinstance(cfg.get("audit"), dict) else {}
+        if not audit_cfg.get("active_probes"):
+            return jsonify({
+                "ok": False,
+                "error": "主动探针未启用（设置 → 安全审计 → 主动探针）。"
+                         "关闭状态下探针仍会发出并计费，但跨请求污染（D1）不会被评估、恒显示「无异常」，"
+                         "等于拿一份假报告。请先启用再运行扫描。",
+            }), 400
         target = None
         for u in cfg.get("upstreams") or []:
             if u.get("name") == upstream_name:
@@ -5280,11 +5518,11 @@ def _scrub_text(s, limit=0):
         return "<scrub failed>"
 
 
-# 凭据标签集合。必须与 transparent.CREDENTIAL_LABELS 一致——
-# panel 不 import transparent（那会把 mitmproxy 拖进面板进程），所以这里复制一份，
-# 由 tests 里的同步用例守死，别让两边悄悄漂移。
-_CREDENTIAL_LABELS = {"API_KEY", "TOKEN", "SECRET", "ACCESS_KEY", "JWT",
-                      "CONNSTR", "PRIVATE_KEY"}
+# 凭据标签集合：唯一定义源在 credential_labels.py。
+# panel 不 import transparent（那会把 mitmproxy 拖进面板进程），所以以前这里复制一份、
+# 靠测试守同步——结果 event_store 那份悄悄少了两类凭据。现在改成都 import 同一个
+# stdlib-only 模块，从结构上消灭漂移；保留 `_CREDENTIAL_LABELS` 这个名字给既有调用点。
+_CREDENTIAL_LABELS = CREDENTIAL_LABELS
 
 
 def _scrub_credentials_only(s):
@@ -5596,21 +5834,32 @@ def api_diagnostics_save():
 
 
 def start_panel_server(open_browser_on_start=True):
-    """启动 Flask 面板服务。供 panel.py 直接运行或 app.py (pywebview) 复用。
+    """启动 Flask 面板服务。供 `panel.py` 直接运行或桌面壳 sidecar 复用。
     在主线程调用时会注册信号处理和 console 关闭钩子；在子线程（pywebview 模式）跳过。
     """
     if ENV_BACKUP_PATH.exists():
         restore_client_env()
     _migrate_data_files()
-    init_db()
+    # 启动时确保数据库就绪：自动建表/迁移，并在库文件损坏时自动隔离并重建自愈
+    _ensure_db()
     load_config()  # 预热配置并同步运行时全局状态
     prune_event_log()
     preload_events()
     # 价格目录后台自动同步（启动时 + 每 7 天过期刷新；失败静默，不阻塞启动）
     _maybe_auto_sync_prices()
-    # 把本次 token 写文件，供外部脚本/测试读取（仅本机 127.0.0.1 可访问，文件权限继承用户）
+    # 把本次 token 写文件，供壳层/外部脚本读取。
+    # 显式 0600：默认 umask 022 会落成 0644，同机其他本地用户即可读到面板令牌
+    # —— 拿到它等于拿到代理开关与配置读写权限。Windows 上 mode 只影响只读位，
+    # 该目录另有 ACL 收紧（仅当前用户 + SYSTEM + Administrators），两者互补。
+    token_path = ROOT / "proxy_token"
     try:
-        (ROOT / "proxy_token").write_text(API_TOKEN, encoding="utf-8")
+        fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, API_TOKEN.encode("utf-8"))
+        finally:
+            os.close(fd)
+        # 已存在的旧文件不会被 O_CREAT 的 mode 改写，必须显式再收紧一次
+        os.chmod(token_path, 0o600)
     except Exception as e:
         _emit_log(f"[panel] 写 token 文件失败(壳层取不到 token): {e}")
     atexit.register(shutdown)
@@ -5632,6 +5881,12 @@ def start_panel_server(open_browser_on_start=True):
             print(f"[panel] remote mode: MASKIT_PANEL_TOKEN not set, generated token = {API_TOKEN}")
             print(f"[panel] open http://<host>:{PANEL_PORT} (enter token in WebUI, or quick access: .../#token={API_TOKEN})")
     print("[proxy] stopped; click Start in the panel when needed")
+    # 关掉 werkzeug 的逐请求访问日志：面板每 2.5s 轮询 /api/status，桌面端常驻一天
+    # 就是几万行，而它被 shell 以 append 方式写进 engine-stdout.log，把真正的启动
+    # 失败/崩溃线索彻底埋掉（这也是那个文件能涨到几百 MB 的主因）。
+    # 需要时用 MASKIT_ACCESS_LOG=1 打开；被拒绝的请求另有 api_guard 的结构化日志。
+    if os.environ.get("MASKIT_ACCESS_LOG", "").strip() not in ("1", "true", "yes"):
+        logging.getLogger("werkzeug").setLevel(logging.WARNING)
     try:
         app.run(host=PANEL_HOST, port=PANEL_PORT, debug=False, use_reloader=False)
     finally:

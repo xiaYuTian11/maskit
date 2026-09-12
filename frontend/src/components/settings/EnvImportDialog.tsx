@@ -354,7 +354,7 @@ export function EnvImportDialog({
                 <ul className="max-h-28 space-y-0.5 overflow-auto border-t border-border/60 px-3 py-1.5">
                   {parsed.skipped.map((s, i) => (
                     <li key={`${s.line}:${i}`} className="text-[10px] text-muted-foreground">
-                      {tf('settings.words.envLine', { n: s.line })} · {s.reason}
+                      {tf('settings.words.envLine', { n: s.line })} · {s.reasonKey ? tf(s.reasonKey, s.reasonArgs) : s.reason}
                     </li>
                   ))}
                 </ul>

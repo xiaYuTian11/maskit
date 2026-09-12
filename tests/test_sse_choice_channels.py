@@ -3,6 +3,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "engine"))
@@ -236,3 +237,124 @@ class SseChoiceChannelTests(unittest.TestCase):
                  "content_index": 2, "delta": "x"},
                 "text"),
             "r3.2.text")
+
+
+class SseNonObjectPayloadTests(unittest.TestCase):
+    """SSE 的 `data:` 是**合法 JSON 但不是对象**时必须原样透传，不能抛异常。
+
+    以前 `_restore_sse_data` 直接按 dict 用（`.get()` / `.items()`），`data: null`、
+    `data: []`、`data: "x"` 会抛 AttributeError，被响应侧外层 `except Exception`
+    吞成一条 ERR 事件 —— 整条响应就此退化成「未还原透传」，用户看到占位符原样
+    留在回复里（审计 P1）。这类负载没有可还原的槽位，原样透传才是正确行为。
+    """
+
+    def setUp(self):
+        for name in ("sessions", "_RECENT_FWD", "_RECENT_REV"):
+            patcher = mock.patch.object(tr, name, {})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.sid = "non-object-payload"
+        tr._new_session(self.sid)
+
+    def test_non_object_payload_passes_through_unchanged(self):
+        for payload in ("null", "[]", '"x"', "123", "true", "0.5"):
+            out = tr._restore_sse_event("data: " + payload, self.sid)
+            self.assertIn(payload, out, f"payload 被改写或丢失：{payload!r} -> {out!r}")
+
+    def test_object_payload_still_restores_placeholders(self):
+        """守卫不能顺手把正常还原路径也短路掉。"""
+        token = "{{NAME_bcdfgh}}"
+        tr.sessions[self.sid]["rev"][token] = "Alice Example"
+        out = tr._restore_sse_event(
+            "data: " + json.dumps(choice(0, token)), self.sid)
+        self.assertIn("Alice Example", out)
+        self.assertNotIn(token, out)
+
+
+class SseDataSelfGuardTests(unittest.TestCase):
+    """防线纵深：`_restore_sse_data` 自身也对非 dict 负载免疫。
+
+    `_restore_sse_event` 外层已有 isinstance 守卫，但 `_restore_sse_data` 是
+    通用还原入口（未来新通道/新协议可能直接调它），漏掉守卫会重新踩
+    AttributeError -> 外抛 -> 整条响应退化为未还原透传的坑。
+    """
+
+    def setUp(self):
+        for name in ("sessions", "_RECENT_FWD", "_RECENT_REV"):
+            patcher = mock.patch.object(tr, name, {})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.sid = "sse-data-self-guard"
+        tr._new_session(self.sid)
+
+    def test_non_dict_payloads_do_not_raise_and_are_returned_unchanged(self):
+        for payload in (None, [], "x", 123, 0.5, True):
+            with self.subTest(payload=payload):
+                self.assertIs(tr._restore_sse_data(payload, self.sid), payload)
+
+    def test_dict_payload_still_restores_placeholders(self):
+        token = "{{NAME_bcdfgh}}"
+        tr.sessions[self.sid]["rev"][token] = "Bob Builder"
+        data = {"choices": [choice(0, token)]}
+        tr._restore_sse_data(data, self.sid)
+        self.assertEqual(data["choices"][0]["delta"]["content"], "Bob Builder")
+
+
+class SseBufCapTests(unittest.TestCase):
+    """P2-5：半事件缓冲必须封顶，不能随无分隔符上游无限增长吃内存。"""
+
+    def setUp(self):
+        for name in ("sessions", "_RECENT_FWD", "_RECENT_REV"):
+            patcher = mock.patch.object(tr, name, {})
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.sid = "buf-cap"
+        tr._new_session(self.sid)
+
+    def test_oversized_no_delimiter_stream_is_restored_and_buffer_reset(self):
+        # 上游持续推送只有单换行（无 \n\n 双空行分隔符）的数据：原本 state["buf"] 会无限累积。
+        # 现在超过 _SSE_BUF_MAX 就把整段按最终事件强制还原并清空。
+        token = "{{NAME_bcdfgh}}"
+        tr.sessions[self.sid]["rev"][token] = "Bob Builder"
+        flow = SimpleNamespace(metadata={})
+        huge = "data: " + json.dumps({"choices": [choice(0, token)]}) + "\n"
+        blob = (huge * 60).encode("utf-8")
+        with mock.patch.object(tr, "_SSE_BUF_MAX", len(huge) * 2), \
+             mock.patch.object(tr, "_scan_response"), \
+             mock.patch.object(tr, "_audit_response"), \
+             mock.patch.object(tr, "_emit_restore_summary"):
+            stream = tr._sse_stream_factory(flow, self.sid, "example.invalid", "POST", "/v1/chat/completions", {})
+            out = []
+            for offset in range(0, len(blob), 64):
+                out.append(stream(blob[offset:offset + 64]))
+            out.append(stream(b""))
+        joined = b"".join(b or b"" for b in out).decode("utf-8", "replace")
+        # 强制还原路径不能丢失占位符：所有 token 都必须被还原成原值
+        self.assertEqual(joined.count("Bob Builder"), 60, joined[:300])
+        self.assertNotIn("{{NAME_bcdfgh}}", joined)
+
+
+    def test_stream_internal_state_is_bounded_by_cap(self):
+        flow = SimpleNamespace(metadata={})
+        with mock.patch.object(tr, "_SSE_BUF_MAX", 1000), \
+             mock.patch.object(tr, "_scan_response"), \
+             mock.patch.object(tr, "_audit_response"), \
+             mock.patch.object(tr, "_emit_restore_summary"):
+            stream = tr._sse_stream_factory(flow, self.sid, "example.invalid", "POST", "/v1/chat/completions", {})
+            # 连续 200 个 1KB 无分隔数据块
+            for _ in range(200):
+                stream(b"x" * 1024)
+            stream(b"")  # 触发收尾
+        # 收尾后通过新流验证还原逻辑正常
+        tr._new_session(self.sid)
+        token = "{{NAME_bcdfgh}}"
+        tr.sessions[self.sid]["rev"][token] = "Carol"
+        flow2 = SimpleNamespace(metadata={})
+        with mock.patch.object(tr, "_SSE_BUF_MAX", 1000), \
+             mock.patch.object(tr, "_scan_response"), \
+             mock.patch.object(tr, "_audit_response"), \
+             mock.patch.object(tr, "_emit_restore_summary"):
+            stream = tr._sse_stream_factory(flow2, self.sid, "example.invalid", "POST", "/v1/chat/completions", {})
+            payload = {"choices": [choice(0, token)]}
+            out = stream(("data: " + json.dumps(payload) + "\n\n").encode())
+            self.assertIn("Carol", out.decode())

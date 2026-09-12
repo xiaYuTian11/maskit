@@ -45,7 +45,7 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 |------|------|------|---------|
 | 转发到你配置的 LLM 上游 | 开（这是产品功能） | 脱敏后的请求 | — |
 | 模型价格目录同步（`price_sync_url`，默认 `mask.ciyuanroute.com`，失败回退 openrouter.ai） | **关** | 仅 GET，不带任何用户数据 | 设置 → 高级 → 价格同步 |
-| 版本检查 / 更新下载（桌面版，GitHub Releases API） | 用户点击时 | 当前版本号 | 不点「检查更新」 |
+| 版本检查 / 更新下载（桌面版经 Tauri Updater，Web / Docker 版经 GitHub Releases API） | **自动**：启动后约 8 秒静默查一次，之后每 6 小时复查；点「检查更新」可立即触发 | 当前版本号 | 无法关闭；仅探测版本号与元数据，不发送任何使用数据，下载仅在点击「安装」后发生 |
 
 除上表外，引擎与前端**不发送任何统计、崩溃报告或日志**。反馈诊断包只在用户点击「保存」后生成到本地文件，由用户自行决定是否上传。
 
@@ -56,6 +56,29 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 如果 HTTPS 在可信反向代理处终止，请显式设置 `MASKIT_TRUST_PROXY=1`，并让代理覆盖单跳 `X-Forwarded-Proto` / `X-Forwarded-Host`；应用默认不信任这些头。浏览器登录推荐打开根路径后粘贴令牌，临时链接使用 `/#token=...`（fragment 不进访问日志）；`?token=...` 仅为旧版本兼容。
 
 `/api/*` 除令牌外还有一层 Origin 同源校验（CSRF 纵深防御）。若前置代理/CDN 回源时改写了 `Origin`，校验会拒绝这些请求；**静态资源（HTML / JS / CSS）不参与该校验**，因此即使校验拒绝也只会影响接口调用，不会导致页面白屏。遇到拒绝时优先排查代理是否正确透传 `X-Forwarded-Proto` / `X-Forwarded-Host` 并配合 `MASKIT_TRUST_PROXY=1`；仅在确实无法对齐时才关闭校验：环境变量 `MASKIT_DISABLE_ORIGIN_CHECK=1`（需在启动前设置，日志会打印警告）或设置页的 `origin_check` 开关（默认开启）。**关闭后 `/api/*` 的跨源防御只剩 `X-Shield-Token` 单层**，此时必须确保面板端口只暴露给可信网络。
+
+### 环境变量清单
+
+| 变量 | 默认 | 作用 | 安全提示 |
+|------|------|------|---------|
+| `MASKIT_PANEL_HOST` | `127.0.0.1` | 面板监听地址；设 `0.0.0.0` 进入远程模式 | 远程模式只应暴露给可信网络 |
+| `MASKIT_LISTEN_HOST` | `127.0.0.1` | 反代/透传/兜底端口的监听地址 | 同上；Docker 下通常一起设为 `0.0.0.0` |
+| `MASKIT_PANEL_TOKEN` | 随机生成 | 固定面板令牌（<16 位直接忽略并回退随机） | 等价于面板控制权，勿写入镜像或仓库 |
+| `MASKIT_PANEL_TOKEN_FILE` | 无 | 从文件读取令牌（容器 secret 场景） | 文件权限须仅属主可读 |
+| `MASKIT_TRUST_PROXY` | `0` | 信任单跳 `X-Forwarded-Proto` / `X-Forwarded-Host` | **仅**在前置代理会覆盖（而非追加）这些头时开启 |
+| `MASKIT_DISABLE_ORIGIN_CHECK` | `0` | 关闭 `/api/*` 的 Origin 同源校验 | 跨源防御降级为仅令牌单层，启动会打警告 |
+| `MASKIT_ACCESS_LOG` | `0` | 打开 werkzeug 逐请求访问日志 | 默认关闭：面板每 2.5s 轮询一次，开启后 `engine-stdout.log` 会快速增长 |
+| `MASKIT_START_READY_TIMEOUT` | `60` | 代理冷启动就绪等待上限（秒） | 只影响启动判定 |
+| `MASKIT_BIND_HOST` | `127.0.0.1` | `docker-compose.yml` 的主机侧绑定地址 | 公网部署必须显式确认 |
+| `LLM_SHIELD_DATA_DIR` | 平台约定 | 覆盖数据目录（配置、事件库、日志、`proxy_token`） | 指向共享目录会削弱文件权限隔离 |
+| `LLM_SHIELD_PANEL_PORT` | `5801` | 覆盖面板端口 | 壳层与前端据此探活，改了要一并放通防火墙 |
+| `LLM_SHIELD_UPSTREAM` | 空 | 覆盖检测到的本地上游代理 | — |
+
+> **前缀说明**：`LLM_SHIELD_*` 是更名前（LLM Shield → Data Maskit）的遗留前缀，
+> 仍在生效且会被继续支持（改数据目录/端口的口径已固化在文档与部署脚本里）。
+> **新增变量一律使用 `MASKIT_*`**，不要新增 `LLM_SHIELD_*`。
+> 面板端口的两个名字 `LLM_SHIELD_PANEL_PORT`（引擎侧）与 `SHIELD_ENGINE_PORT`
+> （壳层早期用法）现在都能被壳识别，优先前者。
 
 ### 信任边界（明确不防什么）
 

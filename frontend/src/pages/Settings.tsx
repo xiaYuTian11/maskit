@@ -33,7 +33,7 @@ import {
   Search,
   ChevronRight,
 } from 'lucide-react'
-import { getConfig, saveConfig, saveBuiltinRules, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup, type SaveConfigResponse } from '@/api/settings'
+import { getConfig, saveConfig, saveBuiltinRules, patchConfig, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup, type ConfigPatch, type SaveConfigResponse } from '@/api/settings'
 import { runAudit, cancelAudit, getAuditJob, getAuditReport } from '@/api/audit'
 import { getStatus } from '@/api/proxy'
 import { useMutation } from '@tanstack/react-query'
@@ -352,7 +352,7 @@ function UpstreamForm({
                     onClick={() => setHeader(k, v)}
                     className="flex items-center gap-1.5 rounded-lg border border-dashed border-border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground hover:border-primary/50 hover:text-foreground"
                   >
-                    <Plus className="h-3 w-3" /> {k}：{v}
+                    <Plus className="h-3 w-3" /> {k}: {v}
                   </button>
                 ))}
                 <div className="flex items-center gap-1.5">
@@ -761,6 +761,20 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     }
   }
 
+  /**
+   * 顺序下发多条配置增量；任一步失败立即返回该错误，不再继续后续步骤，
+   * 避免「一半生效一半没生效」的中间态。返回最后一步的响应（含最新配置）。
+   */
+  const patchSequence = async (steps: ConfigPatch[]): Promise<SaveConfigResponse> => {
+    let last: SaveConfigResponse | null = null
+    for (const step of steps) {
+      last = await patchConfig(step)
+      if (!last.ok) return last
+    }
+    if (!last) throw new Error(t('settings.toast.saveFailed'))
+    return last
+  }
+
   const onSaveUpstream = (u: UpstreamConfig) => {
     // 清理空 header（Key 为空或 Value 为空的条目不发后端）
     const extra = u.extra_headers ?? {}
@@ -768,19 +782,18 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     const clean: UpstreamConfig = { ...u, extra_headers: Object.keys(cleanExtra).length ? cleanExtra : undefined }
     // 编辑：按原 name 匹配（改名/改端口都更新而非新增）；新增：无匹配则添加
     const isEdit = editing != null
-    const currentUps = queryClient.getQueryData<ShieldConfig>(['config'])?.upstreams ?? upstreams
-    const next = isEdit
-      ? currentUps.map((x) => (x.name === editing!.name ? clean : x))
-      : [...currentUps, clean]
-    save({ upstreams: next }, isEdit ? t('settings.toast.clientUpdated') : t('settings.toast.clientAdded'))
+    // 只提交这一个客户端，由服务端在锁内按 name 就地更新/追加。
+    // 提交整份 upstreams 快照会覆盖掉另一个标签页刚加/刚删的客户端。
+    const matchName = isEdit ? editing!.name : undefined
+    save(() => patchConfig({ key: 'upstreams', op: 'list_upsert', value: clean, match: matchName }),
+      isEdit ? t('settings.toast.clientUpdated') : t('settings.toast.clientAdded'))
     setEditing(null)
     setAdding(false)
   }
 
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const removeUpstream = (name: string) => {
-    const currentUps = queryClient.getQueryData<ShieldConfig>(['config'])?.upstreams ?? upstreams
-    save({ upstreams: currentUps.filter((u) => u.name !== name) }, tf('settings.toast.deleted', { name }))
+    save(() => patchConfig({ key: 'upstreams', op: 'list_del', value: name }), tf('settings.toast.deleted', { name }))
     setConfirmDelete(null)
   }
 
@@ -823,39 +836,39 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     if (v.length < 3 && !v.startsWith('re:')) {
       toast(tf('settings.toast.wordTooShort', { word: v, n: v.length }), 'error')
     }
-    const next = { ...words, [cat]: [...existing, v] }
-    save({ sensitive: next }, t('settings.toast.added'))
+    save(() => patchConfig({ key: 'sensitive', op: 'list_add', path: [cat], value: [v] }), t('settings.toast.added'))
     setAddWordVal('')
     setAddWordCat(null)
   }
 
   const removeWord = (cat: string, word: string) => {
-    const next = { ...words, [cat]: (words[cat] ?? []).filter((x) => x !== word) }
-    save({ sensitive: next }, t('settings.toast.removed'))
+    save(() => patchConfig({ key: 'sensitive', op: 'list_remove', path: [cat], value: [word] }), t('settings.toast.removed'))
   }
 
   const addCategory = (name: string) => {
     if (!name.trim()) return
-    save({ sensitive: { ...words, [name.trim()]: [] } }, t('settings.toast.catAdded'))
+    save(() => patchConfig({ key: 'sensitive', op: 'set', path: [name.trim()], value: [] }), t('settings.toast.catAdded'))
     setNewCatName('')
   }
 
   const removeCategory = (cat: string) => {
-    const next = { ...words }
-    delete next[cat]
-    const curDisabled = { ...(cfg?.sensitive_word_disabled as Record<string, string[]> | undefined) ?? {} }
-    const nextDisabled = { ...curDisabled }
-    delete nextDisabled[cat]
-    const curCatDisabled = new Set((cfg?.sensitive_disabled as string[]) ?? [])
-    curCatDisabled.delete(cat)
-    save({ sensitive: next, sensitive_word_disabled: nextDisabled, sensitive_disabled: [...curCatDisabled] }, tf('settings.toast.catDeleted', { cat }))
+    // 三条增量分别对应「删分类 / 清该分类的禁用词 / 取消该分类的整类禁用」。
+    // 原先提交三份整表快照，任一表在别处被并发改动都会被静默覆盖。
+    save(() => patchSequence([
+      { key: 'sensitive', op: 'map_del', value: [cat] },
+      { key: 'sensitive_word_disabled', op: 'map_del', value: [cat] },
+      { key: 'sensitive_disabled', op: 'list_remove', value: [cat] },
+    ]), tf('settings.toast.catDeleted', { cat }))
   }
 
   const setRule = (rule: string, on: boolean) => {
     save(() => saveBuiltinRules({ [rule]: on }), tf(on ? 'settings.toast.ruleOn' : 'settings.toast.ruleOff', { rule }))
   }
 
-  const setSecret = (v: string[], msg?: string) => save({ secret_prefixes: v }, msg || t('settings.toast.prefixUpdated'))
+  // 前缀增删一律下发增量：整表快照会把并发新增的前缀覆盖掉
+  const addSecret = (p: string, msg?: string) => save(() => patchConfig({ key: 'secret_prefixes', op: 'list_add', value: [p] }), msg || t('settings.toast.prefixUpdated'))
+  const removeSecret = (p: string, msg?: string) => save(() => patchConfig({ key: 'secret_prefixes', op: 'list_remove', value: [p] }), msg || t('settings.toast.prefixUpdated'))
+  const clearSecret = (msg?: string) => save(() => patchConfig({ key: 'secret_prefixes', op: 'set', value: [] }), msg || t('settings.toast.prefixUpdated'))
 
   const handleAddPrefix = () => {
     const p = newPrefix.trim()
@@ -868,14 +881,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
       toast(t('settings.words.prefixInvalid'), 'error')
       return
     }
-    setSecret([...secretPrefixes, p], `${t('settings.toast.prefixUpdated')} (+${p})`)
+    addSecret(p, `${t('settings.toast.prefixUpdated')} (+${p})`)
     setNewPrefix('')
   }
 
   const toggleAuditSignal = (sig: string, on: boolean) => {
-    const audit = (cfg?.audit as Record<string, unknown>) ?? {}
-    const signals = (audit.signals as Record<string, boolean>) ?? {}
-    save({ audit: { ...audit, signals: { ...signals, [sig]: on } } }, t('settings.toast.signalUpdated'))
+    // 只改这一个信号开关；提交整个 audit 对象会连带覆盖并发的其他审计设置
+    save(() => patchConfig({ key: 'audit', op: 'set', path: ['signals', sig], value: on }), t('settings.toast.signalUpdated'))
   }
 
   const doOpenDataDir = async () => {
@@ -898,11 +910,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   const catDisabledList = (cfg?.sensitive_disabled as string[]) ?? []
   const toggleCatDisabled = (cat: string) => {
     if (!cfg) return
-    const cur = new Set((cfg.sensitive_disabled as string[]) ?? [])
-    const wasDisabled = cur.has(cat)
-    if (wasDisabled) cur.delete(cat)
-    else cur.add(cat)
-    save({ sensitive_disabled: [...cur] } as Partial<ShieldConfig>, tf(wasDisabled ? 'settings.toast.catEnabled' : 'settings.toast.catDisabled', { cat }))
+    const wasDisabled = catDisabledList.includes(cat)
+    save(() => patchConfig({
+      key: 'sensitive_disabled',
+      op: wasDisabled ? 'list_remove' : 'list_add',
+      value: [cat],
+    }), tf(wasDisabled ? 'settings.toast.catEnabled' : 'settings.toast.catDisabled', { cat }))
   }
 
   // 词级禁用（sensitive_word_disabled: {label: [words]}）
@@ -910,14 +923,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   const toggleWordDisabled = (cat: string, word: string) => {
     if (!cfg) return
-    const cur = { ...(cfg.sensitive_word_disabled as Record<string, string[]> | undefined) ?? {} }
-    const arr = new Set(cur[cat] ?? [])
-    if (arr.has(word)) arr.delete(word)
-    else arr.add(word)
-    const next = { ...cur }
-    if (arr.size > 0) next[cat] = [...arr]
-    else delete next[cat]
-    save({ sensitive_word_disabled: next } as Partial<ShieldConfig>, arr.has(word) ? t('settings.toast.wordDisabled') : t('settings.toast.wordEnabled'))
+    const wasDisabled = (wordDisabled[cat] ?? []).includes(word)
+    save(() => patchConfig({
+      key: 'sensitive_word_disabled',
+      op: wasDisabled ? 'list_remove' : 'list_add',
+      path: [cat],
+      value: [word],
+    }), wasDisabled ? t('settings.toast.wordEnabled') : t('settings.toast.wordDisabled'))
   }
 
   // 整词匹配开关（sensitive_word_whole: [words]）：开启后该词两侧加边界，
@@ -925,10 +937,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   const wordWhole = (cfg?.sensitive_word_whole as string[]) ?? []
   const toggleWordWhole = (word: string) => {
     if (!cfg) return
-    const cur = new Set(wordWhole)
-    if (cur.has(word)) cur.delete(word)
-    else cur.add(word)
-    save({ sensitive_word_whole: [...cur] } as Partial<ShieldConfig>, cur.has(word) ? t('settings.toast.wholeOn') : t('settings.toast.wholeOff'))
+    const wasWhole = wordWhole.includes(word)
+    save(() => patchConfig({
+      key: 'sensitive_word_whole',
+      op: wasWhole ? 'list_remove' : 'list_add',
+      value: [word],
+    }), wasWhole ? t('settings.toast.wholeOff') : t('settings.toast.wholeOn'))
   }
 
   return (
@@ -1126,16 +1140,18 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </p>
             <div className="flex gap-1.5">
               <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
-                // 并集：保留已有禁用 + 新增 ≤2 字短词，不覆盖用户手动禁用的长词
-                const cur = { ...(cfg?.sensitive_word_disabled as Record<string, string[]> | undefined) ?? {} }
+                // 并集：保留已有禁用 + 新增 ≤2 字短词，不覆盖用户手动禁用的长词。
+                // 按分类下发 list_add 增量（服务端也是并集），避免整表覆盖。
+                const steps: ConfigPatch[] = []
+                let total = 0
                 Object.entries(words).forEach(([cat, list]) => {
                   const shorts = list.filter((w) => w.length <= 2)
-                  const existing = new Set(cur[cat] ?? [])
-                  shorts.forEach((w) => existing.add(w))
-                  if (existing.size > 0) cur[cat] = [...existing]
-                  else delete cur[cat]
+                  if (!shorts.length) return
+                  total += shorts.length
+                  steps.push({ key: 'sensitive_word_disabled', op: 'list_add', path: [cat], value: shorts })
                 })
-                save({ sensitive_word_disabled: cur } as Partial<ShieldConfig>, tf('settings.toast.disableShorts', { n: Object.values(cur).flat().length }))
+                if (!steps.length) return
+                save(() => patchSequence(steps), tf('settings.toast.disableShorts', { n: total }))
               }} title={t('settings.words.disableShortsTitle')}>
                 {t('settings.words.disableShorts')}
               </Button>
@@ -1382,7 +1398,17 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             onOpenChange={setEnvImportOpen}
             words={words}
             builtinLabels={Object.keys(builtinRules)}
-            onImport={(next, msg) => save({ sensitive: next }, msg)}
+            onImport={(next, msg) => save(() => {
+              // 只下发「本地快照里没有的新词」，按分类走 list_add 增量，
+              // 不整份覆盖 sensitive（会丢掉别处并发新增的词条与分类）。
+              const steps: ConfigPatch[] = []
+              for (const [cat, list] of Object.entries(next)) {
+                const before = new Set(words[cat] ?? [])
+                const added = (list ?? []).filter((w) => !before.has(w))
+                if (added.length) steps.push({ key: 'sensitive', op: 'list_add', path: [cat], value: added })
+              }
+              return patchSequence(steps)
+            }, msg)}
           />
 
           <Card className="border bg-card">
@@ -1458,7 +1484,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {secretPrefixes.map((p) => (
                   <span key={p} className="group inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
-                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => setSecret(secretPrefixes.filter((x) => x !== p), `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => removeSecret(p, `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
                 <div className="flex items-center gap-1.5">
@@ -1482,7 +1508,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   </Button>
                 </div>
                 {secretPrefixes.length > 0 && (
-                  <Button size="sm" variant="ghost" className="h-6 text-[11px] text-muted-foreground" onClick={() => setSecret([])}>
+                  <Button size="sm" variant="ghost" className="h-6 text-[11px] text-muted-foreground" onClick={() => clearSecret()}>
                     {t('settings.words.clear')}
                   </Button>
                 )}
@@ -1534,7 +1560,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && newDomain.trim()) {
                       const domains = (cfg?.target_domains as string[] | undefined) ?? []
-                      if (!domains.includes(newDomain.trim())) save({ target_domains: [...domains, newDomain.trim()] }, t('settings.toast.domainAdded'))
+                      if (!domains.includes(newDomain.trim())) save(() => patchConfig({ key: 'target_domains', op: 'list_add', value: [newDomain.trim()] }), t('settings.toast.domainAdded'))
                       setNewDomain('')
                     }
                   }}
@@ -1542,7 +1568,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <Button size="sm" variant="ghost" className="h-8 text-[11px]" onClick={() => {
                   if (newDomain.trim()) {
                     const domains = (cfg?.target_domains as string[] | undefined) ?? []
-                    if (!domains.includes(newDomain.trim())) save({ target_domains: [...domains, newDomain.trim()] }, t('settings.toast.domainAdded'))
+                    if (!domains.includes(newDomain.trim())) save(() => patchConfig({ key: 'target_domains', op: 'list_add', value: [newDomain.trim()] }), t('settings.toast.domainAdded'))
                     setNewDomain('')
                   }
                 }}>{t('settings.advanced.domainAdd')}</Button>
@@ -1554,8 +1580,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <span key={d} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {d}
                     <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
-                      const domains = (cfg?.target_domains as string[] | undefined) ?? []
-                      save({ target_domains: domains.filter((x) => x !== d) }, tf('settings.toast.deleted', { name: d }))
+                      save(() => patchConfig({ key: 'target_domains', op: 'list_remove', value: [d] }), tf('settings.toast.deleted', { name: d }))
                     }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
@@ -1582,7 +1607,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && newPath.trim()) {
                       const paths = (cfg?.api_paths as string[] | undefined) ?? []
-                      if (!paths.includes(newPath.trim())) save({ api_paths: [...paths, newPath.trim()] }, t('settings.toast.pathAdded'))
+                      if (!paths.includes(newPath.trim())) save(() => patchConfig({ key: 'api_paths', op: 'list_add', value: [newPath.trim()] }), t('settings.toast.pathAdded'))
                       setNewPath('')
                     }
                   }}
@@ -1590,7 +1615,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <Button size="sm" variant="ghost" className="h-8 text-[11px]" onClick={() => {
                   if (newPath.trim()) {
                     const paths = (cfg?.api_paths as string[] | undefined) ?? []
-                    if (!paths.includes(newPath.trim())) save({ api_paths: [...paths, newPath.trim()] }, t('settings.toast.pathAdded'))
+                    if (!paths.includes(newPath.trim())) save(() => patchConfig({ key: 'api_paths', op: 'list_add', value: [newPath.trim()] }), t('settings.toast.pathAdded'))
                     setNewPath('')
                   }
                 }}>{t('settings.advanced.pathAdd')}</Button>
@@ -1602,8 +1627,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <span key={p} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
                     <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
-                      const paths = (cfg?.api_paths as string[] | undefined) ?? []
-                      save({ api_paths: paths.filter((x) => x !== p) }, tf('settings.toast.deleted', { name: p }))
+                      save(() => patchConfig({ key: 'api_paths', op: 'list_remove', value: [p] }), tf('settings.toast.deleted', { name: p }))
                     }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
@@ -1724,14 +1748,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     onChange={(e) => setNewExcludeHost(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && newExcludeHost.trim() && !streamExclude.includes(newExcludeHost.trim())) {
-                        save({ stream_exclude_hosts: [...streamExclude, newExcludeHost.trim()] }, t('settings.toast.added'))
+                        save(() => patchConfig({ key: 'stream_exclude_hosts', op: 'list_add', value: [newExcludeHost.trim()] }), t('settings.toast.added'))
                         setNewExcludeHost('')
                       }
                     }}
                   />
                   <Button size="sm" variant="ghost" className="h-6 text-[11px]" onClick={() => {
                     if (newExcludeHost.trim() && !streamExclude.includes(newExcludeHost.trim())) {
-                      save({ stream_exclude_hosts: [...streamExclude, newExcludeHost.trim()] }, t('settings.toast.added'))
+                      save(() => patchConfig({ key: 'stream_exclude_hosts', op: 'list_add', value: [newExcludeHost.trim()] }), t('settings.toast.added'))
                       setNewExcludeHost('')
                     }
                   }}>{t('settings.advanced.hostAdd')}</Button>
@@ -1969,7 +1993,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </CardHeader>
             <CardContent className="space-y-3">
               <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
-                <Switch checked={!!cfg?.egress_proxy?.enabled} onCheckedChange={(v) => save({ egress_proxy: { ...(cfg?.egress_proxy ?? { enabled: false, url: '' }), enabled: v } })} />
+                <Switch checked={!!cfg?.egress_proxy?.enabled} onCheckedChange={(v) => save(() => patchConfig({ key: 'egress_proxy', op: 'set', path: ['enabled'], value: v }))} />
                 {t('settings.advanced.egressHint')}
               </label>
               {/* 非受控 + key：避免每次击键触发保存，且在外部配置刷新后同步初值。
@@ -1982,7 +2006,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 onBlur={(e) => {
                   const v = e.target.value
                   const cur = cfg?.egress_proxy ?? { enabled: false, url: '' }
-                  if (v !== cur.url) save({ egress_proxy: { ...cur, url: v } }, t('settings.toast.egressUpdated'))
+                  if (v !== cur.url) save(() => patchConfig({ key: 'egress_proxy', op: 'set', path: ['url'], value: v }), t('settings.toast.egressUpdated'))
                 }}
               />
               <p className="text-[11px] text-muted-foreground">
@@ -2041,13 +2065,32 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 min={0}
                 step={1}
                 className="h-8 w-24 text-xs"
+                // key 让输入框在 cfg 到达 / 被回滚后**重新挂载**：defaultValue 只在挂载
+                // 时生效，而首帧 cfg 还是 undefined（useQuery 异步），没有 key 时输入框
+                // 会一直显示兜底的 7；用户随手聚焦再失焦，就把 7 写回去、把真实设置
+                // （比如 30）静默改掉。带 key 后显示值与配置始终一致。
+                key={`retention-${cfg?.log_retention_days ?? 7}`}
                 defaultValue={cfg?.log_retention_days ?? 7}
                 onBlur={(e) => {
-                  const parsed = Number(e.target.value)
-                  // Zero means unlimited retention; only empty/invalid input uses the default.
-                  const v = e.target.value.trim() === '' || !Number.isFinite(parsed) ? 7 : Math.max(0, Math.floor(parsed))
+                  const raw = e.target.value.trim()
+                  const parsed = Number(raw)
+                  const current = cfg?.log_retention_days ?? 7
+                  // 空/非法：回落默认 7（与后端 _normalize_retention 的取舍一致）
+                  if (raw === '' || !Number.isFinite(parsed)) {
+                    e.target.value = String(current)
+                    toast(t('settings.toast.retentionInvalid'), 'error')
+                    return
+                  }
+                  // 负数直接拒绝并还原：以前 Math.max(0, …) 会把它折成 0，
+                  // 而 0 是「永久保留」—— 正好是用户输入负数时想要的反面。
+                  if (parsed < 0) {
+                    e.target.value = String(current)
+                    toast(t('settings.toast.retentionInvalid'), 'error')
+                    return
+                  }
+                  const v = Math.floor(parsed)
                   e.target.value = String(v)
-                  if (v !== (cfg?.log_retention_days ?? 7)) save({ log_retention_days: v }, t('settings.toast.retentionUpdated'))
+                  if (v !== current) save({ log_retention_days: v }, t('settings.toast.retentionUpdated'))
                 }}
               />
               <span className="text-[11px] text-muted-foreground">{t('settings.advanced.retentionHint')}</span>
@@ -2225,7 +2268,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 ).map(([k, label]) => (
                   <label key={k} className="flex cursor-pointer items-center justify-between rounded-lg border bg-muted/30 px-3 py-2.5">
                     <span className="text-[13px]">{label}</span>
-                    <Switch checked={!!(auditCfg[k] as boolean)} onCheckedChange={(v) => save({ audit: { ...auditCfg, [k]: v } })} className="scale-75" />
+                    <Switch checked={!!(auditCfg[k] as boolean)} onCheckedChange={(v) => save(() => patchConfig({ key: 'audit', op: 'set', path: [k], value: v }))} className="scale-75" />
                   </label>
                 ))}
               </div>

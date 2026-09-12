@@ -31,6 +31,37 @@ export function saveBuiltinRules(changes: Record<string, boolean>): Promise<Save
   })
 }
 
+/**
+ * 配置增量操作。POST /api/config 只在顶层合并，凡是「值本身是容器」的字段
+ * （audit / egress_proxy / sensitive / upstreams / target_domains …）提交整份
+ * 快照都会覆盖掉并发写入；这里改为下发「路径 + 操作」，由服务端持锁局部修改。
+ */
+export type ConfigPatchOp =
+  | 'set'          // 覆盖指定路径的值（path 省略 = 覆盖整个键）
+  | 'merge'        // 目标是对象：批量更新其中的键
+  | 'map_del'      // 目标是对象：删除 value 列出的键
+  | 'list_add'     // 目标是数组：追加 value 中尚不存在的标量项
+  | 'list_remove'  // 目标是数组：移除 value 中存在的标量项
+  | 'list_upsert'  // 目标是对象数组：按 name 就地更新或追加（match 指定旧名）
+  | 'list_del'     // 目标是对象数组：按 name 移除
+
+export interface ConfigPatch {
+  key: keyof ShieldConfig | string
+  op: ConfigPatchOp
+  /** 在 key 对应值内下钻的路径；省略或空数组表示操作该值本身 */
+  path?: string[]
+  value: unknown
+  /** list_upsert 专用：要更新的条目原名（用于改名） */
+  match?: string
+}
+
+export function patchConfig(patch: ConfigPatch): Promise<SaveConfigResponse> {
+  return shieldFetch<SaveConfigResponse>('/api/config/patch', {
+    method: 'POST',
+    body: JSON.stringify(patch),
+  })
+}
+
 export function emergencyDisableOriginCheck(customToken?: string): Promise<{ ok: boolean; message: string; config?: ShieldConfig }> {
   return shieldFetch<{ ok: boolean; message: string; config?: ShieldConfig }>('/api/config/disable_origin_check', {
     method: 'POST',
@@ -96,7 +127,7 @@ export function getPriceSyncStatus(): Promise<PriceSyncState> {
 }
 
 export function syncPricesNow(): Promise<{ ok: boolean; error?: string; state?: PriceSyncState }> {
-  return shieldFetch('/api/prices/sync', { method: 'POST' })
+  return shieldFetch('/api/prices/sync', { method: 'POST', timeoutMs: 60000 })
 }
 
 export interface PriceEntry {
@@ -126,7 +157,7 @@ export function testUpstream(payload: {
   path_prefix?: string
   content?: string
 }): Promise<{ ok: boolean; message?: string; error?: string; [k: string]: unknown }> {
-  return shieldFetch('/api/upstream/test', { method: 'POST', body: JSON.stringify(payload) })
+  return shieldFetch('/api/upstream/test', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 60000 })
 }
 
 export function demoMask(text?: string): Promise<{
@@ -148,7 +179,7 @@ export function setAutostart(enabled: boolean): Promise<{ ok: boolean; enabled: 
 }
 
 export function installCert(scope: string): Promise<{ ok: boolean; error?: string; output?: string }> {
-  return shieldFetch('/api/cert', { method: 'POST', body: JSON.stringify({ scope }) })
+  return shieldFetch('/api/cert', { method: 'POST', body: JSON.stringify({ scope }), timeoutMs: 30000 })
 }
 
 export function openDataDir(): Promise<{ ok: boolean }> {
@@ -157,7 +188,7 @@ export function openDataDir(): Promise<{ ok: boolean }> {
 
 /** 一键恢复网络/系统代理（/api/restore） */
 export function restoreNetwork(): Promise<{ ok: boolean; [k: string]: unknown }> {
-  return shieldFetch('/api/restore', { method: 'POST' })
+  return shieldFetch('/api/restore', { method: 'POST', timeoutMs: 30000 })
 }
 
 /** 健康检查（/api/health） */

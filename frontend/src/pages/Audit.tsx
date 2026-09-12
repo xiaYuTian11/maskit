@@ -12,7 +12,7 @@ import {
   getAuditEvents,
   clearAudit,
 } from '@/api/audit'
-import { getConfig, saveConfig } from '@/api/settings'
+import { getConfig, patchConfig, type ConfigPatch } from '@/api/settings'
 import type { AuditEvent, AuditSeverity } from '@/types/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -44,10 +44,12 @@ export default function AuditPage() {
   const auditSignals = (auditCfg.signals as Record<string, boolean>) ?? {}
   const [detailEvent, setDetailEvent] = useState<AuditEvent | null>(null)
 
-  const saveAudit = async (next: Record<string, unknown>) => {
+  // 只下发被改动的那一个审计开关；提交整个 audit 对象会覆盖别处（如 Settings 页）
+  // 并发的修改，也会把 audit.signals 整表用陈旧快照替换掉。
+  const saveAudit = async (patch: Omit<ConfigPatch, 'key'>) => {
     if (!cfg) return
     try {
-      const r = await saveConfig({ audit: { ...auditCfg, ...next } })
+      const r = await patchConfig({ key: 'audit', ...patch })
       if (!r.ok) toast(r.error || t('common.saveFail'), 'error')
       queryClient.invalidateQueries({ queryKey: ['config'] })
     } catch (e) { toast(tf('common.saveFailWith', { e: String(e) }), 'error') }
@@ -137,7 +139,7 @@ export default function AuditPage() {
               <label key={k} className="flex cursor-pointer select-none flex-col justify-between rounded-lg border bg-muted/30 p-3 transition-colors hover:border-primary/40">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[13px] font-medium">{title}</span>
-                  <Switch checked={!!(auditCfg[k] as boolean)} onCheckedChange={(v) => saveAudit({ [k]: v })} className="scale-90" />
+                  <Switch checked={!!(auditCfg[k] as boolean)} onCheckedChange={(v) => saveAudit({ op: 'set', path: [k], value: v })} className="scale-90" />
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">{desc}</p>
               </label>
@@ -149,14 +151,14 @@ export default function AuditPage() {
             <label className="flex cursor-pointer select-none flex-col justify-between rounded-lg border bg-muted/30 p-3 transition-colors hover:border-primary/40">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-medium">{t('audit.autoReport')}</span>
-                <Switch checked={!!(auditCfg.auto_report as boolean)} onCheckedChange={(v) => saveAudit({ auto_report: v })} className="scale-90" />
+                <Switch checked={!!(auditCfg.auto_report as boolean)} onCheckedChange={(v) => saveAudit({ op: 'set', path: ['auto_report'], value: v })} className="scale-90" />
               </div>
               <p className="mt-1 text-[11px] text-muted-foreground">{t('audit.reportHint')}</p>
             </label>
             <div className="rounded-lg border bg-muted/30 p-3">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-medium">{t('audit.severityFloor')}</span>
-                <Select value={String(auditCfg.severity_floor ?? 'MEDIUM')} onValueChange={(v) => saveAudit({ severity_floor: v })}>
+                <Select value={String(auditCfg.severity_floor ?? 'MEDIUM')} onValueChange={(v) => saveAudit({ op: 'set', path: ['severity_floor'], value: v })}>
                   <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="LOW">{t('audit.severityLow')}</SelectItem>
@@ -198,7 +200,7 @@ export default function AuditPage() {
                       <span className="truncate">{t(info.labelKey ?? info.label ?? '')}</span>
                       <Info className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />
                     </button>
-                    <Switch checked={!!auditSignals[sig]} onCheckedChange={(v) => saveAudit({ signals: { ...auditSignals, [sig]: v } })} className="scale-75" />
+                    <Switch checked={!!auditSignals[sig]} onCheckedChange={(v) => saveAudit({ op: 'set', path: ['signals', sig], value: v })} className="scale-75" />
                   </label>
                 )
               })}

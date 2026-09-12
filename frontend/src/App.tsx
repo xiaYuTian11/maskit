@@ -1,18 +1,20 @@
 import { ttf } from '@/lib/i18n'
-import { useEffect } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
-import DashboardPage from '@/pages/Dashboard'
-import LogsPage from '@/pages/Logs'
-import StatsPage from '@/pages/Stats'
-import SettingsPage from '@/pages/Settings'
-import AuditPage from '@/pages/Audit'
-import WordsPage from '@/pages/Words'
-import ClientsPage from '@/pages/Clients'
 import { useAuthStore } from '@/stores/authStore'
 import { getShieldToken, getEngineState } from '@/lib/tauri'
 import { isTauri, initEnginePort, readBrowserToken, saveBrowserToken } from '@/lib/shield-fetch'
 import { TokenGate } from '@/components/common/TokenGate'
+
+// 路由懒加载：将 779KB 单 chunk 拆为按页面按需加载
+const DashboardPage = lazy(() => import('@/pages/Dashboard'))
+const LogsPage = lazy(() => import('@/pages/Logs'))
+const StatsPage = lazy(() => import('@/pages/Stats'))
+const SettingsPage = lazy(() => import('@/pages/Settings'))
+const AuditPage = lazy(() => import('@/pages/Audit'))
+const WordsPage = lazy(() => import('@/pages/Words'))
+const ClientsPage = lazy(() => import('@/pages/Clients'))
 
 function App() {
   const { token, setToken, setEngineReady, setEngineError } = useAuthStore()
@@ -89,16 +91,18 @@ function App() {
 
   return (
     <AppLayout>
-      <Routes>
-        <Route path="/" element={<DashboardPage />} />
-        <Route path="/logs" element={<LogsPage />} />
-        <Route path="/stats" element={<StatsPage />} />
-        <Route path="/words" element={<WordsPage />} />
-        <Route path="/clients" element={<ClientsPage />} />
-        <Route path="/audit" element={<AuditPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <Suspense fallback={null}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/stats" element={<StatsPage />} />
+          <Route path="/words" element={<WordsPage />} />
+          <Route path="/clients" element={<ClientsPage />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
     </AppLayout>
   )
 }

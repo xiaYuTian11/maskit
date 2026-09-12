@@ -59,6 +59,9 @@ import { useVisibility } from '@/lib/useVisibility'
 // 稳定空数组引用：避免 data 为 undefined 时每 render 创建新空数组导致 useMemo 失效
 const EMPTY_LIST: readonly never[] = []
 
+/** 事件累积列表的内存封顶（与服务端导出上限 2000 对齐）；轮询游标另存，不受截断影响 */
+const MAX_LOG_LIST = 2000
+
 interface AuditRow {
   id: number
   ts: number
@@ -97,6 +100,8 @@ interface AuditRow {
 interface LogsCache {
   list: ShieldEvent[]
   tail: string[]
+  /** 已消费到的最大 seq：列表被 MAX_LOG_LIST 截断后，下一轮轮询仍从这里续，不会重复拉取 */
+  cursor: number
 }
 
 type LogRow = (AuditRow & { _audit: true }) | MergedEvent
@@ -145,12 +150,14 @@ export default function LogsPage() {
       // 从缓存读上次的累积列表 + 游标（首次为空）
       const prev = queryClient.getQueryData<LogsCache>(queryKey)
       const prevList = prev?.list ?? []
-      let since = prevList.length > 0 ? prevList[prevList.length - 1].seq : 0
+      // 续拉锚点优先取持久化游标：列表可能被 MAX_LOG_LIST 截断，末元素的 seq 已不再等于最大 seq
+      let since = prev?.cursor ?? (prevList.length > 0 ? prevList[prevList.length - 1].seq : 0)
       let list = prevList
       let tail = prev?.tail ?? []
       const seen = new Set(prevList.map((e) => e.seq))
       // Catch up after backgrounding without skipping records. Bound each poll so
       // sustained traffic cannot keep it running forever; the next poll continues.
+      let cursor = since
       for (let batch = 0; batch < 5; batch++) {
         const resp = await getLogs({
           since,
@@ -169,11 +176,17 @@ export default function LogsPage() {
         })
         if (added.length) list = [...list, ...added]
         const next = resp.next_since ?? resp.events.at(-1)?.seq ?? since
+        // 无论本轮是否还有更多（has_more=false 时同样已消费到 next），都把游标推进到
+        // 实际看到的最后一个 seq，保证下轮 from cursor 续接。
+        if (next > cursor) cursor = next
         if (!resp.has_more || next <= since) break
         since = next
       }
       if (tail.length) setTailData(tail)
-      return { list, tail }
+      // 内存封顶：长时悬挂的 Logs 页无限累积会持续涨内存，且与服务端导出上限（2000）对齐。
+      // 只截断展示窗口，不丢轮询游标（cursor 单独存），也不会因此重复拉取历史。
+      if (list.length > MAX_LOG_LIST) list = list.slice(list.length - MAX_LOG_LIST)
+      return { list, tail, cursor }
     },
     // 本页单独配置：不走全局 30s 缓存，挂载即发
     staleTime: 0,
@@ -249,7 +262,7 @@ export default function LogsPage() {
 
   const refresh = useCallback(() => {
     // 清缓存让下次拉全量（since=0）
-    queryClient.setQueryData<LogsCache>(logsKey, { list: [], tail: [] })
+    queryClient.setQueryData<LogsCache>(logsKey, { list: [], tail: [], cursor: 0 })
     queryClient.invalidateQueries({ queryKey: ['logs'] })
   }, [queryClient, logsKey])
 

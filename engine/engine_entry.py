@@ -1,10 +1,10 @@
 """Data Maskit 引擎 sidecar 入口（Tauri 版）。
 
-PyInstaller 入口不能带参数，本文件包装 panel 启动逻辑，复刻 app.py main() 的
+PyInstaller 入口不能带参数，本文件包装 panel 启动逻辑，复刻 `run_panel()` 的
 步骤 0（ACL 收紧）+ 1（Flask 主线程）+ 1.5（代理自启/fallback 兜底），仅去掉
-pywebview 窗口/托盘（由 Tauri 壳承担）。
+窗口/托盘（由 Tauri 壳承担）。
 
-⚠️ 不能只调 start_panel_server()：代理自启与 fallback 兜底逻辑在 app.py main()
+⚠️ 不能只调 start_panel_server()：代理自启与 fallback 兜底逻辑在 `run_panel()`
 步骤 1.5（v1.5.65 实测确认），不在 start_panel_server 内——漏掉会导致「面板
 起了但上游端口无人监听，客户端连接被拒」。
 
@@ -77,7 +77,7 @@ def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--mitmdump":
         sys.exit(_run_as_mitmdump())
 
-    # 0. 数据目录 ACL 收紧（对齐 app.py main 步骤 0；幂等，失败不阻断）
+    # 0. 数据目录 ACL 收紧（对齐 run_panel 步骤 0；幂等，失败不阻断）
     try:
         panel._harden_data_dir_acl()
     except Exception:  # noqa: BLE001

@@ -7,26 +7,17 @@
  */
 
 /**
- * 凭据标签集合。**必须与引擎 `transparent.CREDENTIAL_LABELS` 保持一致。**
+ * 凭据标签集合：唯一定义源在 `credential-labels.ts`（引擎侧对应
+ * `engine/credential_labels.py`）。见该文件头注释了解为什么这是硬约束。
+ * 这里 import 后原样 re-export，只为兼容既有调用点，不要再复制一份字面量。
  *
- * 为什么这是硬约束而不是「建议」：词库的分类名会原样成为占位符的 label，
- * 引擎按 `label in CREDENTIAL_LABELS` 决定事件库写不写原文 —— 非凭据类写
- * `items[].original` 明文，凭据类只写 digest + preview。把密钥导进一个不在
- * 这个集合里的分类（例如 `PASSWORD` / `APP_SECRET`），等于把密钥明文写进本地
- * SQLite，与「凭据永不落库」的红线直接冲突。所以下面的 SECRET_HINTS 只允许
- * 映射到这里的标签，UI 也据此限制凭据行的可选分类。
+ * 必须带 `.ts` 后缀：`scripts/check-env-import.mjs` 用
+ * `node --experimental-strip-types` 直接跑本文件的源码，Node 的 ESM 解析器
+ * **不做扩展名补全**，写成 `'./credential-labels'` 会 ERR_MODULE_NOT_FOUND。
+ * tsconfig 已开 allowImportingTsExtensions，Vite 与 tsc 都接受带后缀的写法。
  */
-export const CREDENTIAL_LABELS = [
-  'API_KEY',
-  'TOKEN',
-  'SECRET',
-  'ACCESS_KEY',
-  'JWT',
-  'CONNSTR',
-  'PRIVATE_KEY',
-] as const
-
-export type CredentialLabel = (typeof CREDENTIAL_LABELS)[number]
+import { CREDENTIAL_LABELS, type CredentialLabel } from './credential-labels.ts'
+export { CREDENTIAL_LABELS, type CredentialLabel }
 
 /** 与 `panel.py` 的 `MAX_WORD_LEN` 一致：后端对超长词是**静默丢弃**（只回一条 warning），
  *  所以前端必须先拦下并明确告诉用户，否则用户会以为已经导入成功。 */
@@ -92,10 +83,20 @@ export interface EnvEntry {
   label: string
 }
 
+export interface EnvSkipped {
+  line: number
+  /** 默认原因文本（中文兜底，便于日志与无 i18n 环境） */
+  reason: string
+  /** i18n 键名，UI 渲染优先使用 */
+  reasonKey?: string
+  /** i18n 插值参数 */
+  reasonArgs?: Record<string, string | number>
+}
+
 export interface EnvParseResult {
   entries: EnvEntry[]
   /** 没有进入待导入列表的行：解析失败 / 空值 / 过短 / 过长 / 重复定义。行号 + 原因。 */
-  skipped: { line: number; reason: string }[]
+  skipped: EnvSkipped[]
 }
 
 /** 值预览：凭据只露首尾各 2 位，其余打码；非凭据保留可辨识的少量上下文。 */
@@ -124,7 +125,7 @@ export function classifyEnvKey(key: string, value = ''): { secret: boolean; labe
 }
 
 /** 解析 `=` 之后的原始文本。引号未闭合等形态问题在这里拦下。 */
-function parseValue(raw: string): { value: string } | { error: string } {
+function parseValue(raw: string): { value: string } | { error: string; errorKey?: string; errorArgs?: Record<string, string | number> } {
   let i = 0
   while (i < raw.length && (raw[i] === ' ' || raw[i] === '\t')) i++
   if (i >= raw.length) return { value: '' }
@@ -138,7 +139,7 @@ function parseValue(raw: string): { value: string } | { error: string } {
       // 单引号内一切字面（与 dotenv 一致）；双引号内处理常见转义
       if (c === '\\' && quote === '"') {
         const n = raw[i + 1]
-        if (n === undefined) return { error: '转义符 \\ 后缺少字符' }
+        if (n === undefined) return { error: '转义符 \\ 后缺少字符', errorKey: 'settings.words.envSkipMissingCharAfterEscape' }
         if (n === 'n') {
           out.push('\n')
           i += 2
@@ -172,7 +173,12 @@ function parseValue(raw: string): { value: string } | { error: string } {
       out.push(c)
       i++
     }
-    if (!closed) return { error: `${quote === '"' ? '双' : '单'}引号未闭合` }
+    if (!closed) {
+      return {
+        error: `${quote === '"' ? '双' : '单'}引号未闭合`,
+        errorKey: quote === '"' ? 'settings.words.envSkipUnclosedDouble' : 'settings.words.envSkipUnclosedSingle',
+      }
+    }
     return { value: out.join('') }
   }
   // 未加引号：到行尾；`#` 起注释，但只在「值首」或「前面是空白」时才算注释
@@ -196,7 +202,7 @@ function parseValue(raw: string): { value: string } | { error: string } {
  */
 export function parseDotEnv(text: string): EnvParseResult {
   const entries: EnvEntry[] = []
-  const skipped: { line: number; reason: string }[] = []
+  const skipped: EnvSkipped[] = []
   const lineOf = new Map<string, number>()
   const lines = String(text ?? '').split(/\r\n|\r|\n/)
   for (let n = 0; n < lines.length; n++) {
@@ -208,37 +214,70 @@ export function parseDotEnv(text: string): EnvParseResult {
     const body = trimmed.replace(/^export\s+/i, '')
     const eq = body.indexOf('=')
     if (eq < 0) {
-      skipped.push({ line: lineNo, reason: '缺少 `=`，不是 KEY=VALUE 形态' })
+      skipped.push({
+        line: lineNo,
+        reason: '缺少 `=`，不是 KEY=VALUE 形态',
+        reasonKey: 'settings.words.envSkipMissingEq',
+      })
       continue
     }
     const key = body.slice(0, eq).trim()
     if (!KEY_RX.test(key)) {
-      skipped.push({ line: lineNo, reason: `变量名不合法：${key || '(空)'}` })
+      skipped.push({
+        line: lineNo,
+        reason: `变量名不合法：${key || '(空)'}`,
+        reasonKey: 'settings.words.envSkipInvalidKey',
+        reasonArgs: { key: key || '(empty)' },
+      })
       continue
     }
     const parsed = parseValue(body.slice(eq + 1))
     if ('error' in parsed) {
-      skipped.push({ line: lineNo, reason: parsed.error })
+      skipped.push({
+        line: lineNo,
+        reason: parsed.error,
+        reasonKey: parsed.errorKey,
+        reasonArgs: parsed.errorArgs,
+      })
       continue
     }
     const value = parsed.value
     if (!value) {
-      skipped.push({ line: lineNo, reason: '值为空，没有可脱敏的内容' })
+      skipped.push({
+        line: lineNo,
+        reason: '值为空，没有可脱敏的内容',
+        reasonKey: 'settings.words.envSkipEmptyVal',
+      })
       continue
     }
     if (value.length > MAX_WORD_LEN) {
-      skipped.push({ line: lineNo, reason: `值长 ${value.length} 字符，超过上限 ${MAX_WORD_LEN}（后端会静默丢弃）` })
+      skipped.push({
+        line: lineNo,
+        reason: `值长 ${value.length} 字符，超过上限 ${MAX_WORD_LEN}（后端会静默丢弃）`,
+        reasonKey: 'settings.words.envSkipValTooLong',
+        reasonArgs: { len: value.length, max: MAX_WORD_LEN },
+      })
       continue
     }
     if (value.length < MIN_WORD_LEN) {
-      skipped.push({ line: lineNo, reason: `值过短（${value.length} 字符），无边界匹配会误伤代码` })
+      skipped.push({
+        line: lineNo,
+        reason: `值过短（${value.length} 字符），无边界匹配会误伤代码`,
+        reasonKey: 'settings.words.envSkipValTooShort',
+        reasonArgs: { len: value.length },
+      })
       continue
     }
     const prev = lineOf.get(key)
     if (prev !== undefined) {
       // dotenv 语义：后出现的覆盖先出现的。把先前那条从待导入列表里摘掉并留痕，
       // 免得用户以为两个值都会进词库。
-      skipped.push({ line: prev, reason: `重复定义，采用第 ${lineNo} 行的值` })
+      skipped.push({
+        line: prev,
+        reason: `重复定义，采用第 ${lineNo} 行的值`,
+        reasonKey: 'settings.words.envSkipDuplicateKey',
+        reasonArgs: { line: lineNo },
+      })
       const idx = entries.findIndex((e) => e.key === key)
       if (idx >= 0) entries.splice(idx, 1)
     }

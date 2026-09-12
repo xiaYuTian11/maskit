@@ -32,6 +32,7 @@ hiddenimports = (
         'event_store',
         'transparent',
         'panel',
+        'credential_labels',
         'audit_signals',
         'audit_engine',
         # mitmdump 命令行入口：安装包不含 mitmdump.exe，引擎要自己当 mitmdump 跑

@@ -38,6 +38,7 @@ from shield_defaults import (
 )
 from event_store import enqueue_event
 from event_store import enqueue_audit_event
+from credential_labels import CREDENTIAL_LABELS
 import audit_signals as _audit
 import base64
 import hashlib
@@ -111,7 +112,13 @@ RULES = [
     # 保留 scheme/user/host——模型仍能理解这是连接串（审计规则专项 P0）。
     # EMAIL 规则的注释里曾提到 postgres://user:secret123@db.internal 被误当邮箱，
     # 修了误报但没补漏检。
-    (re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s:@/]+:([^\s@/]{4,})@"), "CONNSTR", 1),
+    # scheme 段必须封顶 {0,63}：`[a-z0-9+.-]*` 无上限时，在「大量词起始位置 +
+    # 长 [a-z0-9+.-] 连续段」的文本上是 O(N²)——实测 8/16/32KB 为 82/335/1345ms
+    # （每次翻倍 ≈4x），同步阻塞 event loop。封顶后 32KB 降到 7.4ms、倍率 2.0。
+    # 真实 scheme 最长不到 40 字符，封顶不损失任何匹配。
+    # 注意：`_smoke_data/_rxstress.py` 对这个模式是**假阴性**（它的对抗串
+    # `"x://" + "a"*n + ":"` 只有 2 个 \b 起点，形不成乘积），语料已补齐。
+    (re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,63}://[^\s:@/]+:([^\s@/]{4,})@"), "CONNSTR", 1),
     # 手机号：连续 11 位，或 138-1234-5678 / 138 1234 5678（分隔符仅 - 或空白）；
     # +86 前缀整体脱敏（曾只脱 138... 部分，国家码原文残留）。
     # 加号可省（8613812345678 是国内表单/短信网关最常见写法）：国家码后紧跟
@@ -263,13 +270,12 @@ UPSTREAMS = list(DEFAULT_UPSTREAMS)  # 反向代理路由表
 # 官方 API 走代理」并存。实测走的是 CONNECT 隧道（即便目标是明文 http），
 # 因此上游代理必须支持 CONNECT；socks5 不支持（mitmproxy 的 via 只认 http/https）。
 EGRESS_PROXY = None
-CREDENTIAL_LABELS = {"API_KEY", "TOKEN", "SECRET", "ACCESS_KEY", "JWT",
-                     # 下面两个曾漏在集合外，明文原样写进 events.items[].original：
-                     # CONNSTR 的捕获组就是连接串里的密码本身（scheme://user:PASS@host），
-                     # PRIVATE_KEY 更是把整块 PEM 私钥落库——是所有凭据里最高危的一个。
-                     # 官网写着「凭据永不落库，只记打码形态与 SHA-256 摘要」，
-                     # 生产库实测已有 CONNSTR 5091 条 / PRIVATE_KEY 468 条明文。
-                     "CONNSTR", "PRIVATE_KEY"}
+# 凭据类标签：唯一定义源在 credential_labels.py（panel / event_store 共用同一份，
+# 前端 TS 侧由测试守同步）。以前这里各写一份，event_store 那份少两个标签 →
+# 读路径会把 CONNSTR 密码与 PEM 私钥当普通 PII 返回。
+# 凭据原文精确清洗的长度下限：内置规则最短的凭据捕获是 CONNSTR 的 {4,}，
+# 自定义前缀规则要求前缀后 ≥8 位，SECRET 是 6-64 —— 真实凭据不会短于 4。
+_MIN_SCRUB_LEN = 4
 # 过滤开关：True=脱敏还原（默认），False=透明转发（不脱敏，流量原样到上游）。
 # 代理仍运行、端口仍监听、路由仍生效，仅跳过脱敏/还原逻辑。客户端 base_url 不用改。
 FILTER_ENABLED = True
@@ -322,6 +328,13 @@ _AUDIT_REGISTRY_MAX = 500   # 上限 500 nonce，超则清最早
 _ROOT = Path(__file__).parent.resolve()
 # 流式响应留存上限：只为审计/响应侧扫描保留还原后文本，超过即不再累积（防大响应吃内存）
 _SSE_KEEP_MAX = 256 * 1024
+# 流式半事件/半行缓冲上限：buf 只暂存「没凑齐分隔符的半个事件」，正常上游事件远小于此值。
+# 恶意/异常上游若持续推送不含分隔符的数据（非标准实现），buf 会无限增长吃光内存——
+# 超限时把整个缓冲按最终事件强制还原下发并清空，宁多一次事件边界也不让内存失控。
+_SSE_BUF_MAX = 4 * 1024 * 1024
+# 响应侧扫描体长上限：几 MB 文本 × 全量规则正则会霸占事件循环，扫描是防御性功能，
+# 超长只扫前段（代价：超长响应的尾部命中可能漏，属刻意取舍）。
+_SCAN_BODY_MAX = 512 * 1024
 # 流式逐回调调试日志开关（SHIELD_STREAM_DEBUG=1）。默认关：SSE 每秒几十次回调，
 # 常开会把日志刷爆并拖慢转发。断流排障时临时打开。
 _STREAM_DEBUG = (os.environ.get("SHIELD_STREAM_DEBUG") or "").strip() not in ("", "0", "false", "False")
@@ -636,18 +649,9 @@ def _prefix_secret_regex():
     return _prefix_rx_cache
 
 
-def _placeholder(label, fwd):
-    """Use random per-session placeholders; never derive IDs from secrets."""
-    existing = set(fwd.values())
-    for _ in range(20):
-        token = _new_token(label)
-        if token not in existing:
-            return token
-    return _new_token(label)
-
-
 # ========== 占位符 ==========
-# 格式：{{LABEL_hex6}}，纯 ASCII。
+# 格式：{{LABEL_后缀6位}}，纯 ASCII。后缀自 0.1.13 起是纯辅音（见下方 _TOKEN_ALPHABET），
+# 存量 hex6 后缀仍继续识别（见 _SUFFIX_PAT）。
 # 旧格式 ⟦X·hex⟧ 用生僻 Unicode 且不带语义：主流 tokenizer 会切成多个罕见 token，
 # 模型复述时容易变形（少一个括号就还原失败），且模型不知道占位符代表什么，回答质量下降。
 # 新格式保留业务标签（PHONE / EMAIL / TERM…），模型能理解"这里原本是个电话号"。
@@ -1007,6 +1011,59 @@ def _redact_credentials(text):
         pref = _prefix_secret_regex()
         if pref:
             text = pref.sub("[REDACTED]", text)
+    except Exception:
+        pass
+    return text
+
+
+def _redact_session_credentials(text, s):
+    """把**本会话脱敏过的凭据原文**从文本里精确抹掉（与 `_redact_credentials` 互补）。
+
+    `_redact_credentials` 只按「凭据形态」跑正则，防的是「用户自己贴的、本会话没
+    脱敏过的凭据」。它防不住另一种：还原后的响应里模型**只复述了值本身**——
+    CONNSTR 的规则要求完整 `scheme://user:pass@host`，PRIVATE_KEY 要求 PEM 头，
+    裸值都不命中形态正则，于是明文跟着 resp_dialog / resp_preview 落进 SQLite。
+
+    引擎本来就知道原文（`s["fwd"]` 的 key 就是原文），所以这里做精确串替换。
+
+    长度下限 `_MIN_SCRUB_LEN`：内置规则里最短的凭据捕获是 CONNSTR 的 `{4,}`，自定义
+    前缀规则要求前缀后至少 8 位，SECRET 是 6-64——即**任何真实凭据原文都不会短于 4**。
+    更短的只可能是「用户把 1-3 字符短词放进凭据类分类」这种配置，无法安全定位，
+    整段不下发（见下方取舍说明）。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    try:
+        labels = s.get("labels") or {}
+        unsafe_short = False
+        # 收集所有已知凭据原文：
+        # 1. 本会话请求阶段自身脱敏的凭据（s["fwd"]）
+        # 2. 跨请求从 _RECENT_REV 还原出来的历史凭据（s["restored_tokens"]）
+        candidate_origs = set()
+        for orig in (s.get("fwd") or {}):
+            if labels.get(orig, "") in CREDENTIAL_LABELS:
+                candidate_origs.add(orig)
+        for tok in (s.get("restored_tokens") or set()):
+            rec = _RECENT_REV.get(tok)
+            if rec and len(rec) >= 2:
+                orig, label = rec[0], rec[1]
+                if label in CREDENTIAL_LABELS and orig:
+                    candidate_origs.add(orig)
+
+        for orig in candidate_origs:
+            if orig not in text:
+                continue
+            if len(orig) < _MIN_SCRUB_LEN:
+                unsafe_short = True
+                continue
+            text = text.replace(orig, "[REDACTED]")
+        if unsafe_short:
+            # 1-3 字符的原文无法安全定位：全局替换会把整段文本打成筛子（每个 "id"
+            # 都变 [REDACTED]）。内置规则里最短的凭据捕获是 CONNSTR 的 {4,}、自定义
+            # 前缀要求前缀后 ≥8 位，所以走到这里只可能是「用户把 1-3 字符的短词放进
+            # 了凭据类分类」这种配置。与 `_scrub_legacy_event` 同一取舍：拿不准就整段
+            # 不下发——放行原文是最坏结果。
+            return "[REDACTED]"
     except Exception:
         pass
     return text
@@ -1812,7 +1869,7 @@ _PLACEHOLDER_RX = re.compile(r"\{\{[A-Z0-9]{1,12}_" + _SUFFIX_PAT + r"\}\}")
 # 严格正则匹配不到 → 整个还原被跳过 → 用户拿到一个假 token 去执行。
 #
 # 这条只做兜底修复，且**只替换我们自己发过的 token**（必须能在会话/复用表里查到），
-# 所以不存在误伤：LABEL_hex6 这种组合正常文本里不会自然出现，何况还要求查得到。
+# 所以不存在误伤：LABEL_后缀 这种组合（6 位纯辅音或存量 hex6）正常文本里不会自然出现，何况还要求查得到。
 _LOOSE_PLACEHOLDER_RX = re.compile(r"\{{0,2}([A-Z0-9]{1,12}_" + _SUFFIX_PAT + r")\}{0,2}")
 # 行尾半截占位符（流式时可能被切在两个 chunk 之间），需要扣住等下一块拼。
 #
@@ -2010,8 +2067,9 @@ def _lookup_by_suffix(token, sid):
 def _mask_excluding_placeholders(text, rx, sub_fn):
     """对 text 做正则替换，但跳过已有的占位符片段（防污染）。
 
-    占位符格式 {{LABEL_hex6}}，其中 hex6 含 [0-9a-f]，自定义词里 2 字符的
-    hex 子串（如 'e3'）会把占位符劈开 → 畸形占位符 → _PLACEHOLDER_RX 匹配
+    占位符格式 {{LABEL_后缀}}，后缀为 6 位纯辅音（存量兼容 hex6），自定义词里 2 字符的
+    hex 子串（如 'e3'）会把存量 hex6 占位符劈开 → 畸形占位符 → _PLACEHOLDER_RX 匹配
+    不到 → 还原永久失败。
     不到 → 还原永久失败。修法：用 _PLACEHOLDER_RX 把文本切成「占位符 / 非占位符」
     片段，只对非占位符片段做替换，占位符片段原样保留。
     """
@@ -2468,6 +2526,14 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0):
     if isinstance(obj, list):
         return [_mask_tree(v, sid, key, parent, path, depth + 1) for v in obj]
     if isinstance(obj, dict):
+        # 对象**键名不脱敏**，这是有意保留的边界，不是遗漏：
+        # 1) 键名承载结构语义（content/type/role/messages…），一旦被自定义短词误命中
+        #    （用户加个 "con" 就会命中 content），整条请求的协议骨架当场崩掉——代价是
+        #    每个请求都坏，而收益只是覆盖「PII 恰好是键名」这一种罕见载荷形状；
+        # 2) 真正常见的 PII-as-key 场景（tool_calls[].function.arguments、
+        #    partial_json）在上游是 JSON **字符串**，走的是下面的 str 分支，
+        #    整个 JSON 文本（含键名）都会被扫描，本来就没漏。
+        # 若要覆盖剩余场景，必须先能可靠区分「数据键」与「结构键」，否则误伤面大于收益。
         return {k: _mask_tree(v, sid, k, key, path + (k,), depth + 1) for k, v in obj.items()}
     return obj
 
@@ -3218,7 +3284,7 @@ def request(flow: http.HTTPFlow):
         m = _PLACEHOLDER_PARTS_RX.match(tok)
         label = labels.get(orig, "")
         roles = _hit_roles_for(orig, role_texts)
-        # 凭据类（API_KEY/TOKEN/SECRET/JWT/ACCESS_KEY）永不明文落库：
+        # 凭据类标签（CREDENTIAL_LABELS：API_KEY/TOKEN/SECRET/ACCESS_KEY/JWT/CONNSTR/PRIVATE_KEY）永不明文落库：
         # 只存类型 + 打码 preview + 长度 + sha256 摘要（审计要求，v1.5.19 起）。
         # 非凭据 PII 保留 original（项目约定：明文只进详情弹窗，导出/列表用 preview）。
         is_cred = label in CREDENTIAL_LABELS
@@ -3340,6 +3406,10 @@ def response(flow: http.HTTPFlow):
     try:
         if "text/event-stream" in ct:
             _handle_sse(flow, sid)
+        elif _is_ndjson_ct(ct):
+            # NDJSON 必须先判：application/x-ndjson 里含 "json"，落到下面的分支会
+            # json.loads 整段失败 → 整条响应未还原透传（Ollama 流式实测如此）。
+            _handle_ndjson(flow, sid)
         elif "json" in ct:
             _handle_json(flow, sid)
     except Exception as e:
@@ -3391,10 +3461,16 @@ def _scan_response(flow, sid, host, method, path, source, streamed_text=None):
                 body = json.dumps(parsed, ensure_ascii=False)
         except Exception:
             pass
+        # 超长 body 全量正则扫描会霸占事件循环（几 MB 文本 × N 条规则）：只扫前段。
+        # 响应侧扫描是防御性功能，前段命中已覆盖大部分幻觉/泄漏场景，代价是可控的。
+        if len(body) > _SCAN_BODY_MAX:
+            body = body[:_SCAN_BODY_MAX]
         found = {}
         for rx, label, gidx in RULES:
             if not _rule_enabled(label):
                 continue
+            if not _rule_may_hit(body, label):
+                continue  # 特征预检：不含必含特征，跳过整条规则扫描（与脱敏路径同款）
             for m in rx.finditer(body):
                 orig = m.group(gidx)
                 if label == "CARD" and not _card_ok(orig):
@@ -3551,6 +3627,15 @@ def _sse_text_slots(data):
         slots.append((_sse_response_channel(data, "reason"), data["delta"], _setter(data, "delta"), False))
     elif etype == "response.function_call_arguments.delta" and isinstance(data.get("delta"), str):
         slots.append((_sse_response_channel(data, "args"), data["delta"], _setter(data, "delta"), True))
+    # Ollama NDJSON 增量。用 "done" 做判别（Ollama 每条记录都带它），避免把
+    # OpenAI 非流式响应里的 choices[].message 误当增量槽位。
+    if "done" in data:
+        msg = data.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+            slots.append(("o.message.content", msg["content"], _setter(msg, "content"), False))
+        # /api/generate 的正文直接放在顶层 response 字段
+        if isinstance(data.get("response"), str):
+            slots.append(("o.response", data["response"], _setter(data, "response"), False))
     return slots
 
 
@@ -3577,7 +3662,9 @@ def _sse_terminal_prefixes(data):
 
 
 def _restore_sse_data(data, sid, final=False, final_prefixes=()):
-    """就地还原单个 SSE 事件的 JSON 负载。"""
+    """就地还原单个 SSE 事件的 JSON 负载。非 dict 负载（null/[]/"x"/123）直接原样返回。"""
+    if not isinstance(data, dict):
+        return data
     slots = _sse_text_slots(data)
     if slots:
         s = sessions.get(sid) or {}
@@ -3636,11 +3723,13 @@ def _build_flush_event(tmpl_json, channel, leftover):
     return prefix + "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
 
 
-def _flush_pending(sid, channel_prefixes=None):
-    """把各通道滞留的半截占位符补发出去，返回待追加的 SSE 文本。
+def _flush_pending(sid, channel_prefixes=None, framing="sse"):
+    """把各通道滞留的半截占位符补发出去，返回待追加的流文本。
 
     补发前必须先把 leftover 还原成原文（final=True 清空通道缓冲），
-    否则客户端收到的补发事件里是未还原的占位符。
+    否则客户端收到的补发帧里是未还原的占位符。
+    framing 决定补发帧的封装形态：SSE 要克隆完整事件（客户端 SDK 会校验字段），
+    NDJSON 只要一行 JSON。
     """
     s = sessions.get(sid)
     if not s:
@@ -3663,13 +3752,93 @@ def _flush_pending(sid, channel_prefixes=None):
             restored = restore(leftover, sid, channel=channel, escape=escape, final=True)
         except Exception:
             restored = leftover
-        evt = _build_flush_event(tmpl_json, channel, restored)
+        builder = _build_flush_line if framing == "ndjson" else _build_flush_event
+        evt = builder(tmpl_json, channel, restored)
         if evt:
             out.append(evt)
         elif restored:
             # 没有可用模板（非流式回退路径等）：退化为裸文本，至少不丢字
             out.append(restored)
     return "".join(out)
+
+
+def _build_flush_line(tmpl_json, channel, leftover):
+    """NDJSON 版的收尾补发：克隆最后一条同通道记录，只留残留文本。"""
+    try:
+        data = json.loads(tmpl_json)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    hit = False
+    for ch, _text, setter, _escape in _sse_text_slots(data):
+        if ch == channel:
+            setter(leftover)
+            hit = True
+        else:
+            setter("")  # 其余槽位清空，避免重复下发同一段文本
+    if not hit:
+        return ""
+    if "done" in data:
+        data["done"] = False  # 补发帧不能带结束标记
+    return json.dumps(data, ensure_ascii=False) + "\n"
+
+
+def _restore_ndjson_line(line, sid, final=False):
+    """还原 NDJSON 流中的单行 JSON（Ollama /api/chat 等）。
+
+    整包 `json.loads` 对 NDJSON 必然失败，此前这条路径整个退化成「未还原透传」——
+    用户在自己的客户端里看到 `{{PHONE_ab12cd}}` 原样留在回复中，而面板显示一切正常。
+
+    与 SSE 同构：增量文本槽位走通道缓冲（半截占位符不原样透传），其余字段整树还原。
+    解析失败的行原样返回：一行坏不能把整段输出吃掉。
+    """
+    stripped = line.strip()
+    if not stripped:
+        return line
+    try:
+        obj = json.loads(stripped)
+    except Exception:
+        # 调用方已保证只在「整行到齐」时进来（流式路径按 \n 切帧），
+        # 走到这里说明上游本来就发了非 JSON 的行，吞掉它只会让客户端缺数据。
+        return line
+    if not isinstance(obj, dict):
+        return line
+    try:
+        slots = _sse_text_slots(obj)
+        if slots:
+            s = sessions.get(sid) or {}
+            for channel, text, setter, escape in slots:
+                setter(restore(text, sid, channel=channel, escape=escape, final=final))
+            # 只有真的留下半截占位符时才记模板（收尾补发用），正常路径零额外序列化
+            pend = s.get("pending") or {}
+            for channel, _t, _s2, _e in slots:
+                if pend.get(channel):
+                    s.setdefault("flush_tmpl", {})[channel] = json.dumps(obj, ensure_ascii=False)
+            return json.dumps(obj, ensure_ascii=False)
+        return json.dumps(_restore_tree(obj, sid), ensure_ascii=False)
+    except Exception:
+        return line
+
+
+# NDJSON（换行分隔 JSON）内容类型。Ollama 用 application/x-ndjson，
+# 部分网关用 application/jsonl / application/x-jsonlines。
+_NDJSON_CONTENT_TYPES = ("application/x-ndjson", "application/ndjson",
+                         "application/jsonl", "application/x-jsonlines")
+
+
+def _is_ndjson_ct(content_type):
+    ct = (content_type or "").lower()
+    return any(t in ct for t in _NDJSON_CONTENT_TYPES)
+
+
+def _handle_ndjson(flow, sid):
+    """整包 NDJSON 还原（流式接管关闭或未触发时的回退路径）。"""
+    raw = flow.response.content.decode("utf-8", errors="replace")
+    out = []
+    for line in raw.split("\n"):
+        out.append(_restore_ndjson_line(line, sid))
+    flow.response.content = "\n".join(out).encode("utf-8")
 
 
 def _restore_sse_event(block, sid, final=False):
@@ -3699,6 +3868,13 @@ def _restore_sse_event(block, sid, final=False):
             except json.JSONDecodeError:
                 out_lines.append("data: " + restore(payload, sid, channel="raw", final=final))
                 continue
+            # 合法 JSON 但**不是对象**（null / [] / "x" / 123）：下面一律按 dict 用
+            # （.get() / .items()），以前会抛 AttributeError，被 _handle_response 的
+            # 外层 except 吞成一条 ERR 事件 —— 整条响应就此退化成「未还原透传」，
+            # 用户看到的是占位符原样留在回复里。这类负载没有可还原的槽位，原样透传即可。
+            if not isinstance(data, dict):
+                out_lines.append(line)
+                continue
             ending = _sse_terminal_prefixes(data)
             # A terminal chunk can contain the final text fragment. Restore it
             # before flushing, and leave other choices' partial tokens buffered.
@@ -3716,12 +3892,16 @@ def _restore_sse_event(block, sid, final=False):
 
 
 
-def _sse_stream_factory(flow, sid, host, method, emit_path, source):
-    """构造 mitmproxy 响应流回调：按 SSE 事件边界增量还原并立即下发。
+def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse"):
+    """构造 mitmproxy 响应流回调：按帧边界增量还原并立即下发。
 
-    mitmproxy 默认把响应整包收完才交给 response 钩子，SSE 因此完全失去流式效果
+    mitmproxy 默认把响应整包收完才交给 response 钩子，流式因此完全失去效果
     （首字延迟 = 整段生成时长，长回答表现为卡死）。这里在 responseheaders 阶段
     接管流，逐块处理。
+
+    framing 决定切帧方式：`sse`（空行分隔的事件块，OpenAI/Anthropic/Gemini alt=sse/
+    Cohere v2）与 `ndjson`（换行分隔的 JSON 行，Ollama）。两种格式的占位符跨 TCP 块
+    分裂问题靠同一套「只在帧完整时处理」解决。
     """
     state = {
         "decoder": codecs.getincrementaldecoder("utf-8")(errors="replace"),
@@ -3790,22 +3970,55 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source):
             # CRLF 上游会把整段响应攒到流结束，客户端可能 chunk timeout 并截断。
             state["buf"] = state["buf"].replace("\r\n", "\n")
             out = []
-            # SSE 事件以空行分隔；只处理已完整到达的事件，半个事件留在缓冲里
-            while True:
-                idx = state["buf"].find("\n\n")
-                if idx < 0:
-                    break
-                block, state["buf"] = state["buf"][:idx], state["buf"][idx + 2:]
-                out.append(_restore_sse_event(block, sid, final=False) + "\n\n")
-            if last:
-                if state["buf"]:
-                    out.append(_restore_sse_event(state["buf"], sid, final=True))
+            if framing == "ndjson":
+                # NDJSON：一行一个 JSON。只处理已带换行的完整行，半行留在缓冲里
+                # （占位符被 TCP 边界切开时靠这条保证不会被当成坏 JSON 丢掉）。
+                while True:
+                    idx = state["buf"].find("\n")
+                    if idx < 0:
+                        break
+                    line, state["buf"] = state["buf"][:idx], state["buf"][idx + 1:]
+                    out.append(_restore_ndjson_line(line, sid, final=False) + "\n")
+                # 异常上游防御：单个超长行无换行符，累积超过 _SSE_BUF_MAX 强制还原清空
+                if len(state["buf"]) > _SSE_BUF_MAX:
+                    out.append(_restore_ndjson_line(state["buf"], sid, final=True) + "\n")
                     state["buf"] = ""
-                # 收尾：把各通道缓冲里的残留补发出去，避免吞掉最后几个字
-                tail = _flush_pending(sid)
-                if tail:
-                    out.append(tail)
-                _touch(sid)
+                if last:
+                    if state["buf"]:
+                        out.append(_restore_ndjson_line(state["buf"], sid, final=True))
+                        state["buf"] = ""
+                    tail = _flush_pending(sid, framing="ndjson")
+                    if tail:
+                        out.append(tail)
+                    _touch(sid)
+            else:
+                # SSE 事件以空行分隔；只处理已完整到达的事件，半个事件留在缓冲里
+                while True:
+                    idx = state["buf"].find("\n\n")
+                    if idx < 0:
+                        break
+                    block, state["buf"] = state["buf"][:idx], state["buf"][idx + 2:]
+                    out.append(_restore_sse_event(block, sid, final=False) + "\n\n")
+                # 异常上游防御：上游持续推送只有单换行（无 \n\n 双空行）或无换行的巨型数据，
+                # 导致 buf 无限累积超过 _SSE_BUF_MAX。优先在最后一个换行符切分以保留完整
+                # data: 行（避免破坏合法 JSON），无换行时整段强制还原清空。
+                if len(state["buf"]) > _SSE_BUF_MAX:
+                    idx = state["buf"].rfind("\n")
+                    if idx >= 0:
+                        block, state["buf"] = state["buf"][:idx], state["buf"][idx + 1:]
+                        out.append(_restore_sse_event(block, sid, final=True) + "\n\n")
+                    else:
+                        out.append(_restore_sse_event(state["buf"], sid, final=True) + "\n\n")
+                        state["buf"] = ""
+                if last:
+                    if state["buf"]:
+                        out.append(_restore_sse_event(state["buf"], sid, final=True))
+                        state["buf"] = ""
+                    # 收尾：把各通道缓冲里的残留补发出去，避免吞掉最后几个字
+                    tail = _flush_pending(sid)
+                    if tail:
+                        out.append(tail)
+                    _touch(sid)
             text = "".join(out)
             _keep(text)
             if _STREAM_DEBUG:
@@ -3832,7 +4045,7 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source):
             # 缓冲里已解码但未输出的部分必须拼回去，否则客户端收到缺块的半截流。
             state["done"] = True
             s_sse = sessions.get(sid, {}) if sid else {}
-            _emit("ERR", host=host, method=method, path=emit_path, sid=sid, msg="sse_stream:" + str(e)[:160],
+            _emit("ERR", host=host, method=method, path=emit_path, sid=sid, msg=f"{framing}_stream:" + str(e)[:160],
                   upstream=s_sse.get("upstream_name", ""), model=s_sse.get("model", ""), **source)
             try:
                 buf = state.get("buf") or ""
@@ -3920,9 +4133,10 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
     except Exception:
         resp_preview = ""
         resp_dialog = ""
-    # 还原后的文本可能复述模型见到的凭据原文：落库前必须清洗
-    resp_dialog = _redact_credentials(resp_dialog)
-    resp_preview = _redact_credentials(resp_preview)
+    # 还原后的文本可能复述模型见到的凭据原文：落库前必须清洗。
+    # 两步互补：形态正则（防用户自贴的凭据）+ 本会话原文精确串（防模型裸复述值本身）。
+    resp_dialog = _redact_credentials(_redact_session_credentials(resp_dialog, s))
+    resp_preview = _redact_credentials(_redact_session_credentials(resp_preview, s))
     # token 用量（尽力而为）：非流式顶层 usage；流式最后带 usage 的 chunk
     usage = {}
     try:
@@ -4006,8 +4220,9 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
         model=s.get("model") or "",
         upstream=s.get("upstream_name") or "",
         dialog=resp_dialog,
-        # 用户消息（MASK 阶段存入会话）：回复日志弹窗同时展示用户发送的内容
-        dialog_req=s.get("req_dialog") or "",
+        # 用户消息（MASK 阶段存入会话）：回复日志弹窗同时展示用户发送的内容。
+        # MASK 阶段已过形态清洗，这里再过一遍本会话原文精确串（纵深防御，代价一次替换）
+        dialog_req=_redact_session_credentials(s.get("req_dialog") or "", s),
         resp_preview=resp_preview,
         usage=usage or None,
         stream_mode=s.get("stream_mode") or "non_stream",
@@ -4036,14 +4251,18 @@ def responseheaders(flow: http.HTTPFlow):
         return
     headers = flow.response.headers
     content_type = (headers.get("content-type", "") or "").lower()
-    if "text/event-stream" not in content_type:
+    if _is_ndjson_ct(content_type):
+        framing = "ndjson"
+    elif "text/event-stream" in content_type:
+        framing = "sse"
+    else:
         return
     host = getattr(flow.request, "host", None) or flow.request.pretty_host
     path = flow.request.path
     emit_path = flow.metadata.get("shield_orig_path") or path
     method = getattr(flow.request, "method", "") or ""
     source = sessions.get(sid, {}).get("source", {})
-    # 压缩体在 responseheaders 阶段仍是压缩字节，无法按 SSE 事件解析；
+    # 压缩体在 responseheaders 阶段仍是压缩字节，无法按事件解析；
     # 交回 response() 的整包路径，让 mitmproxy 先完成解压。
     content_encoding = (headers.get("content-encoding", "") or "").lower().strip()
     if content_encoding and content_encoding != "identity":
@@ -4054,12 +4273,12 @@ def responseheaders(flow: http.HTTPFlow):
         return
     if host in STREAM_EXCLUDE_HOSTS:
         return  # 用户显式排除的上游：保持整包路径
-    _log(f"[LLM Shield] SSE stream hook: {method} {host}{path.split('?')[0]} ct={content_type[:60]}")
+    _log(f"[LLM Shield] {framing.upper()} stream hook: {method} {host}{path.split('?')[0]} ct={content_type[:60]}")
     # 转换后长度不再等于上游 Content-Length；移除后由 mitmproxy 使用分块传输。
     headers.pop("content-length", None)
     flow.metadata["shield_streamed"] = True
     flow.response.stream = _sse_stream_factory(
-        flow, sid, host, method, emit_path.split("?")[0], source
+        flow, sid, host, method, emit_path.split("?")[0], source, framing=framing
     )
 
 

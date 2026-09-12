@@ -24,12 +24,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent};
 
-/// 引擎 API 端口（panel.py PANEL_PORT = 5801，可用 SHIELD_ENGINE_PORT 覆盖——测试隔离用）
+/// 引擎 API 端口（panel.py PANEL_PORT = 5801）。
+///
+/// **必须优先读 `LLM_SHIELD_PANEL_PORT`**：那是 panel.py 自己决定监听端口的变量
+/// （`_default_panel_port()`）。此前壳只认 `SHIELD_ENGINE_PORT`，于是用户按引擎侧
+/// 文档改端口后，引擎换了端口而壳仍探 5801 —— 永远判不出「已就绪」，前端一直转圈。
+/// `SHIELD_ENGINE_PORT` 保留为兼容别名（早期测试脚本与外部工具在用）。
 fn engine_port() -> u16 {
-    std::env::var("SHIELD_ENGINE_PORT")
-        .ok()
-        .and_then(|v| v.trim().parse::<u16>().ok())
-        .unwrap_or(5801)
+    resolve_engine_port(|key| std::env::var(key).ok())
+}
+
+/// `engine_port` 的纯函数部分：优先级可单测，且不碰进程级环境变量
+/// （`std::env::set_var` 在多线程测试里会互相干扰）。
+fn resolve_engine_port(get: impl Fn(&str) -> Option<String>) -> u16 {
+    for key in ["LLM_SHIELD_PANEL_PORT", "SHIELD_ENGINE_PORT"] {
+        if let Some(port) = get(key).and_then(|v| v.trim().parse::<u16>().ok()) {
+            return port;
+        }
+    }
+    5801
 }
 /// 就绪等待上限（秒）
 const READY_TIMEOUT_SECS: u64 = 20;
@@ -123,14 +136,28 @@ fn kill_owned_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// 保证 `restart_in_flight` 一定会被复位（Drop 兜底）。
+///
+/// 该标志位一旦留在 true，watchdog 每轮都会直接 `continue` —— 引擎崩溃自愈能力
+/// **永久静默失效**，与审计 P0（限频分支只 continue 导致永不重试）是同一失效模式。
+/// 手动重启流程在独立线程里跑，任何 panic 都会跳过手写的复位语句，因此这里用
+/// Drop 保证复位，不依赖「每个分支都记得写」。
+struct ResetInFlightOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ResetInFlightOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 // ========== 引擎进程状态 ==========
 
 #[derive(Serialize, Clone)]
 struct EngineState {
     ready: bool,
-    /// 引擎实际监听端口（SHIELD_ENGINE_PORT 可覆盖）。前端据此拼 baseUrl——
-    /// 少了这个字段，App.tsx 的 initEnginePort(s.port) 恒收到 undefined，
-    /// 覆盖端口后前端仍然死打 5801
+    /// 引擎实际监听端口（`LLM_SHIELD_PANEL_PORT` / `SHIELD_ENGINE_PORT` 可覆盖，
+    /// 见 `engine_port()`）。前端据此拼 baseUrl——少了这个字段，App.tsx 的
+    /// initEnginePort(s.port) 恒收到 undefined，覆盖端口后前端仍然死打 5801
     port: u16,
     pid: Option<u32>,
     started_at: Option<u64>,
@@ -231,8 +258,12 @@ impl EngineManager {
             return Ok(());
         }
         if Self::port_ready() {
+            // 端口有监听：可能是上一实例残留、用户手动启动的引擎，或正在启动中的引擎。
+            // 不能直接置 ready —— 端口被无关进程占用时同样「连得上」，置 ready 会让
+            // 前端显示就绪却所有请求失败。这里只记录 pid，是否就绪交给 readiness_loop
+            // 按 /healthz 判定（调用方在 spawn 后总会跑 readiness_loop）。
             if let Ok(mut s) = self.state.lock() {
-                s.ready = true;
+                s.ready = Self::panel_alive();
                 s.last_error = None;
                 // 复用已有引擎：探测并记录 pid（watchdog 存活校验 + 退出清理依赖它）
                 // 曾漏设 → watchdog 一直认为「无 pid」不监控 + 退出不杀引擎
@@ -247,7 +278,7 @@ impl EngineManager {
         let exe = Self::engine_exe(app)?;
         let dir = exe.parent().ok_or("引擎目录解析失败")?.to_path_buf();
         // 引擎 stdout/stderr 落盘（数据目录下 engine-stdout.log）：
-        // Flask access log 与 mitmdump 启动错误在此可见，排查 401/403/启动失败。
+        // mitmdump 启动错误与面板自己的 [panel] 日志在此可见，排查启动失败/崩溃。
         // 引擎首启会做旧目录迁移，此处目录可能尚不存在，先建再开。
         let log_path = data_root()
             .map(|r| {
@@ -255,6 +286,7 @@ impl EngineManager {
                 r.join("engine-stdout.log")
             })
             .unwrap_or_else(|| dir.join("engine-stdout.log"));
+        rotate_engine_log(&log_path);
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -282,7 +314,12 @@ impl EngineManager {
 
     /// 就绪探测：5801 TCP 可达（300ms 超时）
     fn port_ready() -> bool {
-        let addr = format!("127.0.0.1:{}", engine_port())
+        Self::port_ready_on(engine_port())
+    }
+
+    /// `port_ready` 的可测版本（显式端口，避免单测依赖真实引擎端口）。
+    fn port_ready_on(port: u16) -> bool {
+        let addr = format!("127.0.0.1:{port}")
             .to_socket_addrs()
             .ok()
             .and_then(|mut i| i.next());
@@ -292,12 +329,47 @@ impl EngineManager {
         }
     }
 
-    /// 就绪轮询：等待引擎写 token 文件 + 监听 5801（上限 READY_TIMEOUT_SECS）
+    /// 面板可用性探测：TCP 通 ≠ 面板能服务。
+    ///
+    /// `/healthz` 是免 token 的存活探针（见 panel.py `api_guard` 首行分支），
+    /// 只回 `{"ok": true}`，不泄露任何状态，适合壳层高频调用。
+    /// 只连 TCP 会在两类场景给出**假就绪**：
+    /// 1. 端口被非面板进程占用（连得上，但永不回应 HTTP）；
+    /// 2. Flask 已 listen、但工作线程未起来或已死锁（内核 accept 队列照常完成握手）。
+    /// 两者都会让前端显示 ready=true、托盘显示「引擎已就绪」，而所有请求超时。
+    ///
+    /// ⚠️ 内部走 `reqwest::blocking`，**只能在普通线程调用**；在 async 上下文里会 panic。
+    fn panel_alive() -> bool {
+        Self::panel_alive_on(engine_port())
+    }
+
+    /// `panel_alive` 的可测版本（显式端口）。
+    fn panel_alive_on(port: u16) -> bool {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_millis(800))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        client
+            .get(format!("http://127.0.0.1:{port}/healthz"))
+            .send()
+            .ok()
+            .filter(|r| r.status().is_success())
+            .and_then(|r| r.json::<serde_json::Value>().ok())
+            .and_then(|v| v.get("ok").and_then(|b| b.as_bool()))
+            .unwrap_or(false)
+    }
+
+    /// 就绪轮询：等待引擎写 token 文件 + 面板 `/healthz` 可用（上限 READY_TIMEOUT_SECS）
     fn readiness_loop(&self) {
         let start = std::time::Instant::now();
         let deadline = start + Duration::from_secs(READY_TIMEOUT_SECS);
         loop {
-            if Self::port_ready() && token_candidates().iter().any(|p| p.exists()) {
+            // 用 panel_alive() 而不是 port_ready()：端口有监听不代表面板能服务，
+            // 只认 TCP 会把「端口被占/Flask 假死」误报成就绪（见 panel_alive 注释）。
+            if Self::panel_alive() && token_candidates().iter().any(|p| p.exists()) {
                 if let Ok(mut s) = self.state.lock() {
                     s.ready = true;
                     s.last_error = None;
@@ -354,6 +426,10 @@ impl EngineManager {
     fn crash_watchdog(self: Arc<Self>) {
         let mut restarts: Vec<u64> = Vec::new();
         let mut strikes: u32 = 0;
+        // 限频命中后的待重试时刻（epoch 秒）。限频分支**不能只 continue**：那一刻 child
+        // 已被清空，下一轮 exited=false 且 hung=false，会永远卡在下面的 `!exited && !hung`
+        // 上——「1 分钟后重试」变成永不重试，引擎崩溃后自愈能力永久静默失效（审计 P0）。
+        let mut pending_restart: Option<u64> = None;
         loop {
             std::thread::sleep(Duration::from_secs(2));
             let exited = {
@@ -370,27 +446,34 @@ impl EngineManager {
                 continue;
             }
             // 假死检测：进程在但端口不通，连续多次才认账
-            let hung = if exited {
-                false
+            let (hung, has_child) = if exited {
+                (false, true)
             } else {
                 // 只有 child 由本壳持有时才允许 watchdog 判断假死并杀进程；
                 // 复用用户手动启动的外部引擎不能被壳误杀。
-                let alive = self
-                    .child
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.as_ref().map(|_| ()))
-                    .is_some();
-                if alive && !Self::port_ready() {
+                let has_child = self.child.lock().ok().map(|c| c.is_some()).unwrap_or(false);
+                // 用 panel_alive() 而非 port_ready()：Flask 死锁时端口照常握手，
+                // 只探 TCP 永远看不到「假死」，正是本分支要防的那类故障。
+                if has_child && !Self::panel_alive() {
                     strikes += 1;
-                    strikes >= HANG_STRIKES
+                    (strikes >= HANG_STRIKES, has_child)
                 } else {
                     strikes = 0;
-                    false
+                    (false, has_child)
                 }
             };
             if !exited && !hung {
-                continue;
+                if has_child {
+                    // 引擎健在（通常是用户手动重启、或外部引擎接管）→ 撤销排队中的重试，
+                    // 否则会走到下面的清理逻辑，把健康进程当崩溃进程杀掉。
+                    pending_restart = None;
+                    continue;
+                }
+                // 无 child：只有「限频排队已到点」才继续往下重试，其余保持原行为
+                // （外部引擎模式，壳不主动拉进程）。
+                if !pending_restart.map_or(false, |t| now_epoch() >= t) {
+                    continue;
+                }
             }
             if hung {
                 strikes = 0;
@@ -413,15 +496,24 @@ impl EngineManager {
                 s.pid = None;
                 s.ready = false;
             }
-            // 限频：1 分钟内最多 MAX_RESTARTS_PER_MIN 次
+            // 限频：1 分钟内最多 MAX_RESTARTS_PER_MIN 次。命中则**排队重试**而不是放弃：
+            // 等最早一次重启滑出 60s 窗口再拉，错误文案里的秒数是真实倒计时。
             let now = now_epoch();
             restarts.retain(|t| now.saturating_sub(*t) < 60);
-            if restarts.len() >= MAX_RESTARTS_PER_MIN as usize {
-                self.set_last_error("引擎频繁崩溃，已暂停自动重启（1 分钟后重试）");
+            if let Some(ready_at) = restart_backoff_until(&restarts, now) {
+                pending_restart = Some(ready_at);
+                self.set_last_error(&format!(
+                    "引擎频繁崩溃，已暂停自动重启（{} 秒后自动重试）",
+                    ready_at.saturating_sub(now).max(1)
+                ));
                 continue;
             }
+            pending_restart = None;
             restarts.push(now);
             self.restart_in_flight.store(true, Ordering::SeqCst);
+            // Drop 兜底：下面任一步 panic 都不会让标志位留在 true（那会让 watchdog
+            // 从此每轮 continue，自愈能力永久静默失效）
+            let _in_flight = ResetInFlightOnDrop(&self.restart_in_flight);
             match self.spawn(app_handle()) {
                 Ok(_) => {
                     if let Ok(mut s) = self.state.lock() {
@@ -436,9 +528,14 @@ impl EngineManager {
                         }
                     }
                 }
-                Err(e) => self.set_last_error(&e),
+                Err(e) => {
+                    // 拉起失败（引擎缺失/端口被占）不能就此静默停摆：排一次 60s 后的重试，
+                    // 让「自动恢复」对临时性故障仍然成立（连续失败仍受上面的限频约束）。
+                    pending_restart = Some(now_epoch().saturating_add(60));
+                    self.set_last_error(&e);
+                }
             }
-            self.restart_in_flight.store(false, Ordering::SeqCst);
+            // 复位交给 `_in_flight` 的 Drop（本轮结束即触发），不再手写 store(false)
         }
     }
 
@@ -622,6 +719,56 @@ fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// 引擎日志的轮转阈值：超过就把当前文件挪成 `.1`（覆盖上一份 `.1`）。
+///
+/// 引擎的 stdout/stderr 是以 append 打开的、自身不会轮转。托盘常驻 + 每次重启
+/// 追加，长期运行会让 `engine-stdout.log` 涨到几百 MB —— 用户只会发现数据目录
+/// 莫名变大，却不知道该删什么。只保留一份历史（`.1`）：崩溃现场要看的是最近
+/// 这一次，再往前的历史没有排查价值，留着只是占盘。
+const ENGINE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+fn rotate_engine_log(path: &std::path::Path) {
+    let too_big = std::fs::metadata(path)
+        .map(|m| m.len() >= ENGINE_LOG_MAX_BYTES)
+        .unwrap_or(false);
+    if !too_big {
+        return;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let rotated = path.with_file_name(format!("{name}.1"));
+    let _ = std::fs::remove_file(&rotated); // 先删旧的 .1，否则 rename 在 Windows 上会失败
+    let _ = std::fs::rename(path, &rotated);
+}
+
+/// 崩溃重启的限频判定（纯函数，便于单测）。
+///
+/// 返回 `None` = 现在可以重启；返回 `Some(ready_at)` = 已被限频，
+/// `ready_at` 是**最早可以重试的时刻**（最早那次重启滑出 60s 窗口的瞬间）。
+///
+/// 抽成纯函数的原因：这段逻辑原先内联在 `crash_watchdog` 的循环里，配合
+/// 「先清 child 再判限频」的顺序问题，会让崩溃自愈**永久静默失效**却零测试覆盖
+/// （审计 P0）。决策与副作用（清 child / 拉进程）分开之后，限频行为可以单测。
+fn restart_backoff_until(restarts: &[u64], now: u64) -> Option<u64> {
+    let recent: Vec<u64> = restarts
+        .iter()
+        .copied()
+        .filter(|t| now.saturating_sub(*t) < 60)
+        .collect();
+    if recent.len() < MAX_RESTARTS_PER_MIN as usize {
+        return None;
+    }
+    // 最早一次滑出窗口即可重试；保证返回的是**未来**时刻，否则 pending 永远不到点。
+    let ready_at = recent
+        .iter()
+        .copied()
+        .min()
+        .map(|t| t.saturating_add(60))
+        .unwrap_or_else(|| now.saturating_add(60));
+    Some(ready_at.max(now.saturating_add(1)))
 }
 
 /// 探测监听指定端口的 PID（复用已有引擎时用于状态展示）。
@@ -927,6 +1074,10 @@ async fn install_update(app: AppHandle) -> Result<serde_json::Value, String> {
 async fn get_shield_token() -> Result<String, String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(READY_TIMEOUT_SECS + 5);
     loop {
+        // 这里刻意用 port_ready() 而非 panel_alive()：panel_alive 走 reqwest::blocking，
+        // 而本函数是 async 命令、跑在 tokio 运行时线程上 —— reqwest::blocking 在
+        // async 运行时会 panic（见其 blocking::Client 文档）。就绪与否由
+        // readiness_loop / watchdog（都在普通线程）按 /healthz 判定。
         if EngineManager::port_ready() {
             if let Some(t) = token_candidates()
                 .iter()
@@ -1293,15 +1444,29 @@ async fn set_autostart(enabled: bool) -> Result<bool, String> {
 }
 
 /// 重启引擎（手动触发：先停旧进程再拉起）
+///
+/// **异步执行并立即返回**：整条链路 = shutdown（最长 3s 等待收尾）+ sleep 500ms
+/// + spawn + readiness_loop（最长 READY_TIMEOUT_SECS = 20s），同步返回会把 Tauri
+/// IPC 线程阻塞二十多秒，前端 await 期间表现为「点了没反应」。进度改由
+/// `engine_state` 的 ready / last_error 反馈（前端本来就在轮询它）。
 #[tauri::command]
 fn restart_engine(
     app: tauri::AppHandle,
     manager: tauri::State<'_, Arc<EngineManager>>,
 ) -> Result<(), String> {
-    manager.shutdown();
-    std::thread::sleep(Duration::from_millis(500));
-    manager.spawn(&app)?;
-    manager.readiness_loop();
+    let mgr = Arc::clone(&manager);
+    std::thread::spawn(move || {
+        // 置位后 watchdog 跳过自身重启逻辑，避免两条路径同时拉起引擎抢 5801
+        mgr.restart_in_flight.store(true, Ordering::SeqCst);
+        let _in_flight = ResetInFlightOnDrop(&mgr.restart_in_flight);
+        mgr.shutdown();
+        std::thread::sleep(Duration::from_millis(500));
+        match mgr.spawn(&app) {
+            Ok(_) => mgr.readiness_loop(),
+            // 拉起失败不能静默：否则前端只看到 ready 一直 false 而不知为何
+            Err(e) => mgr.set_last_error(&e),
+        }
+    });
     Ok(())
 }
 
@@ -1345,13 +1510,19 @@ pub fn run() {
             update_tray_proxy_status
         ])
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // 日志插件 release 也注册。此前只在 debug 注册，导致壳层所有
+            // log::warn!/log::error!（自启自愈失败、更新后重启失败、系统代理地址解析失败）
+            // 在生产环境全部丢失 —— 用户遇到问题没有任何可查线索。
+            // 默认 target 是 stdout + 应用日志目录（全本地、不出网，不构成遥测）；
+            // 显式设 max_file_size + KeepSome：插件默认只有 40KB 且 KeepOne，
+            // 关键诊断信息会被立刻轮转掉。
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .max_file_size(2 * 1024 * 1024)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(2))
+                    .build(),
+            )?;
             let handle = app.handle().clone();
             let _ = APP_HANDLE.set(handle.clone());
 
@@ -1410,6 +1581,19 @@ pub fn run() {
                     .icon(app.default_window_icon().unwrap().clone())
                     .menu(&menu)
                     .show_menu_on_left_click(false)
+                    .on_tray_icon_event(|tray, event| {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: tauri::tray::MouseButton::Left,
+                            button_state: tauri::tray::MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(w) = app.get_webview_window("main") {
+                                show_and_focus(&w);
+                            }
+                        }
+                    })
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => {
                             if let Some(w) = app.get_webview_window("main") {
@@ -1586,5 +1770,197 @@ mod autostart_tests {
         };
         assert!(!second_check);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// 崩溃重启限频的回归测试（审计 P0）。
+///
+/// 修之前的故障链：进程退出 → watchdog 先把 `*child = None` → 再判限频 → 命中则
+/// `continue`。下一轮 `child` 已是 `None`，`exited` 与 `hung` 都是 false，于是永远
+/// 停在 `!exited && !hung` 的 continue 上：**引擎崩溃后自愈永久失效**，而错误文案
+/// 还写着「1 分钟后重试」。这些用例守死「限频必须给出一个未来的可重试时刻」。
+#[cfg(test)]
+mod watchdog_backoff_tests {
+    use super::restart_backoff_until;
+
+    const T: u64 = 1_700_000_000;
+
+    #[test]
+    fn allows_restart_when_window_has_room() {
+        assert_eq!(restart_backoff_until(&[], T), None);
+        assert_eq!(restart_backoff_until(&[T - 10], T), None);
+        assert_eq!(restart_backoff_until(&[T - 10, T - 20], T), None);
+    }
+
+    #[test]
+    fn blocks_at_limit_and_reports_retry_time() {
+        // 1 分钟内已重启 3 次（上限）：最早一次 T-30 滑出窗口是在 T+30
+        let ready = restart_backoff_until(&[T - 30, T - 20, T - 10], T);
+        assert_eq!(ready, Some(T + 30));
+    }
+
+    #[test]
+    fn ready_at_is_always_in_the_future() {
+        // 时刻表刚好卡在窗口边界时也必须给出未来时刻，
+        // 否则 pending_restart 永远不到点 = 又变回「永不重试」。
+        for offsets in [[59u64, 40, 10], [59, 58, 57], [59, 59, 59], [1, 2, 3]] {
+            let restarts: Vec<u64> = offsets.iter().map(|o| T - o).collect();
+            let ready = restart_backoff_until(&restarts, T)
+                .unwrap_or_else(|| panic!("{offsets:?} 应当被限频"));
+            assert!(ready > T, "ready_at 必须是未来时刻: {ready} vs {T}");
+        }
+        // 三次都恰好满 60s（边界上不算窗口内）→ 视为可重启，不再无限退避
+        assert_eq!(restart_backoff_until(&[T - 60, T - 60, T - 60], T), None);
+    }
+
+    #[test]
+    fn window_slides_out_and_restart_resumes() {
+        let restarts = [T - 30, T - 20, T - 10];
+        assert!(restart_backoff_until(&restarts, T).is_some());
+        // 30 秒后最早那次满 60s 滑出窗口 → 重新允许重启（「1 分钟后重试」成立）
+        assert_eq!(restart_backoff_until(&restarts, T + 30), None);
+        // 全部滑出后依然允许
+        assert_eq!(restart_backoff_until(&restarts, T + 61), None);
+    }
+}
+
+#[cfg(test)]
+mod engine_log_rotation_tests {
+    use super::{rotate_engine_log, ENGINE_LOG_MAX_BYTES};
+
+    /// 每个用例一个独立目录（不用 tempfile：本项目没有这个 dev-dependency）。
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "maskit-log-rotate-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn keeps_small_log_as_is() {
+        let dir = scratch("small");
+        let log = dir.join("engine-stdout.log");
+        std::fs::write(&log, b"hello").unwrap();
+        rotate_engine_log(&log);
+        assert!(log.exists(), "没超阈值不该动文件");
+        assert!(!dir.join("engine-stdout.log.1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotates_oversized_log_and_keeps_exactly_one_history() {
+        let dir = scratch("big");
+        let log = dir.join("engine-stdout.log");
+        let rotated = dir.join("engine-stdout.log.1");
+        std::fs::write(&rotated, b"old").unwrap();
+        std::fs::write(&log, vec![b'x'; ENGINE_LOG_MAX_BYTES as usize + 1]).unwrap();
+        rotate_engine_log(&log);
+        assert!(!log.exists(), "轮转后原文件必须被移走");
+        assert_eq!(
+            std::fs::metadata(&rotated).unwrap().len(),
+            ENGINE_LOG_MAX_BYTES + 1,
+            "旧的 .1 必须被本次覆盖，而不是保留更旧的内容"
+        );
+        // 只留一份历史，不能越轮越多
+        assert!(!dir.join("engine-stdout.log.2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_not_an_error() {
+        let dir = scratch("missing");
+        rotate_engine_log(&dir.join("nope.log")); // 首次启动时日志还不存在
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod panel_alive_tests {
+    use super::{AtomicBool, EngineManager, Ordering, ResetInFlightOnDrop};
+    use std::net::TcpListener;
+
+    /// 占住一个空闲端口并保持监听：TCP 连得上，但永不 accept、永不回应 HTTP
+    /// —— 正是「端口被别的进程占用」与「Flask 假死」的共同现场。
+    fn hold_port() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 临时端口");
+        let port = listener.local_addr().expect("local_addr").port();
+        (listener, port)
+    }
+
+    /// 核心回归：端口在监听但无 HTTP 响应时，**不能**判定为就绪。
+    ///
+    /// 旧实现只做 TCP connect，本用例里 `port_ready_on` 会返回 true，于是
+    /// 壳层把 ready 置为 true、托盘显示「引擎已就绪」，而前端所有 /api/* 请求超时。
+    #[test]
+    fn listening_but_silent_port_is_not_alive() {
+        let (_listener, port) = hold_port();
+        assert!(
+            EngineManager::port_ready_on(port),
+            "前置条件：端口在监听，TCP connect 必须成功（这正是旧实现误判就绪的原因）"
+        );
+        assert!(
+            !EngineManager::panel_alive_on(port),
+            "端口在监听但 /healthz 无响应时，panel_alive 必须为 false"
+        );
+    }
+
+    #[test]
+    fn free_port_is_not_alive() {
+        let (listener, port) = hold_port();
+        drop(listener);
+        assert!(!EngineManager::port_ready_on(port));
+        assert!(!EngineManager::panel_alive_on(port));
+    }
+
+    #[test]
+    fn reset_in_flight_guard_clears_flag_on_drop() {
+        let flag = AtomicBool::new(true);
+        {
+            let _guard = ResetInFlightOnDrop(&flag);
+            assert!(flag.load(Ordering::SeqCst), "guard 存活期间标志位应保持 true");
+        }
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "guard 释放后必须复位 restart_in_flight，否则 watchdog 会永久 continue、自愈能力静默失效"
+        );
+    }
+}
+
+#[cfg(test)]
+mod engine_port_tests {
+    use super::resolve_engine_port;
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn port(pairs: &[(&str, &str)]) -> u16 {
+        let map = env(pairs);
+        resolve_engine_port(|key| map.get(key).cloned())
+    }
+
+    /// 回归：引擎侧改端口的变量是 `LLM_SHIELD_PANEL_PORT`，壳必须认同一个名字。
+    /// 曾经壳只认 `SHIELD_ENGINE_PORT`，用户改端口后引擎换端口、壳仍探 5801。
+    #[test]
+    fn panel_port_variable_wins_over_legacy_alias() {
+        assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "6001"), ("SHIELD_ENGINE_PORT", "6002")]), 6001);
+    }
+
+    #[test]
+    fn legacy_alias_still_works_alone() {
+        assert_eq!(port(&[("SHIELD_ENGINE_PORT", "6002")]), 6002);
+    }
+
+    #[test]
+    fn defaults_to_5801_when_unset_or_unparsable() {
+        assert_eq!(port(&[]), 5801);
+        // 非法值必须落到下一个来源，而不是 panic 或当成 0
+        assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "not-a-port"), ("SHIELD_ENGINE_PORT", "6002")]), 6002);
+        assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "70000")]), 5801, "越界端口不能被接受");
+        assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "  6003  ")]), 6003, "两端空白应被容忍");
     }
 }

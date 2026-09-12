@@ -13,10 +13,12 @@ import queue
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from contextlib import closing
+from credential_labels import CREDENTIAL_LABELS
 
 
 ROOT = Path(__file__).parent.resolve()
@@ -30,6 +32,8 @@ EVENT_QUEUE_MAX = 5000
 _event_queue = queue.Queue(maxsize=EVENT_QUEUE_MAX)
 _writer_lock = threading.Lock()
 _writer_started = False
+# 已完成建表的 DB 路径（False = 尚未初始化）。存路径而不是布尔量：中途换
+# DB_PATH（测试、或把数据目录指到别处）必须重新建表，否则读路径会 no such table。
 _db_ready = False
 _source_lock = threading.Lock()
 _tcp_cache = {"ts": 0.0, "ports": {}}
@@ -43,8 +47,15 @@ def _connect(schema=False):
     每条事件开新连接 → 每条日志 9 条多余 SQL，高流量下 writer 队列积压。
     """
     conn = sqlite3.connect(DB_PATH, timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        # PRAGMA journal_mode 会真的去读文件头，是「文件不是数据库」这类损坏的
+        # 报错点。这里补一层 close：_connect 抛异常时调用方拿不到 conn，
+        # 不关就会泄漏到 GC 才释放。
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        conn.close()
+        raise
     if not schema:
         return conn
     conn.execute(
@@ -70,6 +81,16 @@ def _connect(schema=False):
     # 单列 ts 索引在 type 过滤后仍需回表扫当日全部事件；复合索引让过滤直接
     # 命中索引段，避免逐行读 payload（审计性能项 P1-1）。
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts)")
+    # 复合索引 (type, id)：fetch_events 的过滤/排序形态是
+    #   WHERE id > ? AND type = ? ORDER BY id [ASC|DESC] LIMIT n
+    # 即「按 id 游标增量取某一类型」。`id` 是 rowid，落在 (type, id) 的第二列上，
+    # 计划器可直接把它当范围约束用（type=? AND id>?），无需 INDEXED BY 或 ANALYZE。
+    # 只有 (type, ts) 时该查询会退化成「扫完整个类型段 → TEMP B-TREE 排序」：
+    # 100 万行实测（首屏/增量 × 升降序四场景）
+    #   292.4 / 40.5 / 29.1 / 24.3 ms  →  6.3 / 5.4 / 5.7 / 6.3 ms（5~46 倍）
+    # 注意保留 (type, ts)：按时间范围查（stats / fetch_restore_items）时它才是最优，
+    # 两个索引各管一种形态，不要互相替换。
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(type, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_sid ON events(sid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_count ON events(count)")
     conn.execute(
@@ -366,11 +387,53 @@ def init_db():
         conn.commit()
 
 
+def _quarantine_corrupt_db(reason):
+    """把损坏的事件库挪到一边，返回新路径（失败返回 ""）。调用方随后重建空库。
+
+    只处理**真正的损坏**（`sqlite3.DatabaseError` 且非 `OperationalError`——后者是
+    锁竞争 / 路径不可写，重试或改权限即可，挪文件只会白丢数据）。
+
+    旧文件一律保留为 `<name>.corrupt-<时间戳>`，绝不删除：事件库是本地唯一副本，
+    宁可占盘也不能替用户做「删掉」的决定。用户还能拿它去 sqlite3 里抢救数据。
+    """
+    try:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        base = DB_PATH.with_name(f"{DB_PATH.name}.corrupt-{stamp}")
+        for suffix in ("", "-wal", "-shm"):
+            src = DB_PATH.with_name(DB_PATH.name + suffix)
+            if not src.exists():
+                continue
+            dst = base if not suffix else base.with_name(base.name + suffix)
+            src.replace(dst)
+        return str(base)
+    except Exception:
+        return ""
+
+
 def _ensure_db():
+    """确保 DB_PATH 指向的库已建好 schema（**每个路径只做一次** DDL）。
+
+    以前读路径直接调 init_db()，每次查询都要跑十几条 CREATE TABLE/INDEX IF NOT
+    EXISTS；而且旧实现是布尔量 _db_ready，中途换 DB_PATH（测试、以及把数据目录
+    指到别处）会跳过建表。这里改成「记住已初始化的路径」，换路径自动重建。
+    """
     global _db_ready
-    if not _db_ready:
+    if _db_ready == str(DB_PATH):
+        return
+    try:
         init_db()
-        _db_ready = True
+    except sqlite3.OperationalError:
+        raise  # 锁竞争 / 路径不可写：交给调用方的降级逻辑，绝不能动用户的文件
+    except sqlite3.DatabaseError as exc:
+        # 文件不是数据库 / 镜像损坏。不处理的话面板每个统计接口都 500、写线程
+        # 永久降级，用户没有任何自救路径。挪走坏文件重建空库，功能至少恢复。
+        moved = _quarantine_corrupt_db(str(exc))
+        sys.stderr.write(
+            f"[shield-event-store] 事件库损坏（{exc}），已移到 {moved or '(移动失败，未删除原文件)'} "
+            f"并重建空库\n"
+        )
+        init_db()
+    _db_ready = str(DB_PATH)
 
 
 def _console_encodings():
@@ -736,7 +799,7 @@ def _audit_visibility_filter():
 
 def fetch_audit_events(since=0, limit=500, severity_floor=None, signal_filter=None):
     """读取审计事件。since=id（返回 id>since 的）。severity_floor=LOW/MEDIUM/HIGH/CRITICAL。"""
-    init_db()
+    _ensure_db()
     since = int(since or 0)
     limit = max(1, min(int(limit or 500), 1000))
     visibility_clauses, visibility_params = _audit_visibility_filter()
@@ -786,7 +849,7 @@ def fetch_audit_events(since=0, limit=500, severity_floor=None, signal_filter=No
 
 
 def prune_audit_events(now=None, retention_days=RETENTION_DAYS):
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     # 与 prune_events 同一套语义：<=0 = 永久保留，不是「留一天」
     if int(retention_days) <= 0:
@@ -806,7 +869,7 @@ _audit_clear_cutoff = 0.0
 
 def clear_audit_events():
     global _audit_clear_cutoff
-    init_db()
+    _ensure_db()
     _audit_clear_cutoff = time.time()
     # 排空未写审计队列
     drained = 0
@@ -1044,7 +1107,7 @@ def fetch_event_by_id(event_id):
     不能用 fetch_events(since=id-1, limit=1) 代替：那是 id > since 且
     ORDER BY id DESC，会返回集合里最大的那条而非目标 id。
     """
-    init_db()
+    _ensure_db()
     try:
         eid = int(event_id)
     except Exception:
@@ -1059,7 +1122,11 @@ def fetch_event_by_id(event_id):
     return _row_to_event(row) if row else None
 
 
-_RESTORE_CREDENTIAL_LABELS = {"API_KEY", "TOKEN", "SECRET", "ACCESS_KEY", "JWT"}
+# 凭据标签：唯一定义源在 credential_labels.py（panel / transparent / 前端共用）。
+# 以前这里自己写了一份 5 元素的集合，少了 CONNSTR 与 PRIVATE_KEY —— 结果是
+# 「凭据原文永不落库」在**读路径**上失效：修复前写入的历史 RESTORE payload 里
+# CONNSTR 项带 original（连接串密码原文），fetch_restore_items 会把它当普通 PII 返回。
+_RESTORE_CREDENTIAL_LABELS = CREDENTIAL_LABELS
 
 # 占位符格式 {{LABEL_后缀}}：命中视为不可展示原文（RESTORE 明细的 original 可能是
 # 占位符本身——客户端跨请求复述时把上轮 token 当原文再次脱敏），弹窗回退打码 preview。
@@ -1093,7 +1160,7 @@ def fetch_restore_items(now=None, limit=200):
        token 当原文再次脱敏），弹窗展示占位符无意义且泄露映射格式，回退打码
        preview。
     """
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     day_start = _day_start(now)
     day_end = _day_end(now)
@@ -1166,12 +1233,18 @@ def fetch_restore_items(now=None, limit=200):
 
     items = list(aggregates.values())
     items.sort(key=lambda it: (-int(it.get("events") or 0), str(it.get("label") or ""), str(it.get("original") or it.get("preview") or "")))
+    # limit 必须真正生效：以前算出来却从未使用，而 docstring 写着「limit 只约束聚合
+    # 结果的条数」——实现与注释不符，当日明细多时响应体无上限（审计 P1）。
+    total_items = len(items)
+    items = items[:limit]
     return {
         "ok": True,
         "day_start": day_start,
         "total_events": total_events,
         "restored_count": restored_count,
         "item_count": len(items),
+        "total_items": total_items,
+        "truncated": total_items > len(items),
         "items": items,
     }
 
@@ -1184,7 +1257,8 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
     ascending=True 按游标之后最早的记录分页，避免增量积压时跳过中间记录。
     默认仍取最新记录，保持首次加载、导出和历史调用的语义。
     sensitive_only 隐藏 PASS/SKIP；query 搜索主机/路径/方法/状态/类型等结构化列。
-    event_type 按事件类型精确过滤（下推到 SQL，命中 idx_events_type_ts）。
+    event_type 按事件类型精确过滤（下推到 SQL，命中 idx_events_type_id：
+        本查询按 id 游标分页 + ORDER BY id，`(type, id)` 才是匹配的复合索引）。
         它与 sensitive_only 互斥且优先级更高：显式指定类型时以类型为准，否则
         「只看 SKIP」这类查询会被 sensitive_only 的 NOT IN ('SKIP','PASS') 判成空集。
     fulltext=True 时才额外扫描 payload 大字段（LIKE 无索引，逐行读 payload 代价高，
@@ -1195,7 +1269,7 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
         被静默截断（接口层写着允许 5000，这里却砍到 1000，调用方完全无从察觉）。
         所以放出来让调用方按场景决定，并由调用方负责告知截断。
     """
-    init_db()
+    _ensure_db()
     since = int(since or 0)
     limit = max(1, min(int(limit or 500), int(max_limit or 1000)))
     where = ["id > ?"]
@@ -1231,7 +1305,7 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
 
 
 def prune_events(now=None, retention_days=RETENTION_DAYS):
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     # retention_days <= 0 = 永久保留（付费版「日志不限期」）。
     # 曾用 max(1, ...) 把 0 当成 1 天，等于把「不限期」实现成「只留一天」——
@@ -1269,7 +1343,7 @@ def clear_events():
     实现只删 daily_words。注释和代码不一致时，改注释别改代码（2026-08-17 修正）。
     """
     global _clear_cutoff
-    init_db()
+    _ensure_db()
     _clear_cutoff = time.time()
     # 排空未写队列：这些事件发生在清空之前，直接丢弃
     drained = 0
@@ -1319,7 +1393,7 @@ def today_stats(now=None):
     O(当日行数) 而非全量扫当日 payload——审计性能项：2 万事件时从 ~158ms 降到亚毫秒）。
     旧库（升级前写入的事件无摘要）自动回退全量扫描，口径与摘要一致。
     """
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     day_start = _day_start(now)
     day = time.strftime("%Y-%m-%d", time.localtime(now))
@@ -1403,7 +1477,7 @@ def stats_range(days=1, now=None):
     daily_tokens 摘要行求和。过 0 点后「今天」清零是预期行为，用户切「近7天」
     即可看到昨天的数据。
     """
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     days = max(1, min(int(days), 90))  # 上限 90 天（保留期一般 7-30 天）
     day_start = _day_start(now)
@@ -1500,7 +1574,7 @@ def label_summary(days=7):
 
     返回 {label: 次数}，按次数降序。
     """
-    init_db()
+    _ensure_db()
     days = max(1, min(int(days), 90))
     since_day = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
     with closing(_connect()) as conn:
@@ -1522,7 +1596,7 @@ def stats_history(days=30, granularity="day"):
     返回 [{ts, label, day/hour, requests, mask_events, restored, alerts, tokens_prompt, tokens_completion}]
     按时间升序，适合直接渲染折线图/柱状图。
     """
-    init_db()
+    _ensure_db()
     now = time.time()
     days = max(1, min(int(days), 90))
     result = []
@@ -1533,15 +1607,19 @@ def stats_history(days=30, granularity="day"):
         hours = min(days, 72)  # 小时粒度上限 72 小时（3 天）
         since = now - hours * 3600
         with closing(_connect()) as conn:
+            # 分桶必须 CAST 成整数再乘回去。ts 是 REAL（见 events 表定义），
+            # SQLite 的 REAL/INTEGER 结果恒为 REAL，`(ts / 3600) * 3600` 精确等于 ts
+            # 本身 —— GROUP BY 退化成「每个事件一个桶」，小时图实际是坏的
+            # （实测 3 个同小时事件 → 3 个桶；CAST 后 → 1 个桶）。
             rows = conn.execute(
-                """SELECT (ts / 3600) * 3600 AS hour_bucket, type, COUNT(*),
+                """SELECT CAST(ts / 3600 AS INTEGER) * 3600 AS hour_bucket, type, COUNT(*),
                           COALESCE(SUM(count), 0), COALESCE(SUM(restored), 0)
                    FROM events WHERE ts >= ? GROUP BY hour_bucket, type""",
                 (since,),
             ).fetchall()
             # 审计信号事件按小时聚合
             audit_hours = conn.execute(
-                "SELECT (ts / 3600) * 3600, COUNT(*) FROM audit_events WHERE ts >= ?"
+                "SELECT CAST(ts / 3600 AS INTEGER) * 3600, COUNT(*) FROM audit_events WHERE ts >= ?"
                 + audit_visibility_sql + " GROUP BY 1",
                 (since, *audit_visibility_params),
             ).fetchall()
@@ -1804,7 +1882,7 @@ def _today_stats_legacy(now=None, day_start=None):
 
 
 def import_legacy_jsonl_once():
-    init_db()
+    _ensure_db()
     if not LEGACY_JSONL_PATH.exists():
         return {"ok": True, "imported": 0}
     with closing(_connect()) as conn:
@@ -1843,7 +1921,7 @@ def stats_models(days=7, now=None):
 
     返回 [{model, requests, prompt, completion}]，按 requests 降序。
     """
-    init_db()
+    _ensure_db()
     now = time.time() if now is None else float(now)
     days = max(1, min(int(days), 90))
     # 按本地自然日列出窗口中的日期，避免 days=1 使用 now-86400 的日期

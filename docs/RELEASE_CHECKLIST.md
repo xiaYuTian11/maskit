@@ -5,12 +5,14 @@
 ## 代码与依赖
 
 - [ ] 工作区没有运行时文件、诊断包、事件库、`.env` 或凭据。
-- [ ] `python -m py_compile engine/*.py`。
-- [ ] `python -m unittest discover -s tests`。
-- [ ] `python tests/smoke_stream.py` 与 `python tests/smoke_egress.py`。
-- [ ] `cd frontend; npm ci; npm run build; npm run lint; node ../scripts/check-i18n.mjs`。
-- [ ] `python scripts/check-version.py`，四处版本号一致。
-- [ ] 修改 `src-tauri/` 时再执行 `cargo check` 与 `cargo test --lib`。
+- [ ] `python scripts/verify-all.py` 全绿（13 项，本地与 CI 同一份清单；分组见 AGENTS §4）。
+      `build.ps1` / `release.ps1` 内部已调用它，无需手工重跑，但发版前要确认输出里没有
+      `verify-all: FAIL`。
+- [ ] `python scripts/check-version.py`，**7 处**版本号一致（`panel.py` / `tauri.conf.json` /
+      `Cargo.toml` / `package.json` 四个主字段 + `Cargo.lock` / `package-lock.json` /
+      `package-lock` 根字段）。
+- [ ] 改动 `.github/workflows` 时额外确认 `python scripts/check-workflows.py` 通过
+      （含 `verify-all.py` ↔ `ci.yml` 的门禁漂移比对）。
 
 ## Docker
 
@@ -39,8 +41,8 @@
 
 ## GitHub 发布设置
 
-- [ ] `master` 分支保护仍要求 `python`、`frontend`、`rust`、`version` 四个 check、PR 和 Code Owner 审批。
-- [ ] tag 使用 `vMAJOR.MINOR.PATCH`，Release 草稿由工作流创建后人工核对说明和资产。
+- [ ] `master` 分支保护仍要求 `python`、`frontend`、`rust`、`rust-macos`、`version` 五个 check、PR 和 Code Owner 审批（`rust-macos` 是 0.2.8 新增，需手工加到 Required status checks，否则它只跑不拦）。
+- [ ] tag 使用 `vMAJOR.MINOR.PATCH`；工作流在**签名完整时自动转正** Release，签名缺失时保持草稿（需修好签名 secret 并手动发布）。发布后核对说明与资产。
 - [ ] Secret scanning、Push protection、Dependabot alerts 和私密漏洞报告已开启。
 - [ ] Release notes 明确列出支持平台、已知限制和升级/回滚方式。
 - [ ] GitHub Secret Scanning 无未处理告警；若为测试样例误报，先改成运行时构造并在 GitHub 标记误报/已撤销。

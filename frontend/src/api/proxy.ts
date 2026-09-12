@@ -9,11 +9,11 @@ export function getStatus(): Promise<ProxyStatus> {
 }
 
 export function startProxy(): Promise<{ ok: boolean; message?: string; error?: string }> {
-  return shieldFetch('/api/proxy/start', { method: 'POST' })
+  return shieldFetch('/api/proxy/start', { method: 'POST', timeoutMs: 70000 })
 }
 
 export function stopProxy(): Promise<{ ok: boolean; error?: string }> {
-  return shieldFetch('/api/proxy/stop', { method: 'POST' })
+  return shieldFetch('/api/proxy/stop', { method: 'POST', timeoutMs: 30000 })
 }
 
 export function dismissAutoRecover(): Promise<{ ok: boolean }> {

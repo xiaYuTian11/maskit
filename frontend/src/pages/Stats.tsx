@@ -171,10 +171,10 @@ export default function StatsPage() {
       </div>
 
       {/* 模型使用排行：哪个模型用得多 + 费用估算 */}
-      <ModelRanking />
+      <ModelRanking hidden={hidden} />
 
       {/* 排行榜：拦得最多的词 + 类型分布 */}
-      <Leaderboards days={days} />
+      <Leaderboards days={days} granularity={granularity} hidden={hidden} />
     </div>
   )
 }
@@ -185,18 +185,18 @@ export default function StatsPage() {
  * 数据源 /api/stats/models（daily_models 摘要表）。费用 = 内置价格表 + 用户自配
  *（设置-高级选项 model_prices），未收录模型显示「{t('stats.unpriced')}」，不占费用合计。
  */
-function ModelRanking() {
+function ModelRanking({ hidden }: { hidden: boolean }) {
   const { t, tf } = useI18n()
   const [range, setRange] = useState<'7' | '30'>('7')
   const { data } = useQuery({
     queryKey: ['statsModels', range],
     queryFn: () => getStatsModels(Number(range)),
-    refetchInterval: 60000,
+    refetchInterval: hidden ? false : 60000,
   })
   const { data: priceSync } = useQuery({
     queryKey: ['priceSync'],
     queryFn: getPriceSyncStatus,
-    refetchInterval: 60000,
+    refetchInterval: hidden ? false : 60000,
   })
   const models = data?.models ?? []
   const maxReq = Math.max(1, ...models.map((m) => m.requests))
@@ -333,13 +333,18 @@ function ModelRanking() {
  * 不扫全量事件）。词是否为明文由高级设置的「敏感词统计记录明文」决定：
  * 关掉后这里显示的是打码形态，属预期，不做特殊提示以外的处理。
  */
-function Leaderboards({ days }: { days: number }) {
+function Leaderboards({ days, granularity, hidden }: { days: number; granularity: Granularity; hidden: boolean }) {
   const { t } = useI18n()
-  const range = days <= 1 ? '1d' : `${days}d`
+  // 排行榜的数据源是 daily_words（只有按天摘要，**没有小时表**），所以窗口只能是「天」：
+  // 小时粒度下拿不到小时级词表，只能给「今日」，但必须如实标注。旧实现把小时选择
+  // 直接拼成 '24d' / '72d' 发给后端，而后端只认 7d / 30d / 纯整数，`int('24d')` 抛
+  // ValueError 后静默回落 today_stats() —— 数据是今日、标签却写着 24d/72h。
+  const dayWindow = granularity === 'day' ? days : 1
+  const range = dayWindow <= 1 ? 'today' : String(dayWindow)
   const { data } = useQuery({
     queryKey: ['statsLeaderboard', range],
     queryFn: () => getTodayStats(range),
-    refetchInterval: 60000,
+    refetchInterval: hidden ? false : 60000,
   })
   const [showPlain, setShowPlain] = useState(false)
   const [viewWord, setViewWord] = useState<RankRow | null>(null)
@@ -358,7 +363,7 @@ function Leaderboards({ days }: { days: number }) {
       <RankCard
         icon={Trophy}
         title={t('stats.wordRanking')}
-        hint={`${t('stats.wordRankingHint')} · ${days}d`}
+        hint={`${t('stats.wordRankingHint')} · ${dayWindow}d`}
         rows={words.map((w) => ({
           key: `${w.label}:${w.word}`,
           name: w.word,
@@ -375,7 +380,7 @@ function Leaderboards({ days }: { days: number }) {
       <RankCard
         icon={Tags}
         title={t('stats.labelDist')}
-        hint={`${t('stats.labelDistHint')} · ${days}d`}
+        hint={`${t('stats.labelDistHint')} · ${dayWindow}d`}
         rows={labels.map((l) => ({ key: l.label, name: l.label, count: l.count }))}
         max={labelMax}
         color="#8b5cf6"
@@ -393,11 +398,11 @@ function Leaderboards({ days }: { days: number }) {
             <div>
               <div className="mb-1 text-xs font-semibold text-muted-foreground">{t('stats.original')}</div>
               <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-3 font-mono text-xs leading-relaxed">
-                {viewWord?.name}
+                {viewWord?.cred ? maskWord(viewWord.name) : viewWord?.name}
               </pre>
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              {t('stats.count')}：<b className="font-mono tabular-nums text-foreground">{viewWord?.count?.toLocaleString()}</b>
+              {t('stats.count')}: <b className="font-mono tabular-nums text-foreground">{viewWord?.count?.toLocaleString()}</b>
               {viewWord?.cred && (
                 <span className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"><LockKeyhole className="h-3 w-3" />{t('stats.credLocked')}</span>
               )}
@@ -483,14 +488,20 @@ function RankCard({
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
                     {onView ? (
-                      <button
-                        type="button"
-                        className="truncate font-mono text-[12px] hover:underline"
-                        title={r.name}
-                        onClick={() => onView(r)}
-                      >
-                        {display}
-                      </button>
+                      r.cred ? (
+                        <span className="truncate font-mono text-[12px] text-muted-foreground" title={maskWord(r.name)}>
+                          {maskWord(r.name)}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="truncate font-mono text-[12px] hover:underline"
+                          title={r.name}
+                          onClick={() => onView(r)}
+                        >
+                          {display}
+                        </button>
+                      )
                     ) : (
                       <span className="truncate font-mono text-[12px] font-medium text-foreground" title={r.name}>
                         {display}

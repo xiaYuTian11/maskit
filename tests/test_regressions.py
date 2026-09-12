@@ -346,6 +346,37 @@ class CredentialRedactionTests(unittest.TestCase):
         self.assertNotIn("sk-1234567890abcdefghijklmnopqrst", restore.get("dialog") or "")
         self.assertNotIn("sk-1234567890abcdefghijklmnopqrst", restore.get("resp_preview") or "")
 
+    def test_restore_scrubs_cross_session_restored_credential_plaintext_from_dialog(self):
+        """跨请求经 _RECENT_REV 还原的历史凭据，若模型复述了凭据明文，也必须在 dialog/resp_preview 中被精确清洗。"""
+        # 请求 1：脱敏连接串密码并签发占位符
+        connstr = "postgres://usr:Zq9xLm2pTv8w@db.internal:5432/prod"
+        f1 = self._flow("api.openai.com", "/v1/chat/completions",
+                        {"messages": [{"role": "user", "content": "connect " + connstr}]})
+        tr.request(f1)
+        m1 = json.loads(f1.request.content)["messages"][0]["content"]
+        token_match = re.search(r"\{\{CONNSTR_[A-Za-z0-9]+\}\}", m1)
+        self.assertIsNotNone(token_match, "应成功提取连接串占位符")
+        tok = token_match.group(0)
+
+        # 请求 2：新会话未传任何凭据，但模型回答带上了请求 1 的占位符，且复述了密码明文
+        def run_f2():
+            f2 = self._flow("api.openai.com", "/v1/chat/completions",
+                            {"messages": [{"role": "user", "content": "hello"}]})
+            tr.request(f2)
+            f2.response = SimpleNamespace(
+                headers={"content-type": "application/json"},
+                status_code=200,
+                content=json.dumps({"choices": [{"message": {"content": f"配置完成: {tok} 密码为 Zq9xLm2pTv8w"}}]},
+                                   ensure_ascii=False).encode("utf-8"),
+            )
+            tr.response(f2)
+
+        captured = self._capture(run_f2)
+        restore2 = [kw for typ, kw in captured if typ == "RESTORE"][0]
+        # dialog 与 resp_preview 必须已被清洗掉明文密码
+        self.assertNotIn(connstr, restore2.get("dialog") or "")
+        self.assertNotIn(connstr, restore2.get("resp_preview") or "")
+
     def test_non_credential_pii_keeps_original_for_detail_dialog(self):
         """非凭据 PII 仍保留 original（项目约定：明文只进详情弹窗）。"""
         captured = self._capture(lambda: tr.request(self._flow(
@@ -829,6 +860,54 @@ class ResponseScanWithoutMasksTests(unittest.TestCase):
         warns = [kw for typ, kw in captured if typ == "SCAN_WARN"]
         self.assertTrue(warns, "无请求脱敏项也应扫描模型回复（曾提前 return 漏检）")
         self.assertTrue(any(it.get("label") == "PHONE" for it in warns[0]["items"]))
+
+    def test_scan_body_length_cap_and_rule_markers_precheck(self):
+        """P2-5：超长响应只扫前段（_SCAN_BODY_MAX），特征预检（_rule_may_hit）不漏有效命中。"""
+        old_scan = tr.RESPONSE_SCAN
+        old_emit = tr._emit
+        captured = []
+        try:
+            tr.RESPONSE_SCAN = True
+            tr._emit = lambda typ, **kw: captured.append((typ, kw))
+            sid = "scan-cap-test"
+            tr._new_session(sid)
+            pem = ("-----BEGIN " + "RSA PRIVATE KEY-----\n12345678901234567890\n-----END " + "RSA PRIVATE KEY-----")
+            # 1. 正常长度含命中（含 marker 的 PRIVATE_KEY）
+            flow = SimpleNamespace(
+                request=SimpleNamespace(host="api.openai.com", method="POST", path="/v1/chat/completions"),
+                response=SimpleNamespace(
+                    headers={"content-type": "application/json"},
+                    content=json.dumps({"choices": [{"message": {"content": pem}}]}).encode("utf-8"),
+                ),
+                metadata={"session_id": sid},
+            )
+            with mock.patch.dict(tr.BUILTIN_RULES, {"PRIVATE_KEY": True}):
+                tr._scan_response(flow, sid, "api.openai.com", "POST", "/v1/chat/completions", {})
+            warns = [kw for typ, kw in captured if typ == "SCAN_WARN"]
+            self.assertTrue(warns)
+            self.assertTrue(any(it.get("label") == "PRIVATE_KEY" for it in warns[0]["items"]))
+
+            # 2. 超长体量截断：尾部远超 _SCAN_BODY_MAX 的内容不霸占事件循环
+            captured.clear()
+            huge_padding = "x" * 2000
+            # mock 一个较小的 cap 验证截断行为
+            with mock.patch.object(tr, "_SCAN_BODY_MAX", 100), \
+                 mock.patch.dict(tr.BUILTIN_RULES, {"PRIVATE_KEY": True}):
+                flow_huge = SimpleNamespace(
+                    request=SimpleNamespace(host="api.openai.com", method="POST", path="/v1/chat/completions"),
+                    response=SimpleNamespace(
+                        headers={"content-type": "application/json"},
+                        content=(huge_padding + pem).encode("utf-8"),
+                    ),
+                    metadata={"session_id": sid},
+                )
+                tr._scan_response(flow_huge, sid, "api.openai.com", "POST", "/v1/chat/completions", {})
+            # 截断后前 100 字节全是 "x"，PRIVATE_KEY 在尾部被截掉，不应产生报警且不能报错
+            warns_huge = [kw for typ, kw in captured if typ == "SCAN_WARN"]
+            self.assertFalse(warns_huge)
+        finally:
+            tr.RESPONSE_SCAN = old_scan
+            tr._emit = old_emit
 
 
 class ConfigAndApiTests(unittest.TestCase):
@@ -3329,6 +3408,57 @@ class ToolCorrelationIdTests(unittest.TestCase):
                          {"tool_call_id", "tool_use_id", "call_id"})
 
 
+class ObjectKeyMaskingBoundaryTests(unittest.TestCase):
+    """对象**键名**不脱敏是有意保留的边界，这里把它钉成显式契约。
+
+    背景：`{"13800138000": "..."}` 这种「PII 当键名」的载荷不会被脱敏。之所以不修：
+    键名承载协议结构（content/type/role/messages…），而脱敏只按文本特征匹配、无法区分
+    「数据键」与「结构键」——用户加个 "con" 之类的短自定义词就会命中 content，
+    结果是**每个请求**的协议骨架当场崩掉。误伤面大于收益，故保留边界。
+    本用例同时锁住「真正常见的 PII-as-key 场景已被覆盖」：工具参数是 JSON 字符串，
+    走 str 分支整段扫描，键名也在其中。
+    """
+
+    def setUp(self):
+        tr.sessions.clear()
+        tr._RECENT_FWD.clear()
+        tr._RECENT_REV.clear()
+        tr._RECENT_SUFFIX.clear()
+        tr.CUSTOM_WORDS.clear()
+        tr.SENSITIVE_DISABLED = set()
+        tr.SENSITIVE_WORD_DISABLED = {}
+        tr.BUILTIN_RULES = dict(tr.DEFAULT_BUILTIN_RULES)
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+
+    def test_pii_as_object_key_is_a_known_boundary(self):
+        out = tr._mask_tree({"metadata": {"13800138000": "x"}}, "key-boundary-sid", None, None, (), 0)
+        # 现状：键名原样透传（若将来收紧这条边界，此断言会红，提醒同步更新文档与还原侧）
+        self.assertEqual(list(out["metadata"].keys()), ["13800138000"])
+
+    def test_protocol_keys_are_never_rewritten(self):
+        """协议骨架必须逐字保留——这是「不脱敏键名」换来的核心保证。"""
+        tr.CUSTOM_WORDS.update({"con": "TERM", "typ": "TERM", "rol": "TERM"})
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+        out = tr._mask_tree(
+            {"messages": [{"role": "user", "content": "con typ rol"}], "model": "gpt-5"},
+            "key-boundary-sid-2", None, None, (), 0)
+        self.assertEqual(sorted(out.keys()), ["messages", "model"])
+        self.assertEqual(sorted(out["messages"][0].keys()), ["content", "role"])
+
+    def test_tool_arguments_json_string_covers_its_keys(self):
+        """工具参数是 JSON **字符串**：整段扫描，键名同样被脱敏——最常见的
+        PII-as-key 形状其实没漏。"""
+        tr.CUSTOM_WORDS.update({"张三": "PERSON"})
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+        out = tr._mask_tree(
+            {"messages": [{"role": "assistant", "tool_calls": [
+                {"function": {"name": "lookup", "arguments": '{"张三": "备注"}'}}]}]},
+            "key-boundary-sid-3", None, None, (), 0)
+        args = out["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        self.assertNotIn("张三", args)
+        self.assertIn("{{", args)
+
+
 class FailClosedCaptureModeTests(unittest.TestCase):
     """fail-closed 语义不许随 capture_mode 分裂。
 
@@ -3478,9 +3608,162 @@ class LogDetailReadSideScrubTests(unittest.TestCase):
         self.assertEqual(out["seq"], 2)
 
     def test_credential_label_sets_stay_in_sync(self):
-        """panel 复制了一份标签集合（不 import transparent，免得把 mitmproxy 拖进面板进程）。
-        两边漂移会让详情弹窗漏掉某类凭据，这里守死。"""
-        self.assertEqual(panel._CREDENTIAL_LABELS, tr.CREDENTIAL_LABELS)
+        """凭据标签集合必须只有一个定义源，且引擎侧三处与前端两侧口径一致。
+
+        历史上这里是「panel 复制一份、测试守同步」——结果 `event_store` 那份自己写死成
+        5 个标签，少了 CONNSTR / PRIVATE_KEY：读路径（/api/stats/today/restore-items）
+        会把修复前落库的连接串密码与 PEM 私钥当普通 PII 返回。现在引擎三处 import
+        同一个 `credential_labels` 模块，前端两处 import 同一个 TS 模块，本用例同时守
+        「值一致」与「没有第二份字面量」。
+        """
+        import credential_labels as cl
+
+        self.assertEqual(panel._CREDENTIAL_LABELS, cl.CREDENTIAL_LABELS)
+        self.assertEqual(tr.CREDENTIAL_LABELS, cl.CREDENTIAL_LABELS)
+        self.assertEqual(event_store._RESTORE_CREDENTIAL_LABELS, cl.CREDENTIAL_LABELS)
+        # 两类最容易漏的凭据必须在集合内（漏掉 = 原文落库 + 明文展示）
+        self.assertIn("CONNSTR", cl.CREDENTIAL_LABELS)
+        self.assertIn("PRIVATE_KEY", cl.CREDENTIAL_LABELS)
+
+        # 前端：单一定义源 + 两个消费方只做 re-export，不得再出现第二份字面量
+        ts_src = (ROOT / "frontend/src/lib/credential-labels.ts").read_text(encoding="utf-8")
+        block = re.search(r"export const CREDENTIAL_LABELS = \[(.*?)\] as const", ts_src, re.S)
+        self.assertIsNotNone(block, "前端凭据标签数组被改名或删除了")
+        ts_labels = re.findall(r"'([A-Z_]+)'", block.group(1))
+        self.assertEqual(set(ts_labels), set(cl.CREDENTIAL_LABELS))
+        for consumer in ("sensitive-word.ts", "env-import.ts"):
+            text = (ROOT / "frontend/src/lib" / consumer).read_text(encoding="utf-8")
+            self.assertIn("credential-labels", text, f"{consumer} 未从唯一定义源导入")
+            # 不得再自己声明一份数组（引用单个标签做映射是允许的，重新定义集合不允许）
+            self.assertNotIn(
+                "export const CREDENTIAL_LABELS", text,
+                f"{consumer} 又声明了一份凭据标签集合",
+            )
+            self.assertNotIn(
+                "export const CRED_LABELS", text,
+                f"{consumer} 又声明了一份凭据标签集合",
+            )
+
+
+    def test_restore_free_text_scrubs_session_credential_plaintext(self):
+        """模型裸复述凭据值（不含 :// 或 PEM 头）时，RESTORE 的自由文本也不许留明文。
+
+        `_redact_credentials` 只认「凭据形态」：CONNSTR 的规则要求完整
+        `scheme://user:pass@host`，而还原后的回复里往往只有那个密码本身（模型看到的
+        是占位符，它只可能复述值）。引擎本来就知道本会话原文（s["fwd"] 的 key），
+        所以必须再做一次精确串替换，否则 resp_dialog / resp_preview 会把连接串密码
+        原样写进 SQLite（AGENTS 约束 6）。
+        """
+        sid = "cred-restore-scrub"
+        tr._new_session(sid)
+        s = tr.sessions[sid]
+        secret = "s3cr3tP4ssw0rd"
+        tok = "{{CONNSTR_abcdfg}}"
+        s["fwd"][secret] = tok
+        s["rev"][tok] = secret
+        s.setdefault("labels", {})[secret] = "CONNSTR"
+        s["restored_tokens"] = {tok}
+
+        body = json.dumps({"choices": [{"message": {
+            "role": "assistant", "content": f"你的数据库口令是 {secret}，请妥善保管。"}}]}).encode()
+
+        captured = []
+        old_emit = tr._emit
+        try:
+            tr._emit = lambda typ, **kw: captured.append((typ, kw))
+            flow = SimpleNamespace(response=SimpleNamespace(status_code=200, content=body),
+                                   metadata={})
+            tr._emit_restore_summary(flow, sid, "h", "POST", "/p", {}, ok=True)
+        finally:
+            tr._emit = old_emit
+
+        restore = [kw for typ, kw in captured if typ == "RESTORE"]
+        self.assertTrue(restore, "应当发出 RESTORE 事件")
+        blob = json.dumps(restore[0], ensure_ascii=False)
+        self.assertNotIn(secret, blob, "凭据原文出现在 RESTORE 事件里")
+        self.assertIn("[REDACTED]", blob)
+
+        # 非凭据类的原文必须保留（详情弹窗的「脱敏 ↔ 原文对照」靠它）
+        sid2 = "pii-restore-keep"
+        tr._new_session(sid2)
+        s2 = tr.sessions[sid2]
+        s2["fwd"]["张三"] = "{{NAME_abcdfg}}"
+        s2["rev"]["{{NAME_abcdfg}}"] = "张三"
+        s2.setdefault("labels", {})["张三"] = "NAME"
+        s2["restored_tokens"] = {"{{NAME_abcdfg}}"}
+        body2 = json.dumps({"choices": [{"message": {
+            "role": "assistant", "content": "用户是张三。"}}]}).encode()
+        captured.clear()
+        try:
+            tr._emit = lambda typ, **kw: captured.append((typ, kw))
+            flow2 = SimpleNamespace(response=SimpleNamespace(status_code=200, content=body2),
+                                    metadata={})
+            tr._emit_restore_summary(flow2, sid2, "h", "POST", "/p", {}, ok=True)
+        finally:
+            tr._emit = old_emit
+        blob2 = json.dumps([kw for typ, kw in captured if typ == "RESTORE"][0], ensure_ascii=False)
+        self.assertIn("张三", blob2, "非凭据原文不该被清掉")
+
+
+class RegexComplexityTests(unittest.TestCase):
+    """热路径正则不得有超线性项（审计 P1）。
+
+    CONNSTR 的 `\\b[a-z][a-z0-9+.-]*://` 在「大量词起始位置 + 长 `[a-z0-9+.-]`
+    连续段」的文本上是 O(N²)：实测 32KB 要 1.3 秒。它跑在同步的脱敏主路径上，
+    直接阻塞 event loop，而 0.2.7 的 CHANGELOG 曾写「已扫描确认无其它超线性项」——
+    那个结论是假的：`_smoke_data/_rxstress.py` 给 CONNSTR 造的对抗串
+    `"x://" + "a"*n + ":"` 只有 2 个 `\\b` 起点，形不成「N 起点 × O(N) 回溯」的
+    乘积，实测倍率恒 2.00、从不告警。
+
+    这里用**绝对耗时上限**而不是耗时比值：比值在小样本上噪声大。上限 200ms
+    （修复后实测 ~7ms，退化成二次会是 ~1.3s），留足余量又不放过回归。
+    """
+
+    @staticmethod
+    def _adversarial(n):
+        # 语料必须同时含：大量词起始位置（`a-` 交替切出 \\b）+ 特征 "://"
+        return ("a-" * (n // 2)) + "://"
+
+    @staticmethod
+    def _best_ms(rx, text, repeat=3):
+        best = float("inf")
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            rx.search(text)
+            best = min(best, (time.perf_counter() - t0) * 1000)
+        return best
+
+    def test_connstr_scan_is_linear_on_adversarial_text(self):
+        rx = next(rx for rx, label, _g in tr.RULES if label == "CONNSTR")
+        for size in (16384, 32768):
+            best = self._best_ms(rx, self._adversarial(size))
+            self.assertLess(
+                best, 200.0,
+                f"CONNSTR 在 {size // 1024}KB 对抗串上耗时 {best:.0f}ms，疑似退化为二次",
+            )
+
+    def test_connstr_still_matches_real_connection_strings(self):
+        """封顶 {0,63} 不许影响真实连接串（scheme 最长不到 40 字符）。"""
+        rx = next(rx for rx, label, _g in tr.RULES if label == "CONNSTR")
+        for s, expect in [
+            ("postgres://user:secret123@db.internal/app", "secret123"),
+            ("redis://default:Pa55w0rd@127.0.0.1:6379", "Pa55w0rd"),
+            ("mysql+pymysql://root:pass@host:3306/db", "pass"),
+            # 超长 scheme 段（>63）不再匹配：这是封顶的代价，明确记下来
+            (("x" * 70) + "://user:secret123@host", None),
+        ]:
+            m = rx.search(s)
+            self.assertEqual(m.group(1) if m else None, expect, s)
+
+    def test_no_rule_is_superlinear_on_adversarial_text(self):
+        """逐条规则喂对抗串：任何一条在 32KB 上超过 200ms 都视为疑似二次行为。"""
+        text = self._adversarial(32768) + ("1-" * 2048) + "@x"
+        slow = []
+        for rx, label, _g in tr.RULES:
+            best = self._best_ms(rx, text, repeat=2)
+            if best > 200.0:
+                slow.append((label, round(best, 1)))
+        self.assertEqual(slow, [], f"疑似超线性规则：{slow}")
 
 
 class RetentionUnlimitedTests(unittest.TestCase):

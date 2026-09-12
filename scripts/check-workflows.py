@@ -30,6 +30,97 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 BASH_SHELLS = {"bash", "sh"}
 
+# CI 里只负责「装依赖 / 准备目录」的步骤，本地门禁不需要复现，比对时跳过。
+# 判据同时看 step 名与命令首词，任一命中即视为准备步骤。
+_SETUP_NAME_HINTS = ("install", "prepare", "setup", "cache", "download")
+_SETUP_CMD_PREFIXES = ("pip ", "python -m pip", "npm ci", "npm install", "yarn ", "pnpm ")
+
+
+def _normalize_cmd(text):
+    """把一条命令规范成可比较的单行文本。"""
+    return " ".join(str(text).split())
+
+
+def _load_verify_gates():
+    """读 scripts/verify-all.py 的 GATES 清单，返回 {(cwd, 命令)} 集合。
+
+    文件名带连字符不能直接 import，按路径加载（与 tests/test_release_metadata.py 同法）。
+    """
+    import importlib.util
+
+    path = ROOT / "scripts" / "verify-all.py"
+    spec = importlib.util.spec_from_file_location("_verify_all", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    gates = set()
+    for gate in mod.GATES:
+        argv = [t.replace("{python}", "python").replace("{node}", "node")
+                 .replace("{npm}", "npm").replace("{cargo}", "cargo")
+                for t in gate["argv"]]
+        argv = [t[1:] if t.startswith("@") else t for t in argv]
+        gates.add((gate["cwd"], _normalize_cmd(" ".join(argv))))
+    return gates
+
+
+def _ci_gate_commands():
+    """从 **ci.yml** 抽出「真门禁」命令，返回 {(cwd, 命令)} 集合。
+
+    只比对 ci.yml：release.yml / docker.yml 里的步骤是构建与发布动作（打包、签名、
+    算校验和、推镜像），本地门禁不该也无法复现，拿它们比对必然全红。
+    """
+    import yaml
+
+    path = WORKFLOWS / "ci.yml"
+    if not path.exists():
+        return set()
+    gates = set()
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    if not isinstance(doc, dict):
+        return set()
+    for job in (doc.get("jobs") or {}).values():
+        if not isinstance(job, dict):
+            continue
+        cwd = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", ".") or "."
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict) or "run" not in step:
+                continue
+            name = str(step.get("name", "")).lower()
+            if any(h in name for h in _SETUP_NAME_HINTS):
+                continue
+            for line in str(step["run"]).splitlines():
+                cmd = _normalize_cmd(line)
+                if not cmd or cmd.startswith("#") or cmd.startswith("- "):
+                    continue
+                if cmd.startswith(_SETUP_CMD_PREFIXES):
+                    continue
+                gates.add((cwd, cmd))
+    return gates
+
+
+def _check_gate_parity(errors):
+    """门禁清单漂移检查：ci.yml 与 scripts/verify-all.py 必须一一对应。
+
+    build.ps1 走 verify-all.py，CI 走四个 job。两边漏一边就意味着「本地过了、
+    云端挂掉」（或反过来），而发版路径上 tag 一旦推出去就很难回收，所以这条必须
+    在 PR 阶段就拦住。
+    """
+    try:
+        verify = _load_verify_gates()
+    except Exception as exc:  # 清单本身坏了就是硬错误
+        errors.append(f"无法读取 scripts/verify-all.py 的门禁清单: {exc}")
+        return
+    ci = _ci_gate_commands()
+    if not ci:
+        errors.append("无法从 .github/workflows 抽出任何门禁命令（YAML 结构变了？）")
+        return
+    for cwd, cmd in sorted(ci - verify):
+        errors.append(f"门禁漂移：ci.yml 有而 scripts/verify-all.py 没有 -> [{cwd}] {cmd}")
+    for cwd, cmd in sorted(verify - ci):
+        errors.append(f"门禁漂移：scripts/verify-all.py 有而 ci.yml 没有 -> [{cwd}] {cmd}")
+
 
 def _find_bash():
     """返回一个真能用的 bash；Windows 上要绕开 WSL 垫片。"""
@@ -91,6 +182,7 @@ def main():
             print(f"check-workflows: OK   {path.name} ({len(doc['jobs'])} jobs)")
 
     print(f"check-workflows: 共 {len(files)} 个 workflow，bash 步骤校验 {shell_checked} 个")
+    _check_gate_parity(errors)
     if errors:
         print("\n".join(f"check-workflows: FAIL {e}" for e in errors))
         return 1

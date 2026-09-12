@@ -33,5 +33,5 @@ export function getDiagnostics(): Promise<DiagnosticsBundle> {
 }
 
 export function saveDiagnostics(): Promise<{ ok: boolean; path?: string; size?: number; error?: string }> {
-  return shieldFetch('/api/diagnostics/save', { method: 'POST' })
+  return shieldFetch('/api/diagnostics/save', { method: 'POST', timeoutMs: 30000 })
 }

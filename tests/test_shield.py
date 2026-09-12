@@ -1060,6 +1060,98 @@ class ShieldEngineTests(unittest.TestCase):
             stream(b"")
         self._with_no_reload(run)
 
+    def test_ndjson_whole_body_is_restored(self):
+        """NDJSON 的内容类型里含 "json" 子串，若落到通用 JSON 分支，json.loads 必然失败，
+        整条响应未还原透传——用户在自己的客户端里看到 {{PLACEHOLDER}} 原样留着。"""
+        def run():
+            flow = self._flow("api.openai.com", "/v1/chat/completions", {
+                "messages": [{"role": "user", "content": "客户张三"}]
+            })
+            tr.request(flow)
+            masked = json.loads(flow.request.content)["messages"][0]["content"]
+            token = re.search(tr._PLACEHOLDER_RX, masked).group(0)
+            body = (
+                json.dumps({"message": {"role": "assistant", "content": "你好" + token},
+                            "done": False}, ensure_ascii=False) + "\n"
+                + json.dumps({"message": {"role": "assistant", "content": ""},
+                              "done": True}, ensure_ascii=False) + "\n"
+            )
+            flow.response = SimpleNamespace(
+                headers={"content-type": "application/x-ndjson"},
+                status_code=200,
+                content=body.encode("utf-8"),
+            )
+            tr.response(flow)
+            out = flow.response.content.decode("utf-8")
+            self.assertIn("你好张三", out)
+            self.assertNotIn(token, out)
+            # 结构必须仍是 NDJSON：逐行可解析，且条数不变
+            lines = [ln for ln in out.split("\n") if ln.strip()]
+            self.assertEqual(len(lines), 2)
+            self.assertTrue(json.loads(lines[1])["done"])
+        self._with_no_reload(run)
+
+    def test_ndjson_stream_restores_line_by_line_and_buffers_half_placeholder(self):
+        """NDJSON 流式：按行下发，且半截占位符跨行时必须扣住不外泄。"""
+        def run():
+            flow = self._flow("api.openai.com", "/v1/chat/completions", {
+                "messages": [{"role": "user", "content": "客户张三"}]
+            })
+            tr.request(flow)
+            sid = flow.metadata["session_id"]
+            masked = json.loads(flow.request.content)["messages"][0]["content"]
+            token = re.search(tr._PLACEHOLDER_RX, masked).group(0)
+            flow.response = SimpleNamespace(
+                headers={"content-type": "application/x-ndjson"},
+                status_code=200,
+                content=b"",
+            )
+            stream = tr._sse_stream_factory(
+                flow, sid, "api.openai.com", "POST", "/v1/chat/completions", {}, framing="ndjson")
+            half = len(token) // 2
+            first = stream((json.dumps(
+                {"message": {"content": "你好" + token[:half]}, "done": False},
+                ensure_ascii=False) + "\n").encode("utf-8"))
+            self.assertIn("你好", first.decode("utf-8"))
+            self.assertNotIn(token[:half], first.decode("utf-8"))
+            second = stream((json.dumps(
+                {"message": {"content": token[half:] + "在"}, "done": False},
+                ensure_ascii=False) + "\n").encode("utf-8"))
+            self.assertIn("张三在", second.decode("utf-8"))
+            stream(b"")
+        self._with_no_reload(run)
+
+    def test_ndjson_stream_holds_incomplete_line(self):
+        """整行未到齐时不能猜着还原：半行留在缓冲里，本次不产出该行。"""
+        def run():
+            flow = self._flow("api.openai.com", "/v1/chat/completions", {
+                "messages": [{"role": "user", "content": "客户张三"}]
+            })
+            tr.request(flow)
+            sid = flow.metadata["session_id"]
+            flow.response = SimpleNamespace(
+                headers={"content-type": "application/x-ndjson"},
+                status_code=200,
+                content=b"",
+            )
+            stream = tr._sse_stream_factory(
+                flow, sid, "api.openai.com", "POST", "/v1/chat/completions", {}, framing="ndjson")
+            # 无换行 → 整行未到齐，必须返回空列表（绝不能返回 b""，那会被当成 chunked 终止块）
+            self.assertEqual(stream(b'{"message": {"content": "half'), [])
+            out = stream(b'"}}\n')
+            self.assertIn("half", out.decode("utf-8"))
+            stream(b"")
+        self._with_no_reload(run)
+
+    def test_ndjson_content_type_detection(self):
+        for ct in ("application/x-ndjson", "application/ndjson; charset=utf-8",
+                   "application/jsonl", "application/x-jsonlines"):
+            with self.subTest(ct=ct):
+                self.assertTrue(tr._is_ndjson_ct(ct))
+        for ct in ("application/json", "text/event-stream", "text/plain", ""):
+            with self.subTest(ct=ct):
+                self.assertFalse(tr._is_ndjson_ct(ct))
+
     def test_sse_stream_never_returns_empty_bytes_midstream(self):
         """中途块无完整事件时必须返回空列表，绝不能返回 b""。
 
@@ -2990,6 +3082,12 @@ class PanelConfigTests(unittest.TestCase):
             # 透传不脱敏：原文应原样到达上游
             self.assertIn("13812345678", upstream_captured.get("body", ""))
             # 透传日志记录：upstream 名称与 model 字段必须与普通代理对齐
+            # PASS 事件是在响应体 flush **之后**才 enqueue 的（handler 先写响应再落库），
+            # 客户端 read() 返回时事件可能尚未写入 → 必须带 deadline 轮询等待，
+            # 直接断言会偶发失败（实测全量套件下 verify-all 第 2 项挂过一次）。
+            deadline = time.time() + 3
+            while not recorded_events and time.time() < deadline:
+                time.sleep(0.02)
             self.assertTrue(len(recorded_events) >= 1)
             pt_ev = recorded_events[-1]
             self.assertEqual(pt_ev.get("upstream"), "test-client")
@@ -4041,8 +4139,13 @@ class AutoHealTests(unittest.TestCase):
     """
 
     def test_is_shield_panel_pid_recognizes_src_instance(self):
-        """另一 LLM Shield 面板（源码 panel.py / 打包 LLMShield.exe）必须被识别，
-        否则它的 503 占位监听占着端口时自动重启永远失败。"""
+        """另一本产品引擎进程（源码 panel.py / 打包 MaskitEngine.exe）必须被识别，
+        否则它的 503 占位监听占着端口时自动重启永远失败。
+
+        打包名以 `engine/maskit-engine.spec` 的 `name='MaskitEngine'` 与
+        `src-tauri/src/lib.rs` 的 ENGINE_NAMES 为准（旧名 LLMShieldEngine.exe 仍要认，
+        更名后新旧版本可能共存于同一台机器）。
+        """
         old_run = panel._run_console
         self.addCleanup(lambda: setattr(panel, "_run_console", old_run))
         cmdlines = {}
@@ -4057,12 +4160,21 @@ class AutoHealTests(unittest.TestCase):
         with mock.patch.object(panel.sys, "platform", "win32"):
             cmdlines["7777"] = r"C:\Python313\python.exe C:\Apps\shield\panel.py"
             self.assertTrue(panel._is_shield_panel_pid(7777), "源码面板必须被识别")
-            cmdlines["8888"] = r'"C:\Apps\LLMShield\LLMShield.exe"'
-            self.assertTrue(panel._is_shield_panel_pid(8888), "打包面板必须被识别")
+            cmdlines["8888"] = r'"C:\Apps\Maskit\resources\engine\MaskitEngine.exe"'
+            self.assertTrue(panel._is_shield_panel_pid(8888), "打包引擎必须被识别")
+            cmdlines["8889"] = r'"C:\Apps\Maskit\resources\engine\LLMShieldEngine.exe"'
+            self.assertTrue(panel._is_shield_panel_pid(8889), "更名前的打包引擎仍要识别")
             cmdlines["9999"] = r"C:\Python313\python.exe manage.py runserver"
             self.assertFalse(panel._is_shield_panel_pid(9999), "无关 python 不能误判")
             cmdlines["1111"] = r"C:\Python313\python.exe mitmdump.exe -s C:\Apps\shield\transparent.py"
             self.assertFalse(panel._is_shield_panel_pid(1111), "mitmdump 类进程归 _is_mitmdump_pid 管")
+            # 回归护栏：**绝不能**再用裸产品名做子串匹配。任何在仓库目录
+            # （…\maskit\…）下跑起来、又恰好占了引擎端口的无关进程，一旦被误判就会
+            # 吃一记 taskkill /T /F 连子孙一起杀（数据丢失）。
+            cmdlines["2222"] = r'C:\Python313\python.exe D:\work\code\tmw\maskit\tools\probe.py'
+            self.assertFalse(panel._is_shield_panel_pid(2222), "裸产品名不得再作为匹配依据")
+            cmdlines["3333"] = r'"C:\Apps\Maskit\Maskit.exe"'
+            self.assertFalse(panel._is_shield_panel_pid(3333), "桌面壳不是引擎，不得误杀")
             self.assertFalse(panel._is_shield_panel_pid(os.getpid()), "本进程绝不识别")
 
     def test_free_upstream_ports_kills_stale_panel_listener(self):

@@ -226,39 +226,31 @@ if (-not $pyTest) {
     exit 1
 }
 Write-Host "测试解释器: $pyTest" -ForegroundColor DarkGray
-$engineFiles = Get-ChildItem -Path "engine\*.py" | Select-Object -ExpandProperty FullName
-& $pyTest -m py_compile $engineFiles
-if ($LASTEXITCODE -ne 0) { Restore-Version; Write-Error "py_compile 失败"; exit 1 }
-$oldEAP = $ErrorActionPreference
-$ErrorActionPreference = "Continue"   # stderr 日志行不当错误中断（NativeCommandError）
-$testOut = & $pyTest -m unittest discover -s tests 2>&1
-$testExit = $LASTEXITCODE
-$ErrorActionPreference = $oldEAP
-if ($testExit -ne 0) {
-    Write-Host $testOut -ForegroundColor Red
-    Restore-Version
-    Write-Error "单测失败（见上完整输出），终止打包"; exit 1
-}
-$testOut | Select-Object -Last 2 | Write-Host
 
-# 4. 前端构建（类型检查 + vite build，不碰运行中进程）
-# EAP=Continue 的理由与上面单测那段相同，而且这里是**实际踩过的**：
-# vite 的「chunk 超过 500 kB」警告走 stderr，$ErrorActionPreference="Stop" 下
-# PowerShell 把原生命令的 stderr 当成终止性错误抛 NativeCommandError，
-# 整个脚本在这里直接死——连 Restore-Version 都跑不到，版本号停在半路
-# （2026-08-16 发布 0.1.3 时实测）。成败一律只看 $LASTEXITCODE。
-Write-Host "前端构建..." -ForegroundColor Cyan
-Push-Location frontend
-$oldEAP3 = $ErrorActionPreference
+# 4. 全量门禁（唯一清单在 scripts/verify-all.py，与 .github/workflows/ci.yml 一一对应）
+# 早先这里只跑 py_compile + 单测 + 前端构建，而 CI 还会跑冒烟测试 / lint / i18n /
+# env-import / cargo / 版本一致性 —— 本地发版完全可能「过了 build.ps1 却被 CI 拦下」，
+# 而那时 tag 已经推到远端了。清单现在收敛到 verify-all.py，check-workflows.py 会比对
+# 两边，任何一侧漏加/多加都会在 PR 阶段报错。
+# EAP=Continue 的理由与原先单测那段相同，而且这里是**实际踩过的**：vite 的「chunk
+# 超过 500 kB」警告、测试里的日志行都走 stderr，$ErrorActionPreference="Stop" 下
+# PowerShell 把原生命令的 stderr 当成终止性错误抛 NativeCommandError，整个脚本直接
+# 死在这里——连 Restore-Version 都跑不到，版本号停在半路（2026-08-16 实测）。
+# 成败一律只看 $LASTEXITCODE。
+$env:MASKIT_PYTHON = $pyTest
+Write-Host "全量门禁（scripts/verify-all.py，与 CI 一致）..." -ForegroundColor Cyan
+$oldEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    npm run build 2>&1 | Write-Host
-    $feExit = $LASTEXITCODE
+    & $pyTest (Join-Path $Root "scripts\verify-all.py") 2>&1 | Write-Host
+    $gateExit = $LASTEXITCODE
 } finally {
-    $ErrorActionPreference = $oldEAP3
-    Pop-Location
+    $ErrorActionPreference = $oldEAP
 }
-if ($feExit -ne 0) { Restore-Version; Write-Error "前端构建失败（exit $feExit）"; exit 1 }
+if ($gateExit -ne 0) {
+    Restore-Version
+    Write-Error "全量门禁未通过（exit $gateExit，见上完整输出），终止打包"; exit 1
+}
 
 # 5. 引擎 sidecar（PyInstaller，Python 3.13 打包环境，不碰运行中进程）
 Write-Host "引擎 sidecar 打包（3.13）..." -ForegroundColor Cyan
