@@ -2001,16 +2001,66 @@ class ShieldEngineTests(unittest.TestCase):
         self._with_no_reload(run)
 
     def test_reverse_routing_unlisted_path_non_llm_body_passes_through(self):
-        """非白名单路径 + 非 LLM 请求体：原样转发，不脱敏也不阻断。"""
+        """非白名单路径 + 非 LLM 请求体：fail_closed **关闭**时原样转发。
+
+        用户主动关掉 fail_closed 才放行，且这条放行被限制在「显式关了」这一条路径上。
+        """
         def run():
             tr.CAPTURE_MODE = "reverse"
             tr.UPSTREAMS = list(tr.DEFAULT_UPSTREAMS)
-            flow = self._reverse_flow("/openai/v1/files", {"purpose": "fine-tune"})
-            flow.request.method = "POST"
-            tr.request(flow)
+            tr.FAIL_CLOSED = False
+            try:
+                flow = self._reverse_flow("/openai/v1/files", {"purpose": "fine-tune"})
+                flow.request.method = "POST"
+                tr.request(flow)
+            finally:
+                tr.FAIL_CLOSED = True
             self.assertIsNone(getattr(flow, "response", None))
             self.assertEqual(json.loads(flow.request.content), {"purpose": "fine-tune"})
             self.assertIsNone(flow.metadata.get("session_id"))
+        self._with_no_reload(run)
+
+    def test_reverse_routing_unlisted_path_is_masked_when_fail_closed(self):
+        """非白名单路径 + 形态不认识的 JSON：fail_closed 下必须脱敏（issue #28）。
+
+        请求已经落在用户配置的上游路由上（matched_up 为真），这时「形态不认识」
+        不能凭「路径不在白名单」就把原文放出去：放行判据 _LLM_BODY_KEYS 是白名单，
+        永远追不上新协议；若放行，fail_closed 的承诺就取决于路径配置，而不取决于
+        fail_closed 本身。
+        """
+        def run():
+            tr.CAPTURE_MODE = "reverse"
+            tr.UPSTREAMS = list(tr.DEFAULT_UPSTREAMS)
+            self.assertTrue(tr.FAIL_CLOSED, "本用例断言的是 fail_closed 默认行为")
+            flow = self._reverse_flow("/openai/v1/some-new-endpoint",
+                                      {"text": "张三 13800138000"})
+            flow.request.method = "POST"
+            tr.request(flow)
+            sent = (flow.request.content or b"").decode("utf-8", "replace")
+            self.assertEqual(flow.request.host, "api.openai.com")
+            self.assertIsNone(getattr(flow, "response", None), "脱敏后照常转发，不阻断")
+            self.assertIn("{{", sent, "形态不认识也要脱敏")
+            self.assertNotIn("13800138000", sent, "原文绝不能明文上行")
+            self.assertIsNotNone(flow.metadata.get("session_id"), "走了脱敏就该有会话")
+        self._with_no_reload(run)
+
+    def test_reverse_routing_unlisted_path_mask_covers_vendor_endpoints(self):
+        """实测可达的几条非白名单路径，fail_closed 下都要脱敏。
+
+        未配 paths 时白名单只有 7 条默认路径，/v1/vector_stores、/v1/fine_tuning/jobs、
+        /v2/chat 这些都落在白名单外，以前是明文上行。
+        """
+        def run():
+            tr.CAPTURE_MODE = "reverse"
+            tr.UPSTREAMS = list(tr.DEFAULT_UPSTREAMS)
+            for path in ("/openai/v1/vector_stores", "/openai/v1/fine_tuning/jobs",
+                         "/openai/v2/chat"):
+                flow = self._reverse_flow(path, {"text": "联系 13800138000"})
+                flow.request.method = "POST"
+                tr.request(flow)
+                sent = (flow.request.content or b"").decode("utf-8", "replace")
+                with self.subTest(path=path):
+                    self.assertNotIn("13800138000", sent, f"{path} 明文上行了")
         self._with_no_reload(run)
 
     def test_reverse_multiport_routes_by_listen_port_without_stripping(self):

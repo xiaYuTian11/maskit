@@ -4429,6 +4429,40 @@ class EscapedAndRewrittenPlaceholderTests(_RuleTestBase):
         # 精确路径不受影响：A 自己的原文照常还原
         self.assertEqual(tr.restore_final(f"主机 {tok}", sid), f"主机 {self.IP}")
 
+    def test_replayed_suffix_registration_is_not_a_collision(self):
+        """同一 token 被登记两次不是撞车（issue #27）。
+
+        预热走 json.loads、客户端历史走 sqlite，拿到的 token 与索引里已存的那个
+        **值相等但对象不同**。用 `is not` 比较会把「同一 token 第二次登记」误判成
+        撞车：后缀被永久置为 _SUFFIX_AMBIGUOUS，且运行时补登记救不回来（object()
+        与任何字符串都不相等）。后果是「按后缀反查」这条兜底静默退出，模型改写
+        标签/大小写的占位符再也还原不出来，用户只看到裸占位符、没有任何日志。
+
+        预热里同一 token 出现 >=2 条事件是常态（复用表的设计目的就是跨请求复用），
+        所以这条路径在实际使用中必然被踩到。
+        """
+        sid, tok, suffix = self._mint("esc-replay")
+        # 模拟 _warmup_from_events 第 2 条事件：值是同一个 token，对象是 json.loads 新造的
+        tr._suffix_index_add(json.loads(json.dumps(tok)))
+        self.assertEqual(tr._RECENT_SUFFIX[suffix], tok, "重放同一 token 不许被判成撞车")
+        # 兜底仍然可用：标签补回下划线 / 整段小写都能救回来
+        self.assertEqual(tr._lookup_by_suffix(f"{{{{IP_PRIVATE_{suffix}}}}}", sid), self.IP)
+        self.assertEqual(self._restore(sid, f"主机 {{{{ipprivate_{suffix}}}}}")[0],
+                         f"主机 {self.IP}")
+
+    def test_replayed_registration_survives_warmup_replay_loop(self):
+        """预热整轮重放（同一 token 反复登记）后兜底依然可用。
+
+        _warmup_from_events 逐条 json.loads 事件，复用命中越多、同一 token 被重放
+        的次数越多。重放 N 次都必须保持「指向该 token」，而不是退化成撞车。
+        """
+        sid, tok, suffix = self._mint("esc-replay-loop")
+        for _ in range(5):
+            tr._suffix_index_add(json.loads(json.dumps(tok)))
+        self.assertEqual(tr._RECENT_SUFFIX[suffix], tok)
+        self.assertEqual(self._restore(sid, f"主机 {{{{IP_PRIVATE_{suffix}}}}}")[0],
+                         f"主机 {self.IP}")
+
     def test_new_tokens_keep_suffixes_unique(self):
         """连续签发不产生重复后缀，索引条数与复用表条数一致。"""
         tr._new_session("esc-uniq")

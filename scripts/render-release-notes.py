@@ -23,6 +23,14 @@ _HEADING_PREFIX = "## ["
 
 def render(version: str, changelog: Path = Path("CHANGELOG.md")) -> str:
     """返回 `## [<version>]` 标题之下、下一节标题之上的全部文本（不含标题行）。"""
+    # 显式拒绝 Unreleased：它面向下次发版，不该出现在线上 Release 页。
+    # 不能只靠「章节为空」兜底 —— Unreleased 一旦写进条目（发版前的正常状态），
+    # 那条兜底就不再成立，误传 'Unreleased' 会把未发布内容渲染成 Release body。
+    if str(version).strip().lower() == "unreleased":
+        raise SystemExit(
+            "render-release-notes: 'Unreleased' 不是版本号（该章节面向下次发版，"
+            "不该出现在线上 Release 页）——发版前请先把条目移到正式版本章节"
+        )
     text = changelog.read_text(encoding="utf-8")
     needle = f"## [{version}]"
 

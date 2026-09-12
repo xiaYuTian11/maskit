@@ -1934,6 +1934,13 @@ def _suffix_index_add(token):
     预热/客户端历史带进来的历史 token。无论保留哪一个，都会让「按后缀反查」
     把 A 的原文答到 B 的位置上，所以撞车后该后缀直接退出兜底匹配——代价只是
     这个后缀不参与兜底，退化成改动前的行为。**替换错值比不替换危险得多。**
+
+    **必须值比较（!=），不能对象身份比较（is not）**：预热走 json.loads、
+    客户端历史走 sqlite 取出，拿到的 token 与索引里已存的那个**值相等但对象
+    不同**。用 `is not` 会让「同一个 token 被登记两次」被误判成撞车，后缀
+    永久退出兜底（且运行时补登记救不回来，见 _recall_token）。实测：预热里
+    同一 token 出现 ≥2 条事件是常态（复用表的设计目的就是跨请求复用），
+    于是大面积静默失效、用户只看到占位符没被还原。
     """
     sfx = _token_suffix(token)
     if not _suffix_indexable(sfx):
@@ -1941,7 +1948,9 @@ def _suffix_index_add(token):
     cur = _RECENT_SUFFIX.get(sfx)
     if cur is None:
         _RECENT_SUFFIX[sfx] = token
-    elif cur is not token:
+    elif cur != token:
+        # _SUFFIX_AMBIGUOUS 是 object()，与任何字符串 != 恒真 -> 撞车标记不会被
+        # 后续登记抹掉；真撞车（两个不同 token 抢同一后缀）的语义不变。
         _RECENT_SUFFIX[sfx] = _SUFFIX_AMBIGUOUS
 
 
@@ -2948,7 +2957,7 @@ def request(flow: http.HTTPFlow):
             # 无论是否在白名单，非只读请求只要像 LLM 请求就继续进入脱敏流程；
             # 但若未在白名单路径且并非标准 LLM 文本补全请求：
             # 若是声明非 JSON（如 multipart/form-data 音频上传、二进制流），在 FAIL_CLOSED 下绝不能静默透传，必须阻断；
-            # 若是常规 JSON 管理调用（如创建微调任务 /v1/files 等结构化数据），允许按 passthrough 转发。
+            # 若是 JSON，FAIL_CLOSED 下**同样不能按 passthrough 放行** —— 见下面 fail_closed 分支的说明。
             if not _looks_like_llm_request(flow):
                 ct_unlisted = (flow.request.headers.get("content-type", "") or "").lower()
                 if "json" not in ct_unlisted and FAIL_CLOSED:
@@ -2961,8 +2970,25 @@ def request(flow: http.HTTPFlow):
                         {"content-type": "application/json"},
                     )
                     return
-                _emit_skip(host, method, path, "passthrough_unlisted_path", source=source, upstream=up_name)
-                return
+                # 请求已经落在用户配置的上游路由上（matched_up 为真），此时
+                # 「形态不认识」在 FAIL_CLOSED 下必须交给主管线按 unknown_shape
+                # 脱敏，不能凭「路径不在白名单」就把原文放出去。
+                #
+                # 原因（外部审计 SHIELD-UNLISTED-PASSTHROUGH-001）：放行判据是
+                # _LLM_BODY_KEYS，而它是**白名单**，永远追不上新协议（实测 Cohere
+                # v1 chat / Bedrock Titan / 讯飞星火 都曾整包透传原文）。主管线
+                # L3080 对同样的形态是「配置路由 + fail_closed → 一律脱敏」；这里若
+                # 放行，fail_closed 的承诺就取决于**路径在不在白名单**，而不取决于
+                # fail_closed 本身。实测可达：未配 paths 时白名单只有 7 条默认路径，
+                # POST /v1/vector_stores、/v1/fine_tuning/jobs、/v2/chat、以及任意
+                # 厂商新端点 {"text":"张三 13800138000 …"} 都会明文上行。
+                #
+                # 走主管线还顺带消掉一个倒挂：_looks_like_llm_request 对「声明 JSON
+                # 但解析失败」返回 True（交 fail_closed 脱敏），对「解析成功但键不
+                # 认识」返回 False（放行） —— 原本解析失败反而比解析成功更安全。
+                if not FAIL_CLOSED:
+                    _emit_skip(host, method, path, "passthrough_unlisted_path", source=source, upstream=up_name)
+                    return
     else:
         host = orig_host
         path = orig_path
@@ -3433,6 +3459,30 @@ def _sse_choice_index(choice, position):
     return index if type(index) is int and index >= 0 else position
 
 
+def _sse_response_channel(data, kind):
+    """Responses API 的通道键：同一 output item 的多个 content part 必须分开。
+
+    规范允许一个 message item 的 `content` 是数组（多个 output_text part），
+    delta / .done 事件都带 `content_index`。只按 output_index 建通道会让同一 item
+    下所有 part 共用一个跨 chunk 缓冲，实测两个后果：
+      - part 0 的 `.done` 会 flush/pop 掉整个 item 的通道，part 1 的半截占位符
+        被当成 part 0 的尾巴吐出、或被直接丢掉；
+      - 两个 part 的增量交错时，半截占位符会串到另一个 part 的文本里。
+
+    `content_index` 缺失或为 0 时**省略该段**，键形与改动前完全一致
+    （`r0.text`）—— 官方目前每个 message 只发一个 part，存量单 part 流的行为
+    零变化。这个改动只影响真的下发多 part 的自建/中转实现。
+
+    刻意**不引入 item_id**：它在部分中转实现里会缺失，一旦 delta 与 .done 的
+    item_id 不齐，就会让「.done 清理该通道」失配（缓冲残留被重复吐出），比只用
+    output_index 更糟；而 output_index 已足以区分不同 item。
+    """
+    ci = data.get("content_index")
+    if type(ci) is int and ci > 0:
+        return "r%s.%d.%s" % (data.get("output_index", 0), ci, kind)
+    return "r%s.%s" % (data.get("output_index", 0), kind)
+
+
 def _sse_text_slots(data):
     """列出 SSE 事件里的增量文本槽位：[(channel, text, setter, escape)]。
 
@@ -3494,13 +3544,13 @@ def _sse_text_slots(data):
                 slots.append((f"a{blk}.pj", d["partial_json"], _setter(d, "partial_json"), True))
     # OpenAI Responses API 流
     if etype == "response.output_text.delta" and isinstance(data.get("delta"), str):
-        slots.append(("r%s.text" % data.get("output_index", 0), data["delta"], _setter(data, "delta"), False))
+        slots.append((_sse_response_channel(data, "text"), data["delta"], _setter(data, "delta"), False))
     elif etype == "response.reasoning_text.delta" and isinstance(data.get("delta"), str):
         # 思考文本独立通道（同 reasoning_content：跨 chunk 半截占位符必须缓冲还原，
         # 曾漏槽位导致 {{ 残片透传；与正文通道分开避免串字）
-        slots.append(("r%s.reason" % data.get("output_index", 0), data["delta"], _setter(data, "delta"), False))
+        slots.append((_sse_response_channel(data, "reason"), data["delta"], _setter(data, "delta"), False))
     elif etype == "response.function_call_arguments.delta" and isinstance(data.get("delta"), str):
-        slots.append(("r%s.args" % data.get("output_index", 0), data["delta"], _setter(data, "delta"), True))
+        slots.append((_sse_response_channel(data, "args"), data["delta"], _setter(data, "delta"), True))
     return slots
 
 
@@ -3513,12 +3563,14 @@ def _sse_terminal_prefixes(data):
         return None
     if data.get("type") == "content_block_stop":
         return (f"a{data.get('index', 0)}.",)
+    # 收尾通道必须与 _sse_text_slots 的通道键同源（含 content_index），否则
+    # part 0 的 .done 会把 part 1 的缓冲一起冲掉。
     if data.get("type") == "response.output_text.done":
-        return (f"r{data.get('output_index', 0)}.text",)
+        return (_sse_response_channel(data, "text"),)
     if data.get("type") == "response.reasoning_text.done":
-        return (f"r{data.get('output_index', 0)}.reason",)
+        return (_sse_response_channel(data, "reason"),)
     if data.get("type") == "response.function_call_arguments.done":
-        return (f"r{data.get('output_index', 0)}.args",)
+        return (_sse_response_channel(data, "args"),)
     return tuple(f"c{_sse_choice_index(c, position)}."
                  for position, c in enumerate(data.get("choices", []) or [])
                  if isinstance(c, dict) and c.get("finish_reason"))
@@ -3550,7 +3602,7 @@ def _restore_sse_data(data, sid, final=False, final_prefixes=()):
         "response.function_call_arguments.done": ("arguments", "args"),
     }.get(data.get("type"))
     if snapshot is not None and isinstance(data.get(snapshot[0]), str):
-        channel = f"r{data.get('output_index', 0)}.{snapshot[1]}"
+        channel = _sse_response_channel(data, snapshot[1])
         s = sessions.get(sid) or {}
         s.get("pending", {}).pop(channel, None)
         s.get("flush_tmpl", {}).pop(channel, None)

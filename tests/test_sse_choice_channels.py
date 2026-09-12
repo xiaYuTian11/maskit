@@ -165,3 +165,74 @@ class SseChoiceChannelTests(unittest.TestCase):
         self.assertEqual(payloads[0]["delta"], self.originals[0])
         self.assertEqual(payloads[1]["type"], "response.reasoning_text.done")
         self.assertNotIn("r0.reason", tr.sessions[self.sid]["pending"])
+
+    def test_responses_content_parts_keep_independent_buffers(self):
+        """同一 output item 的多个 content part 必须各自缓冲（issue #29）。
+
+        规范允许一个 message item 的 content 是数组（多个 output_text part）。
+        只按 output_index 建通道时，part 0 的半截占位符会被 part 1 的增量续上，
+        part 0 自己反而丢了内容 —— 属于静默串字。
+        """
+        tok = self.tokens[0]
+        events = self.restore_events([
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 0, "delta": "P0:" + tok[:8]},
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 1, "delta": "P1:正文"},
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 0, "delta": tok[8:]},
+            "[DONE]",
+        ])
+        parts = {}
+        for ev in events:
+            if ev.get("type") != "response.output_text.delta":
+                continue
+            ci = ev.get("content_index", 0)
+            parts[ci] = parts.get(ci, "") + ev.get("delta", "")
+        self.assertIn(self.originals[0], parts.get(0, ""), "part0 的占位符必须还原")
+        self.assertNotIn(self.originals[0], parts.get(1, ""), "part0 的原文不能串到 part1")
+        self.assertNotIn(tok[:8], parts.get(1, ""), "part0 的半截占位符不能混进 part1")
+        self.assertEqual(parts.get(1, ""), "P1:正文")
+
+    def test_responses_part_done_leaves_sibling_part_buffer_intact(self):
+        """part 0 的 .done 只收尾 part 0，不能冲掉 part 1 的半截缓冲。
+
+        收尾通道与写入通道同源（都含 content_index）才能做到这一点。
+        """
+        tok = self.tokens[1]
+        self.restore_events([
+            {"type": "response.output_text.delta", "output_index": 0,
+             "content_index": 1, "delta": "P1:" + tok[:8]},
+        ])
+        self.assertIn("r0.1.text", tr.sessions[self.sid]["pending"])
+        self.restore_events([
+            {"type": "response.output_text.done", "output_index": 0,
+             "content_index": 0, "text": "part0 完整内容"},
+        ])
+        self.assertIn("r0.1.text", tr.sessions[self.sid]["pending"],
+                      "part0 的 .done 不许冲掉 part1 的缓冲")
+
+    def test_responses_channel_key_is_unchanged_without_content_index(self):
+        """没有 content_index（或为 0）时通道键必须和改动前一字不差。
+
+        官方目前每个 message 只发一个 part；存量单 part 流（以及所有既有用例
+        断言的 r{n}.text 形态）必须零变化。
+        """
+        self.assertEqual(
+            tr._sse_response_channel(
+                {"type": "response.output_text.delta", "output_index": 3, "delta": "x"},
+                "text"),
+            "r3.text")
+        self.assertEqual(
+            tr._sse_response_channel(
+                {"type": "response.output_text.delta", "output_index": 3,
+                 "content_index": 0, "delta": "x"},
+                "text"),
+            "r3.text")
+        # 只有真的出现第 2 个 part 才分出新通道
+        self.assertEqual(
+            tr._sse_response_channel(
+                {"type": "response.output_text.delta", "output_index": 3,
+                 "content_index": 2, "delta": "x"},
+                "text"),
+            "r3.2.text")
