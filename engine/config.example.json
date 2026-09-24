@@ -113,6 +113,7 @@
   "price_sync_enabled": false,
   "price_sync_url": "https://mask.ciyuanroute.com/api/model-prices",
   "price_sync_interval_days": 7,
+  "update_check_url": "",
   "log_retention_days": 7,
   "autostart": true,
   "start_minimized": false,

@@ -13,6 +13,7 @@ import { Download, RefreshCw, CheckCircle2, Loader2, Shield, Terminal, ExternalL
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 import { toast } from '@/lib/toast'
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
@@ -25,14 +26,22 @@ function fmtMB(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { version?: string; dataRoot?: string; running?: boolean; autoInstall?: boolean }) {
+export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updateSource, onSaveUpdateSource }: { version?: string; dataRoot?: string; running?: boolean; autoInstall?: boolean; updateSource?: string; onSaveUpdateSource?: (v: string) => void }) {
   const { t, tf } = useI18n()
   const [checking, setChecking] = useState(false)
   const [result, setResult] = useState<UpdateCheck | null>(null)
   const [installing, setInstalling] = useState(false)
   const [progress, setProgress] = useState<{ got: number; total: number | null } | null>(null)
+  // 更新检查源的本地草稿：边打字边保存会把半截 URL 写进配置，所以只在点「保存」时提交。
+  // srcTouched 防止保存后配置回流把用户正在编辑的内容覆盖掉。
+  const [srcDraft, setSrcDraft] = useState('')
+  const srcTouched = useRef(false)
   const unlistenRef = useRef<(() => void) | null>(null)
   const autoInstallStarted = useRef(false)
+
+  useEffect(() => {
+    if (!srcTouched.current) setSrcDraft(updateSource || '')
+  }, [updateSource])
 
   useEffect(() => {
     return () => {
@@ -90,6 +99,12 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { v
   }
 
   const pct = progress?.total && progress.total > 0 ? Math.min(100, Math.round(((progress.got || 0) / progress.total) * 100)) : null
+
+  const saveSource = () => {
+    if (!onSaveUpdateSource) return
+    srcTouched.current = false
+    onSaveUpdateSource(srcDraft.trim())
+  }
 
   return (
     <Card className="border bg-card">
@@ -205,6 +220,27 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall }: { v
               <><RefreshCw className="mr-1.5 h-3.5 w-3.5" /> {t('about.check')}</>
             )}
           </Button>
+        )}
+
+        {/* 更新检查源：只有 Web / Docker 部署用得到（桌面版走 Tauri Updater）。
+            国内/内网服务器连不上 GitHub 时，填镜像或自建中转即可让「检查更新」恢复。 */}
+        {!installing && !isTauri() && onSaveUpdateSource && (
+          <div className="space-y-1.5 border-t border-border/50 pt-3">
+            <label className="text-xs text-muted-foreground">{t('about.updateSource')}</label>
+            <div className="flex items-center gap-2">
+              <Input
+                className="h-8 font-mono text-xs"
+                value={srcDraft}
+                onChange={(e) => { srcTouched.current = true; setSrcDraft(e.target.value) }}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveSource() }}
+                placeholder={t('about.updateSourcePh')}
+              />
+              <Button size="sm" variant="outline" className="h-8 shrink-0" onClick={saveSource}>
+                {t('common.save')}
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">{t('about.updateSourceHint')}</p>
+          </div>
         )}
       </CardContent>
     </Card>

@@ -677,21 +677,36 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   }
 
   // 关于页：GitHub Releases 最新版本（更新日志）
+  // 与「检查更新」同源：先浏览器直连 GitHub API（需 CSP connect-src 放行），
+  // 失败再退到服务端 /api/update/check —— 覆盖「浏览器能通」与「服务器能通」两种部署。
   const [siteRelease, setSiteRelease] = useState<{ version: string; notes?: string; pub_date?: string } | null>(null)
   const [siteReleaseErr, setSiteReleaseErr] = useState('')
   useEffect(() => {
     let alive = true
     const load = async () => {
       try {
-        const r = await (isTauri()
-          ? (await import('@tauri-apps/plugin-http')).fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest')
-          : window.fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest'))
-        const d = await r.json()
-        if (alive && d?.tag_name) {
+        let version = ''
+        let notes = ''
+        let pubDate = ''
+        try {
+          const r = await (isTauri()
+            ? (await import('@tauri-apps/plugin-http')).fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest')
+            : window.fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest'))
+          const d = await r.json()
+          version = String(d?.tag_name || '')
+          notes = String(d?.body || '')
+          pubDate = String(d?.published_at || '')
+        } catch {
+          const d = await shieldFetch<{ version?: string; notes?: string; pub_date?: string }>('/api/update/check', { timeoutMs: 20000 })
+          version = String(d?.version || '')
+          notes = String(d?.notes || '')
+          pubDate = String(d?.pub_date || '')
+        }
+        if (alive && version) {
           setSiteRelease({
-            version: String(d.tag_name).replace(/^v/, ''),
-            notes: d.body,
-            pub_date: d.published_at,
+            version: version.replace(/^v/, ''),
+            notes,
+            pub_date: pubDate,
           })
         }
       } catch (e) {
@@ -2522,7 +2537,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         {!embeddedTab && (
         <TabsContent value="about" className="space-y-4">
           {/* 产品信息 + 在线更新（合并为一个卡片） */}
-          <AboutUpdateCard version={status?.version} dataRoot={cfg?.data_root} running={status?.proxy_running} autoInstall={autoInstallUpdate} />
+          <AboutUpdateCard
+            version={status?.version}
+            dataRoot={cfg?.data_root}
+            running={status?.proxy_running}
+            autoInstall={autoInstallUpdate}
+            updateSource={cfg?.update_check_url}
+            onSaveUpdateSource={(v) => save({ update_check_url: v }, t('settings.toast.updateSourceSaved'))}
+          />
 
           {/* 更新日志 */}
           <Card className="border bg-card">

@@ -287,6 +287,9 @@ export interface ShieldConfig {
   model_prices?: Record<string, { input: number; output: number }>
   price_sync_enabled?: boolean
   price_sync_url?: string
+  /** 更新检查源（留空 = 内置源：GitHub 静态 latest.json → GitHub API）。
+   *  国内/内网服务器连不上 GitHub 时填镜像或自建中转。 */
+  update_check_url?: string
   autostart: boolean
   auto_start_proxy: boolean
   start_minimized: boolean
