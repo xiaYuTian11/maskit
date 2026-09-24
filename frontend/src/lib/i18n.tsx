@@ -573,6 +573,9 @@ const zh: Record<string, string> = {
   'about.dockerUpdateTitle': 'Docker 镜像更新指引',
   'about.dockerPersistWarning': '数据持久化提醒：重新部署前请确保容器挂载了持久化数据目录（如 -v maskit_data:/data），重新拉取镜像与重建容器后配置（config.json）与事件库将完整保留、绝不丢失！',
   'about.dockerReleaseLink': '查看 GitHub 发版详情',
+  'about.updateSource': '更新检查源（留空使用内置源）',
+  'about.updateSourcePh': 'https://…/latest.json',
+  'about.updateSourceHint': '服务器连不上 GitHub 时填镜像或自建中转地址；支持 GitHub API 与 latest.json 两种格式。',
 
   // ===== 反馈 =====
   'fb.title': '反馈问题',
@@ -1079,6 +1082,7 @@ const zh: Record<string, string> = {
   'settings.toast.priceSyncOn': '已开启自动同步',
   'settings.toast.priceSyncOff': '已关闭自动同步',
   'settings.toast.priceIntervalUpdated': '同步间隔已更新',
+  'settings.toast.updateSourceSaved': '更新检查源已保存',
   'settings.toast.testPassed': '测试通过',
   'settings.toast.testFailed': '测试失败',
   'settings.toast.testOk': '连通正常（含脱敏链路）',
@@ -1749,6 +1753,9 @@ const en: Record<string, string> = {
   'about.dockerUpdateTitle': 'Docker Upgrade Guide',
   'about.dockerPersistWarning': 'Data Persistence Notice: Ensure a persistent volume is mounted (e.g. -v maskit_data:/data) before redeploying. Your config and audit logs will be completely preserved without data loss!',
   'about.dockerReleaseLink': 'View GitHub Release',
+  'about.updateSource': 'Update check source (leave empty for built-in)',
+  'about.updateSourcePh': 'https://…/latest.json',
+  'about.updateSourceHint': 'Set a mirror or self-hosted relay if the server cannot reach GitHub; both GitHub API and latest.json formats are supported.',
 
   // ===== Feedback =====
   'fb.title': 'Report an Issue',
@@ -2253,6 +2260,7 @@ const en: Record<string, string> = {
   'settings.toast.priceSyncOn': 'Auto sync enabled',
   'settings.toast.priceSyncOff': 'Auto sync disabled',
   'settings.toast.priceIntervalUpdated': 'Sync interval updated',
+  'settings.toast.updateSourceSaved': 'Update check source saved',
   'settings.toast.testPassed': 'Test passed',
   'settings.toast.testFailed': 'Test failed',
   'settings.toast.testOk': 'Connectivity OK (incl. masking pipeline)',

@@ -4,7 +4,7 @@
  * - engine_state：引擎就绪/崩溃状态（§4.7）
  */
 import { invoke } from '@tauri-apps/api/core'
-import { isTauri, shieldFetch } from './shield-fetch'
+import { isTauri, shieldFetch, ShieldApiError } from './shield-fetch'
 
 export interface EngineState {
   ready: boolean
@@ -77,7 +77,7 @@ function compareSemver(a: string, b: string): number {
 /**
  * 检查更新。
  * 桌面端（Tauri）走 Rust Updater 插件并校验签名；
- * Web / Docker 容器端通过 GitHub Releases API 探测最新版本，返回升级信息与更新指引。
+ * Web / Docker 容器端问本机引擎的 `/api/update/check`（服务端出网探测最新版本）。
  * 约定：网络/服务端异常返回 ok=false 而不是抛异常——检查更新失败不该弹错误框打断用户。
  */
 export async function checkUpdate(currentVersion?: string): Promise<UpdateCheck> {
@@ -89,7 +89,13 @@ export async function checkUpdate(currentVersion?: string): Promise<UpdateCheck>
     }
   }
 
-  // 非 Tauri 桌面环境（Web 控制台 / Docker 容器部署）：通过 GitHub API 探测最新版本
+  // 非 Tauri 桌面环境（Web 控制台 / Docker 容器部署）：由服务端探测最新版本。
+  //
+  // 这里**必须**走 shieldFetch 问自己的服务器，不能让浏览器直连 api.github.com：
+  // 出网能力属于服务器，而国内用户/内网部署的浏览器到 GitHub 是不通的，
+  // 直连会拿到 `TypeError: NetworkError when attempting to fetch resource.`。
+  // 服务端按「自定义源 → 静态 latest.json → GitHub API」回退并归一化字段，
+  // 前端只管读 version / notes / pub_date。
   try {
     let curVer = currentVersion
     if (!curVer) {
@@ -101,19 +107,28 @@ export async function checkUpdate(currentVersion?: string): Promise<UpdateCheck>
       }
     }
 
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 6000)
-    const resp = await fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest', {
-      headers: { Accept: 'application/vnd.github.v3+json' },
-      signal: controller.signal,
-    })
-    clearTimeout(timeout)
-
-    if (!resp.ok) {
-      return { ok: false, has_update: false, error: `GitHub API HTTP ${resp.status}` }
+    let data: { version?: string; notes?: string; pub_date?: string }
+    try {
+      data = await shieldFetch<{ version?: string; notes?: string; pub_date?: string }>(
+        '/api/update/check',
+        { timeoutMs: 20000 }, // 比服务端 15s 探测超时略宽，让服务端先给出可读错误
+      )
+    } catch (e) {
+      // 服务端探测失败返回 502 + 可读原因（shieldFetch 对非 2xx 抛 ShieldApiError）。
+      // 把 body 里的 error 取出来展示，避免把 ShieldApiError 的整段 JSON 丢给用户。
+      let msg = String(e)
+      if (e instanceof ShieldApiError && e.body) {
+        try {
+          const parsed = JSON.parse(e.body)
+          if (parsed && typeof parsed.error === 'string' && parsed.error) msg = parsed.error
+        } catch {
+          msg = e.message || msg
+        }
+      }
+      return { ok: false, has_update: false, error: msg }
     }
-    const data = (await resp.json()) as { tag_name?: string; body?: string; published_at?: string }
-    const latestTag = String(data.tag_name || '').trim()
+
+    const latestTag = String(data.version || '').trim()
     const cleanLatest = latestTag.replace(/^v/, '')
     const cleanCur = (curVer || '').replace(/^v/, '')
     const hasUpdate = Boolean(cleanLatest && cleanCur && compareSemver(cleanLatest, cleanCur) > 0)
@@ -123,8 +138,8 @@ export async function checkUpdate(currentVersion?: string): Promise<UpdateCheck>
       has_update: hasUpdate,
       version: latestTag,
       current_version: curVer ? `v${cleanCur}` : undefined,
-      notes: data.body || '',
-      pub_date: data.published_at,
+      notes: data.notes || '',
+      pub_date: data.pub_date,
     }
   } catch (e) {
     return { ok: false, has_update: false, error: String(e) }

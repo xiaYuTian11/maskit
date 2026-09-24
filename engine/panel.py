@@ -3478,10 +3478,15 @@ def default_config():
         # 境外官方 API 走代理，互不影响）。
         "egress_proxy": dict(DEFAULT_EGRESS_PROXY),
         "model_prices": {},
-        # 默认关闭：这是引擎唯一的主动出站请求（拉模型价格表），交给用户显式开启
+        # 默认关闭：这是引擎唯一的**周期性**主动出站请求（拉模型价格表），交给用户显式开启
         "price_sync_enabled": False,
         "price_sync_url": DEFAULT_PRICE_SYNC_URL,
         "price_sync_interval_days": 7,
+        # 更新检查源：留空 = 内置源（GitHub 静态 latest.json → GitHub API）。
+        # 国内/内网服务器连不上 GitHub 时填镜像或自建中转；GitHub API 的
+        # tag_name/body/published_at 与 latest.json 的 version/notes/pub_date
+        # 两种格式后端都会归一化，换源不用动前端。
+        "update_check_url": "",
         "log_retention_days": 7,
         "autostart": False,
         "start_minimized": False,
@@ -3897,6 +3902,9 @@ def normalize_config(raw, warnings=None):
         "price_sync_enabled": bool(raw.get("price_sync_enabled", False)),
         "price_sync_url": str(raw.get("price_sync_url") or DEFAULT_PRICE_SYNC_URL).strip(),
         "price_sync_interval_days": max(1, min(90, (int(raw.get("price_sync_interval_days", 7) or 7) if str(raw.get("price_sync_interval_days", "")).isdigit() else 7))),
+        # 更新检查源：非法值静默丢弃（回落内置源）。这里不做 400：它只是个辅助配置，
+        # 为它把整份配置卡在保存失败上，用户只会看到「保存失败」而不知道是哪个字段。
+        "update_check_url": _normalize_update_check_url(raw.get("update_check_url")),
         # 日志保留天数：0 = 永久保留（付费版「日志不限期」权益）。
         # 原来钳成 max(1, min(90, ...))，而 PAID_QUOTA 声明的是 None（不限）——
         # 承诺在代码里结构上就兑现不了，付费用户设 365 会被静默压成 90（2026-08-17 审计）。
@@ -3911,6 +3919,42 @@ def normalize_config(raw, warnings=None):
         "audit": _normalize_audit(raw.get("audit")),
         "command_block": _normalize_command_block(raw.get("command_block"), warn),
     }
+
+
+def _normalize_update_check_url(raw):
+    """规范化「更新检查源」URL：非法一律返回 ""（= 用内置源）。
+
+    只做**形态**校验，不要求白名单域名——这一项的全部意义就是让用户填自己的镜像/
+    自建中转，锁死域名等于把功能废掉。允许 http：内网自建中转常是明文 HTTP，
+    而这里取回的内容只用于「显示有新版本」，真正的下载地址由前端按 GitHub 固定
+    仓库拼，被篡改也换不掉下载源。带 userinfo 的 URL 一律拒绝——用户很容易顺手把
+    带账号密码的代理地址贴进来，那会让凭据出现在日志与状态接口里。
+
+    非法输入静默回落 ""（不抛错）：它是辅助配置，为它让整份配置保存失败，
+    用户只会看到「保存失败」而不知道是哪个字段错了。
+    """
+    try:
+        text = str(raw or "").strip()
+        if not text or len(text) > 2048:
+            return ""
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text):
+            return ""
+        u = urlsplit(text)
+        if u.scheme.lower() not in ("http", "https"):
+            return ""
+        if u.username or u.password:
+            return ""
+        if not u.hostname:
+            return ""
+        try:
+            port = u.port
+        except ValueError:
+            return ""
+        if port is not None and not (0 < port <= 65535):
+            return ""
+        return text
+    except Exception:
+        return ""
 
 
 def _normalize_host_list(raw):
@@ -4846,6 +4890,9 @@ def api_status():
         "price_sync_enabled": bool(cfg.get("price_sync_enabled", False)),
         "price_sync_url": _safe_target(cfg.get("price_sync_url")),
         "price_sync_interval_days": max(1, min(90, int(cfg.get("price_sync_interval_days", 7) or 7))),
+        # 更新检查源（留空 = 内置源）：前端设置页回显用。走 _safe_target 剥掉
+        # userinfo/query，避免用户把带凭据的镜像地址存进来后被状态接口回显出去。
+        "update_check_url": _safe_target(cfg.get("update_check_url")),
         "egress_proxy_users": [u.get("name") for u in (cfg.get("upstreams") or [])
                                if u.get("use_proxy")],
         "debug": bool(cfg.get("debug", False)),
@@ -5143,6 +5190,109 @@ def api_prices_list():
         return jsonify({"ok": True, "count": len(models), "models": models})
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+
+
+# ========== 版本更新检查（服务端探测） ==========
+# 为什么必须由服务端出网：Web / Docker 部署下，出网能力属于**服务器**，而原先前端是拿
+# **访问者的浏览器**去 fetch api.github.com —— 国内用户浏览器直连必然 NetworkError
+# （表现为「检查更新失败：TypeError: NetworkError...」），跟服务器能不能通毫无关系。
+# 服务端探测后，浏览器只需问自己的服务器要结果。
+DEFAULT_UPDATE_API_URL = "https://api.github.com/repos/xiaYuTian11/maskit/releases/latest"
+# 静态 release 资产（由 scripts/generate-latest-json.py 产出）比走 API 更好：
+# ① 不计入 GitHub 匿名 API 限流（60 次/小时/IP，多人共用一个服务器出口很容易打满）；
+# ② 内容就是面板要的 version / notes / pub_date。
+# 但它只在**已签名**的正式版 Release 上产出（见 release.yml），拿不到时回落 API。
+DEFAULT_UPDATE_STATIC_URL = "https://github.com/xiaYuTian11/maskit/releases/latest/download/latest.json"
+UPDATE_CHECK_TTL = 600          # 10 分钟缓存：把多人共用出口的 API 消耗从「每次点击一次」压到 ~6 次/小时
+UPDATE_CHECK_TIMEOUT = 15       # 比前端原来的 6s 宽——跨境请求 6s 太容易误判成失败
+_update_check_cache = {"data": None, "at": 0.0}
+_update_check_lock = threading.Lock()
+
+
+def _fetch_update_source(url, timeout=UPDATE_CHECK_TIMEOUT):
+    """GET 一个更新源，返回 (归一化后的 dict, 错误文本)。
+
+    两种响应格式都接受并归一化：
+      - GitHub API:  {tag_name, body, published_at}
+      - latest.json: {version, notes, pub_date}
+    这正是「换源不用改前端」的落点——前端只认 version/notes/pub_date 三个字段。
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github.v3+json, application/json",
+        "User-Agent": "Maskit-UpdateCheck/1.0",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(256 * 1024).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, _safe_public_text(e, 120)
+
+    try:
+        payload = _json.loads(raw)
+    except Exception:
+        return None, "响应不是合法 JSON"
+    if not isinstance(payload, dict):
+        return None, "响应格式不是对象"
+
+    # 两种字段名都认（latest.json 用 version，GitHub API 用 tag_name）
+    version = str(payload.get("version") or payload.get("tag_name") or "").strip()
+    if not version:
+        return None, "响应缺少版本字段"
+    return {
+        "version": version,
+        "notes": str(payload.get("notes") or payload.get("body") or ""),
+        "pub_date": str(payload.get("pub_date") or payload.get("published_at") or ""),
+    }, ""
+
+
+@app.get("/api/update/check")
+def api_update_check():
+    """服务端探测最新版本。多源回退 + TTL 缓存 + 明确错误语义。
+
+    源顺序：用户自定义 URL（若配）→ 静态 latest.json → GitHub API。
+    第一个成功即用；全部失败返回 502 + 可读原因，而不是把原始异常抛给用户。
+    结果缓存 10 分钟：GitHub 匿名 API 限流 60 次/小时/IP，多人共用一个服务器出口时
+    每次点击都打一次必然打满，缓存后降到 ~6 次/小时。
+    """
+    now = time.time()
+    with _update_check_lock:
+        cached = _update_check_cache["data"]
+        if cached and now - _update_check_cache["at"] < UPDATE_CHECK_TTL:
+            return jsonify({"ok": True, "cached": True, **cached})
+
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    custom = _normalize_update_check_url((cfg or {}).get("update_check_url"))
+    sources = ([custom] if custom else []) + [DEFAULT_UPDATE_STATIC_URL, DEFAULT_UPDATE_API_URL]
+
+    last_err, data, used = "", None, ""
+    for url in sources:
+        got, err = _fetch_update_source(url)
+        if got:
+            data, used = got, url
+            break
+        last_err = err
+
+    if data is None:
+        _emit_log(f"[panel] 更新检查失败（{len(sources)} 个源均不可用）: {last_err}")
+        return jsonify({
+            "ok": False,
+            "error": "无法连接更新服务，请检查网络或在设置中配置更新检查源",
+            "detail": last_err,
+        }), 502
+
+    data["source"] = used
+    with _update_check_lock:
+        _update_check_cache.update({"data": data, "at": now})
+    return jsonify({"ok": True, "cached": False, **data})
 
 
 @app.get("/api/audit/job")
