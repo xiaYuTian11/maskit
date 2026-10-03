@@ -15,8 +15,8 @@ services:
       - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_ANTHROPIC_HOST_PORT:-18703}:18703"   # Anthropic 反向代理通道
       - "${MASKIT_BIND_HOST:-127.0.0.1}:${MASKIT_CUSTOM_HOST_START:-18704}-${MASKIT_CUSTOM_HOST_END:-18710}:18704-18710" # 自定义上游端口段
     volumes:
-      # 命名卷由 Docker 管理权限（容器以 uid 10001 非 root 运行）。
-      # 想直接看文件可改成 bind mount：./maskit_data:/data，并先 chown -R 10001 ./maskit_data
+      # 命名卷由 Docker 管理权限（容器以 uid 1001 非 root 运行）。
+      # 想直接看文件可改成 bind mount：./maskit_data:/data，并先 chown -R 1001 ./maskit_data
       - maskit_data:/data
     environment:
       - TZ=Asia/Shanghai
