@@ -1,7 +1,7 @@
 # ==========================================
 # 阶段 1: 前端静态资源构建（在原生构建架构上执行，避免 QEMU 模拟导致死锁或极度降频）
 # ==========================================
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS frontend-builder
 WORKDIR /build/frontend
 
 COPY frontend/package*.json ./
@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     net-tools \
     procps \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home --home-dir /home/maskit maskit \
+    && useradd --system --uid 1001 --create-home --home-dir /home/maskit maskit \
     && mkdir -p /data && chown maskit:maskit /data
 
 # 安装 Python 核心依赖
