@@ -44,6 +44,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 拷贝核心引擎文件（.dockerignore 已排除本机事件库 / token / 配置备份）
 COPY engine/ ./
 
+# 占位符 Skill 包：`GET /api/skill/bundle` 的数据源（源码态在 engine/ 的上一级，
+# 容器里 engine/ 已拷成 /app/*，所以包落在 /app/agent-bundle/maskit-placeholders）。
+# 漏了这行不影响启动、不影响脱敏，只让容器部署的“下载 Skill 包”恒 500 ——
+# 属于“只有用户点了才知道”的缺口，由 tests/test_placeholder_skill.py 静态钉住。
+COPY agent-bundle/ ./agent-bundle/
+
 # 从阶段 1 拷贝构建好的前端静态页面到 web_dist
 COPY --from=frontend-builder /build/frontend/dist /app/web_dist
 

@@ -189,7 +189,10 @@ class EvidenceTests(unittest.TestCase):
         self.g.response_complete(flow)
         self.assertEqual(seen, [(flow, "client_protocol_error")])
         snapshot = self.g.snapshot(flow)
-        self.assertEqual(snapshot["phase"], "response_stream")
+        # 2026-10-02 归因修正：证据已定论（complete）后的取消**不覆写 phase**，
+        # 只追加 cancelled_after_complete（见 tests/test_cancel_attribution.py）。
+        self.assertEqual(snapshot["phase"], "complete")
+        self.assertTrue(snapshot["cancelled_after_complete"])
         self.assertEqual(snapshot["reason"], "client_protocol_error")
         self.assertEqual(self.g.stats()["finished"], 1)
         self.assertNotIn("sensitive", json.dumps(flow.metadata))

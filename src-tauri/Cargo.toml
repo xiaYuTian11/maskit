@@ -1,6 +1,6 @@
 [package]
 name = "maskit"
-version = "0.7.0"
+version = "0.8.0"
 description = "数据面具 Maskit — 本地 LLM 敏感信息脱敏代理（Tauri 壳 + Python 引擎 sidecar）"
 authors = ["TMW"]
 license = "AGPL-3.0-only"
@@ -40,3 +40,11 @@ socket2 = "0.6"
 # 按 UTF-8 解会把中文安装路径解坏，而那条路径要拿来做比对。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+
+# Tauri 的 AppIndicator 后端不发送 Linux 点击事件；使用原生 SNI Activate。
+# 0.2 系列兼容本项目声明的 rust-version（0.3 系列要求更高）。
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = "0.2.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus = "0.9"

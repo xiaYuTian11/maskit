@@ -1359,9 +1359,50 @@ class ConstantParityTests(unittest.TestCase):
             "所以只能靠本用例保证同步）",
         )
 
-    def test_body_limit_is_32mib(self):
-        """数值本身也钉住：两边一起被改成别的值时，至少还需要有人明确改这条。"""
+    def test_body_limit_is_32mib_by_default(self):
+        """默认值本身也钉住：两边一起被改成别的值时，至少还需要有人明确改这条。"""
         self.assertEqual(panel._EXT_MAX_BODY, 32 * 1024 * 1024)
+        self.assertEqual(tr._DEFAULT_MAX_REQUEST_BODY, 32 * 1024 * 1024)
+        self.assertEqual(tr.set_max_request_body(None), 32 * 1024 * 1024)
+
+    def test_body_limit_clamps_identically_on_both_sides(self):
+        """§H4a：上限可配置，但两进程必须**同口径**（同样输入 → 同样字节数）。
+
+        0/负数 → 1 MiB（不能让 0 把闸门变成“什么都拒”）；非数字/缺值 → 32 MiB；
+        超上限 → 256 MiB。任一边改了 clamp，这里就会红。
+        """
+        cases = ((0, 1), (-5, 1), ("abc", 32), (None, 32), (64, 64), (9999, 256), ("16", 16))
+        try:
+            for raw, expected_mb in cases:
+                self.assertEqual(panel._clamp_max_request_body_mb(raw), expected_mb,
+                                 "panel clamp %r" % (raw,))
+                self.assertEqual(tr.set_max_request_body(raw), expected_mb * 1024 * 1024,
+                                 "engine clamp %r" % (raw,))
+        finally:
+            # 恢复默认，避免污染同进程内其它用例
+            panel._apply_ext_body_limit(32)
+            tr.set_max_request_body(None)
+
+    def test_configured_limit_takes_effect_on_both_sides(self):
+        cfg = panel.normalize_config({"max_request_body_mb": 64})
+        self.assertEqual(cfg["max_request_body_mb"], 64)
+        try:
+            panel._apply_ext_body_limit(cfg["max_request_body_mb"])
+            self.assertEqual(panel._EXT_MAX_BODY, 64 * 1024 * 1024)
+            self.assertEqual(tr.set_max_request_body(cfg["max_request_body_mb"]), 64 * 1024 * 1024)
+            # 排队预算下限必须跟着抬：否则 32~64MiB 的请求会被自己的体积顶出准入，
+            # 空闲机器也恒定 engine_busy（AGENTS.md §3 的已知陷阱）。
+            self.assertGreaterEqual(tr._MASK_QUEUE_BYTES, tr._MAX_REQUEST_BODY)
+        finally:
+            panel._apply_ext_body_limit(32)
+            tr.set_max_request_body(None)
+        self.assertEqual(panel._EXT_MAX_BODY, tr._MAX_REQUEST_BODY)
+
+    def test_template_shares_the_body_limit_default(self):
+        ex = json.loads((Path(__file__).resolve().parents[1]
+                         / "engine" / "config.example.json").read_text(encoding="utf-8"))
+        self.assertEqual(ex["max_request_body_mb"], 32)
+        self.assertEqual(ex["max_request_body_mb"], panel.default_config()["max_request_body_mb"])
 
 
 class IngressAllowlistTests(unittest.TestCase):

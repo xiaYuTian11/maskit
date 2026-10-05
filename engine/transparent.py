@@ -36,6 +36,9 @@ from pathlib import Path
 from mitmproxy import http, ctx, exceptions
 from connection_policy import ConnectionGovernance, validate_connection_policy
 from body_buffer import decode_body
+import inspection
+import onboarding
+import protocol_contracts as _contracts
 from urllib.parse import urlparse
 from shield_defaults import (
     DEFAULT_DOMAINS,
@@ -52,6 +55,7 @@ from shield_defaults import (
 )
 from event_store import enqueue_event
 from event_store import enqueue_audit_event
+from event_store import project_event_for_log, stop_log_trace as _stop_log_trace
 from credential_labels import CREDENTIAL_LABELS
 import audit_signals as _audit
 import base64
@@ -102,18 +106,163 @@ def _on_stream_cancel(flow, reason):
         _drop(flow.metadata.get("session_id"), expect=owned)
 
 
+# 响应「已交付完毕」的标记值。只有流式收尾回调（`_sse_stream_factory` 里的 `_finish`）
+# 会写它——那是唯一能证明「整条流已交给 mitmproxy」的时刻。整包路径的
+# `_transport_complete` 在响应钩子**一开始**就调，不能拿来当「已交付」的判据，
+# 两者刻意不共用（见 `_record_client_cancel` 的取舍说明）。
+_RESPONSE_CONCLUDED_STREAM_DONE = "stream_done"
+
+
+def _response_concluded(flow):
+    """整条响应是否已交付完毕（判据只此一处，见 `_RESPONSE_CONCLUDED_STREAM_DONE`）。"""
+    try:
+        metadata = getattr(flow, "metadata", None) or {}
+        return metadata.get("shield_response_concluded") == _RESPONSE_CONCLUDED_STREAM_DONE
+    except Exception:
+        return False
+
+
+def _flow_error_detail(flow):
+    """错误/取消事件的统一诊断串；返回 `(detail, raw)`。
+
+    `error()` 与 `_record_client_cancel` **必须共用同一份**：2026-10-02 实测事故正是
+    「先落地的薄记录（只有 reason/failure_phase）把后到的富记录挡掉」，用户拿到一整屏
+    没有 bytes/耗时/上游的 CANCEL 行，既分不清真中断与收尾断开，也无从归因。
+    `raw` 是 flow.error 的截断文本，供调用方判定事件类型（Client disconnected / DNS）。
+    """
+    err = getattr(flow, "error", None)
+    raw = ""
+    try:
+        raw = str(err)[:160]
+    except Exception:
+        pass
+    metadata = getattr(flow, "metadata", None) or {}
+    request = getattr(flow, "request", None)
+    # resp 仅记录是否存在 response 对象；耗时与缺失响应都不能单独证明
+    # 复用了坏连接、请求已写出，或上游应用已经处理。
+    try:
+        elapsed_ms = int((time.time() - float(getattr(request, "timestamp_start", 0) or 0)) * 1000)
+    except Exception:
+        elapsed_ms = -1
+    try:
+        req_len = len(request.raw_content or b"")
+    except Exception:
+        req_len = -1
+    err_name = type(err).__name__ if err is not None else "?"
+    has_resp = 1 if getattr(flow, "response", None) is not None else 0
+    detail = f"[err={err_name} resp={has_resp} req={req_len}B ms={elapsed_ms}] " + raw
+    # P0-b：脱敏耗时与「脱敏完成到出错之间等了多久」必须进事件 —— 否则
+    # 「卡在脱敏」与「卡在上游」在事件行上长得一模一样（2026-09-28 实测就因此
+    # 把 58.5s 的冷缓存脱敏误读成上游问题、又把纯上游慢误判成脱敏问题，来回两次）。
+    # upstream_wait 仅为脱敏完成后的累计等待，不代表请求已到达上游。
+    # upstream_wait=-1 表示拿不到脱敏完成时刻（例如脱敏未跑完就出错）。
+    mask_ms = metadata.get("shield_mask_ms")
+    if mask_ms is not None:
+        try:
+            done_at = metadata.get("shield_mask_done_at")
+            upstream_wait = int((time.time() - float(done_at)) * 1000) if done_at else -1
+        except Exception:
+            upstream_wait = -1
+        detail = f"[mask={mask_ms}ms upstream_wait={upstream_wait}ms] " + detail
+    # 流式接管中途被切断时 _finish() 不执行，没有 RESTORE 事件可对照，
+    # 光看 ERR 无法判断断在哪。带上回调次数/字节数还原现场。
+    if metadata.get("shield_streamed"):
+        detail = (f"[stream calls={metadata.get('shield_stream_calls')} "
+                  f"bytes={metadata.get('shield_stream_bytes')}] " + detail)
+    # 走了出口代理的请求，失败时必须标出来：代理不通与上游不通的现象一样
+    # （连接超时/被拒），不标注就分不清该查代理还是查上游。
+    if metadata.get("shield_via_proxy"):
+        detail = "[via egress_proxy] " + detail
+    return detail, raw
+
+
+# ── 失败归因（批次 8 / P0-5）──────────────────────────────────────────────
+# 现象层全是「连接断开 / 超时」，但几类成因的处置完全不同，不判就只能靠猜：
+#   · client   —— SDK 超时或用户取消（改我们这边没用）；
+#   · dns      —— 上游域名解析失败；
+#   · proxy    —— 走了出口代理（代理不通与上游不通现象完全一样）；
+#   · engine   —— 请求**还没出网**就断了（脱敏未跑完/排队被拒），责任在本机引擎；
+#   · upstream —— 其余：脱敏已完成、请求已写出，断在上游或链路上。
+# 2026-09-28 实测就因事件行上区分不了后两者，把 58.5s 的冷缓存脱敏误读成上游问题、
+# 又把纯上游慢误判成脱敏问题，来回两次。
+_CLIENT_FAILURE_HINTS = ("client disconnected", "violation of protocol")
+_DNS_FAILURE_HINTS = ("getaddrinfo", "name or service not known",
+                      "nodename nor servname", "temporary failure in name resolution")
+_FAILURE_OWNERS = frozenset({"client", "dns", "proxy", "engine", "upstream"})
+
+
+def _flow_failure_owner(flow, raw):
+    """判一次失败的**责任方**（见上方 `_FAILURE_OWNERS`）。只取已有事实，不猜。
+
+    拿不准时宁可返回 upstream：既不要把自己的问题说成上游的，也不要把上游的
+    问题揽成自己的——两种误判都会把排查引向错误的方向。
+    """
+    low = (raw or "").lower()
+    if any(h in low for h in _CLIENT_FAILURE_HINTS):
+        return "client"
+    if any(h in low for h in _DNS_FAILURE_HINTS):
+        return "dns"
+    metadata = getattr(flow, "metadata", None) or {}
+    if metadata.get("shield_via_proxy"):
+        return "proxy"
+    # 脱敏完成时刻是「请求即将出网」的唯一里程碑：没落就说明还没走到那一步。
+    # 只对真的走过脱敏链路的请求（有 session_id）下这个结论，否则非匹配域名的
+    # 透传请求超时也会被算成引擎问题。
+    if metadata.get("session_id") and metadata.get("shield_mask_done_at") is None:
+        return "engine"
+    return "upstream"
+
+
+def _flow_error_type(flow):
+    """异常的**类名**（结构化字段，便于在日志里按类型聚合）。
+
+    `_flow_error_detail` 里已经有 `err=<类名>` 的文字形态，但那是拼进 msg 的字符串，
+    筛选/聚合都得正则抠；单独落一个字段才能直接按类型统计（如全部 `ReadTimeout`
+    指向上游、全部 `ConnectionResetError` 指向链路）。
+    """
+    err = getattr(flow, "error", None)
+    return type(err).__name__ if err is not None else ""
+
+
 def _record_client_cancel(flow, phase):
+    """记录一次客户端断开。
+
+    **事件层面的取舍**（2026-10-02）：整条响应已交付完毕（流式收尾回调执行过）后客户端
+    才关连接时，**不落 CANCEL 事件**。那只是「客户端读完关连接」，不是取消：实测 10-02
+    这类记录与 MASK 达到 1:1（1334 / 1450），而带诊断的每一条都伴随已下发内容
+    （bytes 最小 951、中位 7.1 KB），纯属噪声。真·未完成的中断照旧记录。
+
+    **但取消信号照旧发出**（`_on_stream_cancel` 的唤醒、`_shield_cancel_recorded` 的置位
+    都不改）：AUX 任务与脱敏池的等待者仍要被唤醒，否则就是拿日志噪声换资源泄漏；
+    置位还能避免 `error()` 紧接着补发一条同样的记录。
+
+    判据与「是否已完成」用 `_response_concluded`，不在本函数里另写一遍——两条路径各判
+    一次必然漂移。范围保守：整包（非流式）响应写出途中被掐断**仍照旧记录**，因为那种
+    情况拿不到「body 已写完」的证据。
+    """
     if getattr(flow, "_shield_cancel_recorded", False):
         return
     flow._shield_cancel_recorded = True
     _transport_event("error", flow)
     flow.metadata["transport"] = _safe_transport_snapshot(flow)
+    if _response_concluded(flow):
+        return
     req = getattr(flow, "request", None)
-    _emit("CANCEL", sid=flow.metadata.get("session_id", ""),
+    sid = flow.metadata.get("session_id", "")
+    session = _session_get(sid) if sid else None
+    source = (session or {}).get("source") or {}
+    detail, _raw = _flow_error_detail(flow)
+    up_name = flow.metadata.get("shield_upstream") or (session or {}).get("upstream_name") or ""
+    model = flow.metadata.get("shield_model") or (session or {}).get("model") or ""
+    _emit("CANCEL", sid=sid,
           host=getattr(req, "host", ""), method=getattr(req, "method", ""),
           path=str(getattr(req, "path", "")).split("?", 1)[0],
           reason=getattr(flow, "_shield_cancel_reason", "client_disconnected"),
-          failure_phase=phase, transport=_transport_snapshot(flow))
+          failure_phase=phase, transport=_transport_snapshot(flow),
+          # CANCEL 的归因恒为 client（事件本身就是客户端断开）；`error_type` 仍然带上，
+          # 好把「SDK 超时」与「协议错」分开统计。
+          failure_owner="client", error_type=_flow_error_type(flow),
+          msg="flow_error:" + detail, upstream=up_name, model=model, **source)
 
 
 _CONNECTIONS.on_cancel = _on_stream_cancel
@@ -330,7 +479,7 @@ RULES = [
     # 邮箱：本地部分首字符须为字母/数字/下划线/中文（排除 +- 等符号，防止 Git diff 的 +
     # 符号或列表 - 符号被当成用户名一部分吞噬）。
     # 本地部分前不能是 :（连接串 user:pass@host 形态防误伤），亦不能紧跟在其他词法字符后。
-    # 下划线必须留在首字符类里：它同时在负向断言集合内，两边都排除会让 `_svc@corp.com`
+    # 下划线必须留在首字符类里：它同时在负向断言集合内，两边都排除会让 `某个邮箱字面量`
     # 整段不匹配（首字符不是 `_`、从 `s` 起又被断言挡住）→ 明文漏检（2026-09 复审）。
     (re.compile(r"(?<!:)(?<![A-Za-z0-9._\u4e00-\u9fff])[a-zA-Z0-9_\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9._%+-]{0,63}@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z\u4e00-\u9fff]{2,}(?![A-Za-z0-9._%+-])"), "EMAIL", 0),
     # 座机：3位区号(010/02x)或4位区号(03xx-09xx) + 分隔符/括号 + 7-8位本地号 + 可选分机号。
@@ -921,6 +1070,10 @@ CMD_BLOCK_NOTICE = "echo '[Maskit] 已阻止高危删除命令，本条为占位
 CMD_HOLD_MAX = 64
 # AI 实体识别开关（默认关闭，需用户显式开启，避免概率模型干扰确定性规则）
 NER_ENABLED = False
+# 严格模式（§B3，默认关闭）：开启后要求「本次语义检测必须完整成功」，命中降级类原因
+# 码即在**出网前**阻断（503）。老配置保持 best-effort 行为；开启后不会自动取消，
+# 只能由用户显式关掉开关（不允许回滚把它静默降级）。
+NER_REQUIRE_COMPLETE = False
 # 主动探针注入的 canary nonce 注册表（跨请求污染检测用）
 # 结构：{nonce: ts}，按 ts 清理过期 nonce，避免无界增长
 #
@@ -957,11 +1110,17 @@ _STREAM_DEBUG = (os.environ.get("SHIELD_STREAM_DEBUG") or "").strip() not in (""
 # 脱敏原文映射永久驻留。取 15 分钟：远大于正常长生成的块间隔（有数据就 _touch
 # 刷新 ts），又能兜住死连接。
 _INFLIGHT_MAX_IDLE = 900
-# 请求体脱敏上限（32MB）。脱敏要对全文跑十几条正则并重新序列化 JSON，全部在
-# mitmproxy 的 asyncio event loop 上**同步**执行——超大 body 会连带冻结所有其他
-# 连接（含进行中的 SSE 流）。正常 LLM 请求（含多模态 base64 图片）远达不到这个
-# 量级，到这里基本是异常客户端或误发文件，按 fail-closed 拒绝比拖垮整个代理好。
-_MAX_REQUEST_BODY = 32 * 1024 * 1024
+# 请求体脱敏上限（默认 32MB，**可配置**：`config.max_request_body_mb`，§H4a）。
+# **别再按旧文说"脱敏全部跑在 event loop 上同步执行"**：
+# 脱敏自重 2026-09-24 起 offload 到 `_MASK_POOL` 专职线程（见 `_mask_pipeline_worker`），
+# 超大 body 不再直接冻结事件循环。闸门真正拦的是三件事：
+#   1) `_mask_tree` 是纯 Python + `re`，受 GIL 串行化——实测 ≈112 ms/MiB，一条 32 MiB
+#      请求会占住 GIL 约 3.7s，把同池其它连接的脱敏/还原一起拖慢；
+#   2) 内存上界 = 单条上限 × 池宽（最坏 ≈ workers×32MiB 在跑 + workers×8MiB 排队）；
+#   3) `_ENGINE_DEADLINE_S=120s` 是端到端预算，单条无界会让它自己 `engine_timeout`。
+# 并发不足是另一条路径（503 `engine_busy`）。**严禁为了放行大请求而少扫字节。**
+_DEFAULT_MAX_REQUEST_BODY = 32 * 1024 * 1024
+_MAX_REQUEST_BODY = _DEFAULT_MAX_REQUEST_BODY
 # 响应体还原上限（32MB）：json.loads + 全树遍历同样是同步 CPU 操作，几十 MB 的响应
 # 足以把 event loop 占住数秒，期间**同进程内所有会话**的脱敏/还原一起停摆。
 # 请求侧上一行早有这道闸，响应侧原先只受上游返回体大小间接限制。
@@ -977,15 +1136,27 @@ sessions: dict = {}
 
 
 def _debug(tag, sid, text):
-    """调试日志：含真实敏感数据，仅排障用。"""
+    """调试日志：含真实敏感数据，仅排障用。
+
+    受日志写入模式约束（§D1）：只有 detailed 才写原文。最小模式与限时排障
+    都不能绕过新策略——「显式打开了 debug 开关」不是把未脱敏原文落盘的合法
+    理由，否则最小模式就形同虚设（明文仍在数据目录里）。取模式失败时
+    一律不写（fail-closed）。
+    """
     if not DEBUG:
+        return
+    try:
+        import event_store as _es
+        if _es.effective_log_mode() != _es.LOG_MODE_DETAILED:
+            return
+    except Exception:
         return
     try:
         fn = _DATA_ROOT / f"debug-{time.strftime('%Y%m%d')}.log"
         head = f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} {tag} sid={sid} ====\n"
         with open(fn, "a", encoding="utf-8") as f:
             f.write(head)
-            f.write(text if isinstance(text, str) else str(text))
+            f.write(onboarding.scrub(text if isinstance(text, str) else str(text)))
             f.write("\n")
     except Exception:
         pass
@@ -1165,7 +1336,7 @@ def _phone_ok(num_str: str) -> bool:
     2. 严格 1[3-9] 开头；
     3. 排除全同重复数字（如 11111111111）。
 
-    只挡 set==1 的全同号：set<=2 会误杀 13131313131（131 联通，set={1,3}=2）
+    只挡 set==1 的全同号：set<=2 会误杀 手机号（131 联通，set={1,3}=2）
     等真实在用号段。全同号 11111111111 的特征是 set==1，正则 1[3-9] 已挡住
     其第二位，这里只是双保险，不该误伤任何 2 种数字以上的合法号。
     """
@@ -1592,9 +1763,12 @@ def _new_token(label):
     换来「索引永远无歧义」，这个代价是值的。
     """
     lab = _safe_label(label)
+    tables = _tables()
     for _ in range(20):
         token = "{{%s_%s}}" % (lab, _rand_suffix())
-        if token not in _RECENT_REV and _token_suffix(token) not in _RECENT_SUFFIX:
+        # 冲突判定按**当前表组**：演示仓是真实复用窗口的快照副本，所以查它同时
+        # 覆盖了两边——演示里签出的 token 不会与真实 token 抢同一个后缀。
+        if token not in tables.rev and _token_suffix(token) not in tables.suffix:
             return token
     # 兜底仍用 6 位：长度必须落在 _SUFFIX_PAT 认得的范围内。
     # 原来这里返回 secrets.token_hex(6)（12 个字符），而正则只认 6 个——
@@ -1700,9 +1874,10 @@ def _is_custom_word_orig(orig):
     TTL 与 LRU 永久驻留，与「复用表到期即失效」的原文驻留窗口契约冲突
     （见 SECURITY.md）。label 优先取已签发的 REV 记录，退回配置里的 label。
     """
-    tok = _CUSTOM_WORD_FWD.get(orig)
+    tables = _tables()
+    tok = tables.cw_fwd.get(orig)
     if tok is not None:
-        rec = _CUSTOM_WORD_REV.get(tok)
+        rec = tables.cw_rev.get(tok)
         return _custom_word_enabled(orig, (rec[1] if rec else None) or CUSTOM_WORDS.get(orig, ""))
     if orig in CUSTOM_WORDS:
         return _custom_word_enabled(orig, CUSTOM_WORDS.get(orig, ""))
@@ -1710,7 +1885,7 @@ def _is_custom_word_orig(orig):
 
 
 def _is_custom_word_token(tok):
-    return tok in _CUSTOM_WORD_REV
+    return tok in _tables().cw_rev
 # 启动预热时最多回读的事件条数（见 _warmup_recent_from_db）。复用表本来就有
 # _RECENT_MAX 封顶，读再多也留不住，这个上限只是防止重度使用下几万条事件
 # 逐条 json.loads 把引擎启动拖慢。
@@ -1747,6 +1922,114 @@ _RECENT_SUFFIX = {}
 # 撞车后**永不参与兜底匹配**——「保留先来的那个」会把 A 的原文答给 B，
 # 属于静默替换错值；拒答的代价只是这个后缀不再兜底，退化成改动前的行为。
 _SUFFIX_AMBIGUOUS = object()
+
+
+class _TokenTables:
+    """一组占位符映射表（复用窗口 FWD/REV/后缀索引 + 自定义词永久映射）。
+
+    存在的唯一理由是**演示隔离**：`/api/demo/lab` 要在不给真实会话留痕的前提下
+    回答「同样的原文会得到什么占位符」。只靠 sid 做不到这件事——sid 只隔离
+    `sessions`，而签发 token 用的复用表是进程级全局的，演示样本一旦写进去就会
+    进入真实请求的复用窗口（反过来，真实请求也会复用演示的 token）。
+
+    所以参数化的是「表」而不是「sid」：默认表组（`_GlobalTables`）动态读模块
+    全局，演示作用域（`demo_store_scope`）注入本类的独立实例；本文件的脱敏/还原
+    路径一律经 `_tables()` 取表，不再直接引用全局名（预热与词表重载两条全局
+    生命周期路径除外，它们有意写全局表）。
+    """
+
+    __slots__ = ("fwd", "rev", "suffix", "cw_fwd", "cw_rev")
+
+    def __init__(self, fwd, rev, suffix, cw_fwd, cw_rev):
+        self.fwd = fwd
+        self.rev = rev
+        self.suffix = suffix
+        self.cw_fwd = cw_fwd
+        self.cw_rev = cw_rev
+
+
+class _GlobalTables:
+    """默认表组：字段在**每次访问时**读模块全局，不持引用。
+
+    持引用会在两处静默出错：
+    - `_sync_custom_words` 在词表/标签变更时**整体换对象**
+      （`_CUSTOM_WORD_FWD = new_fwd`），持引用会让访问器继续看上一代表 ——
+      词表改了却识别不到；
+    - 测试与压测会整体替换 `_RECENT_FWD`（如 `_IterationWindowDict` 探并发遍历），
+      持引用等于把它们替换的那张表绕过。
+    一次属性读只是一次模块字典查找，相比热点路径上的正则扫描可以忽略。
+    """
+
+    __slots__ = ()
+
+    @property
+    def fwd(self):
+        return _RECENT_FWD
+
+    @property
+    def rev(self):
+        return _RECENT_REV
+
+    @property
+    def suffix(self):
+        return _RECENT_SUFFIX
+
+    @property
+    def cw_fwd(self):
+        return _CUSTOM_WORD_FWD
+
+    @property
+    def cw_rev(self):
+        return _CUSTOM_WORD_REV
+
+
+_DEFAULT_TABLES = _GlobalTables()
+# 线程本地覆盖：**只对设置了它的线程生效**。脱敏工作线程（_MASK_POOL）、代理
+# 事件循环、事件库写入线程从不设置它，因此一律看到全局表 —— 演示作用域不会
+# 把它们拽进来（这正是选线程本地而不是「临时换模块全局名」的理由：后者是
+# 进程级的，演示那段窗口里并发的真实请求会把 token 签进演示仓，换回后全部丢失）。
+_TABLES_TLS = threading.local()
+
+
+def _tables():
+    """当前线程生效的表组；未设置覆盖时为全局表。"""
+    cur = _TABLES_TLS.__dict__.get("cur")
+    return cur if cur is not None else _DEFAULT_TABLES
+
+
+@contextlib.contextmanager
+def demo_store_scope(seed_recent=True):
+    """把**当前线程**的表组切到演示专用仓（退出时必然还原，异常也一样）。
+
+    种子策略（默认 `seed_recent=True`）：复用窗口与后缀索引取只读快照，自定义词
+    永久映射取独立拷贝。为什么不是空表：演示的意义是「真实请求会得到什么」，
+    而同一原文若本机已有存活 token，真实请求会沿用它 —— 空表会让演示显示一个
+    现实中不会出现的后缀，这个功能就失去了意义。而演示期间的**所有写入只落在
+    副本上**：真实复用窗口一条不增、一条不减、时间戳一点都不动。
+
+    快照必须在 `_STATE_LOCK` 内做：别的线程正在签发/淘汰时遍历这些 dict 会抛
+    `RuntimeError: dictionary changed size during iteration`。拷贝很快，脱敏
+    （慢的那段）留在锁外。
+    """
+    with _STATE_LOCK:
+        tables = _TokenTables(
+            fwd={k: list(v) for k, v in _RECENT_FWD.items()},
+            rev={k: list(v) for k, v in _RECENT_REV.items()},
+            suffix=dict(_RECENT_SUFFIX),
+            cw_fwd=dict(_CUSTOM_WORD_FWD),
+            cw_rev={k: list(v) for k, v in _CUSTOM_WORD_REV.items()},
+        )
+    prev = _TABLES_TLS.__dict__.get("cur")
+    _TABLES_TLS.cur = tables
+    try:
+        yield tables
+    finally:
+        # 还原而不是直接删属性：demo 作用域可以嵌套（回归测试会连续进入），
+        # 删掉会把外层那一层一起扯掉。
+        if prev is None:
+            _TABLES_TLS.__dict__.pop("cur", None)
+        else:
+            _TABLES_TLS.cur = prev
 
 # 复用表用独立 TTL，不跟着 SESSION_TTL（默认 600s）走。
 #
@@ -1807,7 +2090,7 @@ _prune_last = [0.0]  # time.monotonic()，不受系统时钟回拨影响
 def _prune_recent_throttled(now):
     """按窗口节流调用 `_prune_recent`（**热路径专用**）。
 
-    调用方必须已持 `_STATE_LOCK`：读 `len(_RECENT_FWD)` 与写 `_prune_last` 要和签发
+    调用方必须已持 `_STATE_LOCK`：读 `len(_tables().fwd)` 与写 `_prune_last` 要和签发
     同处一个临界区，否则节流窗口自身就变成了竞态。
 
     节流的只是**调用频率**，不是清理语义：`_prune_recent()` 本身逐字不变（含 TTL
@@ -1815,7 +2098,7 @@ def _prune_recent_throttled(now):
     """
     mono = time.monotonic()
     if (mono - _prune_last[0] < _PRUNE_INTERVAL_S
-            and len(_RECENT_FWD) <= int(_RECENT_MAX * _PRUNE_SLACK)):
+            and len(_tables().fwd) <= int(_RECENT_MAX * _PRUNE_SLACK)):
         return
     _prune_last[0] = mono
     _prune_recent(now)
@@ -1824,23 +2107,24 @@ def _prune_recent_throttled(now):
 def _prune_recent_locked(now=None):
     """按 TTL + 条数上限清理复用表，防止无界增长。
 
-    后缀索引必须跟着一起删：它是指向 _RECENT_REV 的指针，留着指向已淘汰
-    token 的条目虽然不会答错（_lookup_by_suffix 还会回查 _RECENT_REV），
+    后缀索引必须跟着一起删：它是指向 _tables().rev 的指针，留着指向已淘汰
+    token 的条目虽然不会答错（_lookup_by_suffix 还会回查 _tables().rev），
     但会让 _new_token 白白避开一个已经空出来的后缀。
     """
     now = now or time.time()
+    tables = _tables()
     ttl = _recent_ttl()
     stale = [
-        k for k, v in list(_RECENT_FWD.items())
+        k for k, v in list(tables.fwd.items())
         if not _is_custom_word_orig(k) and now - v[2] > ttl
     ]
     for k in stale:
-        tok = _RECENT_FWD.pop(k, [None])[0]
-        _RECENT_REV.pop(tok, None)
+        tok = tables.fwd.pop(k, [None])[0]
+        tables.rev.pop(tok, None)
         _suffix_index_del(tok)
-    if len(_RECENT_FWD) > _RECENT_MAX:
+    if len(tables.fwd) > _RECENT_MAX:
         evictable = [
-            (k, v) for k, v in list(_RECENT_FWD.items())
+            (k, v) for k, v in list(tables.fwd.items())
             if not _is_custom_word_orig(k)
         ]
         # 配额只按**可淘汰**条数算：自定义词的规模由词表封顶，不该挤占普通条目的额度。
@@ -1850,14 +2134,109 @@ def _prune_recent_locked(now=None):
         if over > 0:
             oldest = sorted(evictable, key=lambda kv: kv[1][2])
             for k, v in oldest[:over]:
-                _RECENT_FWD.pop(k, None)
-                _RECENT_REV.pop(v[0], None)
+                tables.fwd.pop(k, None)
+                tables.rev.pop(v[0], None)
                 _suffix_index_del(v[0])
+
+
+def reset_mappings(reason="") -> dict:
+    """清空「占位符 ↔ 原文」内存映射：会话表 + 复用窗口 + 后缀索引。
+
+    这是 §D3.3 要求的**独立动作**（与清日志/清审计/清数字统计并列）：以前想清掉
+    内存里的映射只能重启代理，而重启会一并断掉在飞请求与全部会话状态——
+    比用户想要的东西重得多。
+
+    清哪些：
+      · `sessions`：每会话的 fwd/rev/labels 与流式收尾状态；
+      · 复用窗口 `_RECENT_FWD` / `_RECENT_REV` / `_RECENT_SUFFIX`。
+    不清哪些：
+      · 自定义词永久映射（`_CUSTOM_WORD_*`）：它由用户自己的词表派生，词表本来就
+        明文存在 config.json 里，且它的存在意义就是「词不被删就一直稳定」；
+      · 事件库（历史日志）与统计——想清那些请用各自的独立动作。
+
+    锁：`sessions` 的插入/删除靠 GIL 原子（见 B-1a 契约④），但 `_RECENT_*` 会被
+    `_prune_recent_locked` 与词表重建遍历并成批删改，**必须持 `_STATE_LOCK`**，
+    否则并发遍历会抛 `RuntimeError: dictionary changed size` 把在途请求直接打死。
+
+    代价必须对用户说清楚（面板端点的确认文案会写）：清掉之后**当前对话里携带的
+    历史占位符会全部还原不了**（原样透传给客户端），直到它们被重新扫描到；
+    正在流式传输的响应也会因会话消失而停止还原。
+
+    与在途请求的关系（下一个人必问）：本函数**不会**打断已经在跑的请求——
+    持锁期与它们互斥，而锁外的单次读取（`sessions.get(sid)`）可能拿到一个
+    已被从字典里移除的会话对象。那个请求自己的还原照样会完成（它拿着对象引用），
+    但它的映射不会再被后续请求复用 —— 这正是本动作的语义，不是残留。
+    """
+    with _STATE_LOCK:
+        n_sessions = len(sessions)
+        sessions.clear()
+        n_recent = len(_RECENT_FWD)
+        _RECENT_FWD.clear()
+        _RECENT_REV.clear()
+        _RECENT_SUFFIX.clear()
+    # 叶子缓存也一并清掉：它的命中判据就是「占位符还能在 rev 里查到」，
+    # 映射清空后整张表必然全部未命中，留着只是白占内存（不清也不会有错值）。
+    _leaf_cache_clear()
+    _log("[LLM Shield] 内存映射已清空: 会话=%d 复用条目=%d%s"
+         % (n_sessions, n_recent, (" reason=" + str(reason)) if reason else ""))
+    return {"ok": True, "sessions": n_sessions, "recent_entries": n_recent}
+
+
+# 已处理的「清空映射」代号（None = 还没看过，首次只看不重置）。
+# 用列表而不是裸全局：_maybe_apply_mapping_reset 要**写入**它，
+# 而模块级全局在函数里必须 global 声明——列表让这条热路径少一个 global 噪音。
+_MAPPING_RESET_SEEN = [None]
+
+
+def ack_mapping_reset(gen) -> None:
+    """把本进程已处理的「清空映射」代号登记为 `gen`，不触发清空。
+
+    存在的理由：**面板也是消费方**（扩展桥接链路会把它的 `transparent` 副本清一次）。
+    面板端点自己已经调过 `reset_mappings()` 了，如果不同步登记代号，面板进程会在
+    下一个 `/api/ext/mask` 时把同一个代号再消费一次 —— 那时表里已经是**清空之后
+    新产生**的映射，用户视角就是「刚清完又莫名少了一次」。
+
+    引擎进程**不**需要、也不应该调这个：它必须靠代号变化来触发清空。
+    """
+    try:
+        _MAPPING_RESET_SEEN[0] = int(gen or 0)
+    except Exception:
+        pass
+
+
+def _maybe_apply_mapping_reset():
+    """在请求路径上捕获「面板要求清空映射」的信号（跨进程，见 event_store）。
+
+    面板与引擎是两个进程，面板清不到引擎的表，所以信号走数据目录的小文件；
+    本函数只在代号**变化**时清一次。首次调用只记下当前代号而不清：否则引擎
+    启动时 `load()` 刚用 `_warmup_recent_from_db()` 预热完的映射会被立刻抹掉。
+
+    读盘由 `event_store._read_signals` 做 5s 节流，所以这里热路径只是一次
+    缓存查找 + 整数比较，不新增 syscall（§G3：不在热路径加同步写盘/查库）。
+    """
+    try:
+        import event_store as _es
+        gen = _es.mapping_reset_generation()
+    except Exception:
+        return
+    seen = _MAPPING_RESET_SEEN[0]
+    if seen is None:
+        _MAPPING_RESET_SEEN[0] = gen
+        return
+    if gen == seen:
+        return
+    _MAPPING_RESET_SEEN[0] = gen
+    try:
+        reset_mappings(reason="panel")
+    except Exception as e:
+        _log(f"[LLM Shield] 内存映射清空失败: {type(e).__name__}: {e}")
 
 
 def _warmup_recent_from_db():
     """引擎启动时从本地 SQLite 事件库预热恢复历史占位符映射。
 
+    **有意直写模块全局表**（不走 `_tables()`）：这是进程启动路径，与请求无关，
+    永远不会在演示作用域内执行。
     解决：引擎发版升级、重启或进程崩溃后，客户端长对话里携带的历史占位符
     因内存表清空而 100% 还原不了。
 
@@ -1957,10 +2336,11 @@ def _recall_token(orig, label):
 
 def _recall_token_locked(orig, label):
     """`_recall_token` 的实体；调用方必须已持 `_STATE_LOCK`。"""
+    tables = _tables()
     # 安全防套娃：如果 orig 自身就是占位符，严禁为其分配新 token！
     if isinstance(orig, str) and _PLACEHOLDER_RX.match(orig):
         # 尝试反查其真实明文
-        rec = _RECENT_REV.get(orig) or _CUSTOM_WORD_REV.get(orig)
+        rec = tables.rev.get(orig) or tables.cw_rev.get(orig)
         if rec and not _PLACEHOLDER_RX.match(rec[0]):
             orig = rec[0]
             label = rec[1] or label
@@ -1969,17 +2349,17 @@ def _recall_token_locked(orig, label):
             return orig
 
     # 自定义敏感词优先使用稳定永久映射
-    perm_token = _CUSTOM_WORD_FWD.get(orig)
+    perm_token = tables.cw_fwd.get(orig)
     if perm_token:
         _touch_recent(perm_token, orig)
         _suffix_index_add(perm_token)
         return perm_token
 
     now = time.time()
-    hit = _RECENT_FWD.get(orig)
+    hit = tables.fwd.get(orig)
     if hit and (_is_custom_word_orig(orig) or now - hit[2] <= _recent_ttl()):
         hit[2] = now
-        rev = _RECENT_REV.get(hit[0])
+        rev = tables.rev.get(hit[0])
         if rev:
             rev[2] = now
         # 幂等补登记：复用表里可能因预热撞车而没进索引（见 _suffix_index_add）
@@ -1989,12 +2369,12 @@ def _recall_token_locked(orig, label):
     # 旧映射已过期：注销旧 token 的 REV / 后缀索引再覆盖 FWD。
     # 不注销的话旧条目成孤儿——_prune_recent 只扫 FWD 的值发现待删 token，
     # REV / _RECENT_SUFFIX 里的旧条目两个清理路径都碰不到，长驻进程缓慢泄漏。
-    prev = _RECENT_FWD.get(orig)
+    prev = tables.fwd.get(orig)
     if prev and prev[0] != token:
-        _RECENT_REV.pop(prev[0], None)
+        tables.rev.pop(prev[0], None)
         _suffix_index_del(prev[0])
-    _RECENT_FWD[orig] = [token, label, now]
-    _RECENT_REV[token] = [orig, label, now]
+    tables.fwd[orig] = [token, label, now]
+    tables.rev[token] = [orig, label, now]
     _suffix_index_add(token)
     _prune_recent_throttled(now)
     return token
@@ -2008,13 +2388,14 @@ def _remember(fwd, labels, orig, label):
     则意味着缓存必然从这个位置起失效。
     """
     if orig not in fwd:
-        perm_token = _CUSTOM_WORD_FWD.get(orig)
+        tables = _tables()
+        perm_token = tables.cw_fwd.get(orig)
         if perm_token:
             fwd[orig] = perm_token
             labels[orig] = label
             _touch_recent(perm_token, orig)
             return True
-        hit = _RECENT_FWD.get(orig)
+        hit = tables.fwd.get(orig)
         reused = bool(hit) and (_is_custom_word_orig(orig) or time.time() - hit[2] <= _recent_ttl())
         fwd[orig] = _recall_token(orig, label)
         labels[orig] = label
@@ -2617,6 +2998,8 @@ def _emit_skip(host, method, path, reason, content_type="", source=None, force=F
         content_type=str(content_type or "")[:80],
         count=0,
         upstream=upstream or "",
+        # 统一检测口径（§B1）：明确直通不是「0 命中」，要能与「扫了没命中」区分开。
+        **inspection.report_for_skip(reason=reason, blocked=False),
         **src,
     )
 
@@ -3014,6 +3397,10 @@ def _custom_words_plan():
 
     cache["key"] = key
     cache["plan"] = plan
+    # 词表执行计划换代 ⇒ 叶子结果缓存整体作废（计划变了，同一段文本的命中结果
+    # 可能不同）。不能指望每个改词表的路径都记得清缓存，所以在“计划真的重建”
+    # 这个唯一出口上挂钩。
+    _leaf_cache_bump()
     return plan
 
 
@@ -3395,14 +3782,15 @@ def _suffix_index_add(token):
     sfx = _token_suffix(token)
     if not _suffix_indexable(sfx):
         return
+    tables = _tables()
     with _STATE_LOCK:
-        cur = _RECENT_SUFFIX.get(sfx)
+        cur = tables.suffix.get(sfx)
         if cur is None:
-            _RECENT_SUFFIX[sfx] = token
+            tables.suffix[sfx] = token
         elif cur != token:
             # _SUFFIX_AMBIGUOUS 是 object()，与任何字符串 != 恒真 -> 撞车标记不会被
             # 后续登记抹掉；真撞车（两个不同 token 抢同一后缀）的语义不变。
-            _RECENT_SUFFIX[sfx] = _SUFFIX_AMBIGUOUS
+            tables.suffix[sfx] = _SUFFIX_AMBIGUOUS
 
 
 def _suffix_index_del(token):
@@ -3413,9 +3801,10 @@ def _suffix_index_del(token):
     条数极少，留着不影响内存。
     """
     sfx = _token_suffix(token)
+    tables = _tables()
     with _STATE_LOCK:
-        if sfx and _RECENT_SUFFIX.get(sfx) == token:
-            _RECENT_SUFFIX.pop(sfx, None)
+        if sfx and tables.suffix.get(sfx) == token:
+            tables.suffix.pop(sfx, None)
 
 
 def _suffix_real_token(token):
@@ -3441,7 +3830,7 @@ def _suffix_real_token(token):
     m = _ANY_BRACED_SUFFIX_RX.match(token)
     if not m:
         return None
-    real = _RECENT_SUFFIX.get(m.group(2).lower())
+    real = _tables().suffix.get(m.group(2).lower())
     if not isinstance(real, str) or real == token:
         # None = 没登记过；_SUFFIX_AMBIGUOUS = 该后缀撞车、已退出兜底；
         # real == token 说明精确路径刚查过且落空，再查一次没意义
@@ -3795,6 +4184,201 @@ def _ner_entity_spans(text, entities):
 
 
 def mask(text, sid):
+    # D5: reserve only exact verification markers. Split before *all* detectors,
+    # including NER's original-text input/cache; every neighboring byte is scanned.
+    if not text or onboarding.PREFIX not in text:
+        return _mask_text(text, sid)
+    matches = list(onboarding.MARKER_RE.finditer(text))
+    if not matches:
+        return _mask_text(text, sid)
+    if _session_get(sid) is None:
+        _new_session(sid)
+    evidence = _session_get(sid).setdefault('verification', {})
+    parts, offset = [], 0
+    for match in matches:
+        parts.append(_mask_text(text[offset:match.start()], sid))
+        marker = match.group()
+        parts.append(marker)
+        if len(evidence) < 16:
+            evidence[onboarding.digest(marker)] = True
+        offset = match.end()
+    parts.append(_mask_text(text[offset:], sid))
+    return ''.join(parts)
+
+
+# ── 叶子结果缓存（批次 8 / P1-6）─────────────────────────────────────────
+# 长会话的形态是「客户端每轮重发整段历史」：几百条消息里**只有最后一条变了**，
+# 其余字符串叶子逐字节相同。而 `_mask_text` 对每个叶子都要跑 20~50 遍正则
+# （实测 135ms/MiB，长会话 4MB 请求体里约 70% 的脱敏耗时在这里），全是重复劳动。
+#
+# 缓存的是**整个叶子的脱敏结果**，命中判据是双重的：
+#   1. 代号一致（配置热重载 / 词表换代 / NER 开关变化时整体作废）；
+#   2. 缓存时登记的每一个**占位符**在当前会话 `rev` 里还能查到原文、且
+#      `fwd[原文]` 仍然是同一个占位符。
+# 第 2 条把「LRU 淘汰 / 面板清空映射 / 跨会话复用」全部挡在门外：映射一漂就当
+# 未命中重跑。命中时逐条重放 `_hit()`，last_hits / new_orig 口径与重跑一致。
+#
+# ⚠️ 缓存里**不得出现原文**（§G1，与 ner_engine 的结果缓存同一口径）：键是进程密钥的
+# 摘要，值是「脱敏后的文本 + 占位符清单」，原文一律经 `rev` 从会话表现取。
+_LEAF_CACHE_MAX = max(256, _env_int("MASKIT_LEAF_CACHE_MAX", 8192))
+_LEAF_CACHE_MAX_CHARS = max(1_000_000, _env_int("MASKIT_LEAF_CACHE_CHARS", 32_000_000))
+_LEAF_CACHE_MAX_LEAF = max(4096, _env_int("MASKIT_LEAF_CACHE_MAX_LEAF", 262144))
+# 抽样自检周期：每 N 次调用中有一次**故意不走缓存**，重算一遍与缓存比对。
+# 命中路径不会重算，所以一个漏进代号的输入会永远静默地给出错误文本；
+# 抽样是唯一的网，命中即整体关闭缓存（宁可不要这个优化，不能给错文本）。
+_LEAF_CACHE_VERIFY_EVERY = max(16, _env_int("MASKIT_LEAF_CACHE_VERIFY", 256))
+_LEAF_CACHE_KEY = os.urandom(32)
+_LEAF_CACHE = collections.OrderedDict()   # 摘要 -> (代号, 原长, 脱敏文本, [(占位符, 标签, 原文摘要)])
+_LEAF_CACHE_CHARS = 0
+_LEAF_CACHE_LOCK = threading.Lock()
+_LEAF_CACHE_STATS = {"hit": 0, "miss": 0, "verify": 0, "poison": 0}
+_LEAF_CACHE_GEN = [0]
+
+
+def _leaf_cache_env_enabled() -> bool:
+    """叶子缓存总开关（`MASKIT_LEAF_CACHE=0` 关）。
+
+    与「抽样自检发现不一致→整位关断」用的是同一个闸（`_LEAF_CACHE_OK[0]`），
+    区别只在于这个能主动、立即停：缓存只是加速手段，怀疑它算错了就该能当场停掉，
+    而不是等下一次抽中或回滚版本。单测见 `tests/test_leaf_cache.py`。
+    """
+    return _env_int("MASKIT_LEAF_CACHE", 1) != 0
+
+
+# 总开关兼故障闸：关掉即"一条也不缓存"（全部当未命中 → 走完整扫描路径）。
+_LEAF_CACHE_OK = [_leaf_cache_env_enabled()]
+_LEAF_CACHE_TICK = [0]
+
+
+def _leaf_cache_key(text):
+    """缓存键：进程密钥的 blake2b 摘要（**不留原文**，与 §G1 同口径）。"""
+    return hashlib.blake2b(text.encode("utf-8", "surrogatepass"),
+                           key=_LEAF_CACHE_KEY, digest_size=16).hexdigest()
+
+
+def _orig_digest(orig):
+    """原文的进程密钥摘要：缓存**把「代号」与「它当时代表哪个原文」钉在一起**。
+
+    为什么光有代号不够（2026-10-04 评审发现）：代号不是**原始值的身份**。
+    全局复用窗口（`_RECENT_SUFFIX`，上限 2000）满了之后，一个旧后缀可能被
+    重新签发给**另一个原文**；此时同一条代号在两个会话里各自指向不同的原文，
+    「代号在两个会话里都对得上」这条校验就会放行一段指向错原文的旧结果 ——
+    后果是上游拿到的占位符会在客户端被还原成**另一个值**（跨会话串扰）。
+    摘要用同一个进程密钥，不落盘、不可反推；碰撞需知道密钥，8 字节已远超所需。
+    """
+    return hashlib.blake2b(orig.encode("utf-8", "surrogatepass"),
+                           key=_LEAF_CACHE_KEY, digest_size=8).hexdigest()
+
+
+def _leaf_cache_gen():
+    """缓存代号：**任何**能改变脱敏输出的进程内配置都要在它里面。
+
+    漏一项 = 那个配置改了之后旧结果继续命中（静默给错文本）。三道保险：
+      · `_LEAF_CACHE_GEN`：配置热重载、词表执行计划重建、显式清空时自增；
+      · `NER_ENABLED`：语义识别开关（它直接改变输出）；
+      · `id(BUILTIN_RULES)`：规则开关表是**整体换对象**发布的，换对象即换代
+        （测试里直接赋值也能被抓住；原地改 key 不会被抓，生产路径不存在这种写法）。
+    """
+    return (_LEAF_CACHE_GEN[0], bool(NER_ENABLED), id(BUILTIN_RULES))
+
+
+def _leaf_cache_bump():
+    """配置/词表换代：代号一变，旧条目在下次查找时整体作废。"""
+    _LEAF_CACHE_GEN[0] += 1
+
+
+def _leaf_cache_clear():
+    global _LEAF_CACHE_CHARS
+    with _LEAF_CACHE_LOCK:
+        _LEAF_CACHE.clear()
+        _LEAF_CACHE_CHARS = 0
+
+
+def _leaf_cache_lookup(text, fwd, rev):
+    """查缓存；命中返回 `(脱敏文本, [(占位符, 标签)])`，未命中返回 None。
+
+    代号不符、长度不符、或任一个占位符在当前会话里**对不上原文**，都算未命中。
+    校验必须真的查一遍映射，不能只看代号 —— 占位符是**会话级**的，同一段文本
+    在不同会话/被淘汰后指向的占位符不同，拿旧文本直接返回会把 A 会话的占位符
+    发给 B 会话。
+
+    三道校验缺一不可：`rev[tok]` 存在、`fwd[rev[tok]] == tok`、且
+    `_orig_digest(rev[tok])` 等于存缓存时那个原文的摘要。前两道只证明「这个代号
+    在当前会话里指向某个原文」，第三道才证明「指向的就是当初那个原文」。
+    """
+    global _LEAF_CACHE_CHARS
+    key = _leaf_cache_key(text)
+    with _LEAF_CACHE_LOCK:
+        ent = _LEAF_CACHE.get(key)
+        if ent is None:
+            _LEAF_CACHE_STATS["miss"] += 1
+            return None
+        if ent[0] != _leaf_cache_gen() or ent[1] != len(text):
+            _LEAF_CACHE.pop(key, None)
+            _LEAF_CACHE_CHARS -= ent[1]
+            _LEAF_CACHE_STATS["miss"] += 1
+            return None
+        _LEAF_CACHE.move_to_end(key)
+    with _STATE_LOCK:
+        for token, _label, want in ent[3]:
+            orig = rev.get(token)
+            if orig is None or fwd.get(orig) != token or _orig_digest(orig) != want:
+                with _LEAF_CACHE_LOCK:
+                    _LEAF_CACHE_STATS["miss"] += 1
+                return None
+    with _LEAF_CACHE_LOCK:
+        _LEAF_CACHE_STATS["hit"] += 1
+    return ent[2], ent[3]
+
+
+def _leaf_cache_verify(expect, masked):
+    """抽样自检：`expect` 是本次命中到的旧文本，`masked` 是重算结果。
+
+    不一致 = 缓存给错了文本（漏进代号的输入、或命中校验有洞）。命中路径上的错误
+    是**静默**的，宁可丢掉这个优化，也不能让用户拿到错的脱敏结果 —— 所以直接整体关闭。
+    """
+    if expect is None:
+        return
+    _LEAF_CACHE_STATS["verify"] += 1
+    if expect == masked:
+        return
+    _LEAF_CACHE_OK[0] = False
+    _LEAF_CACHE_STATS["poison"] += 1
+    _leaf_cache_clear()
+    _log("[transparent] 叶子缓存自检发现不一致，已整体关闭叶子缓存")
+
+
+def _leaf_cache_store(text, masked, tokens):
+    """存一条结果（调用方负责先跑 `_leaf_cache_verify`）。"""
+    global _LEAF_CACHE_CHARS
+    if not _LEAF_CACHE_OK[0]:
+        return
+    size = len(text)
+    if size > _LEAF_CACHE_MAX_LEAF:
+        return                      # 单条超大叶子不入库（一条就顶掉小半张表）
+    key = _leaf_cache_key(text)
+    with _LEAF_CACHE_LOCK:
+        old = _LEAF_CACHE.pop(key, None)
+        if old is not None:
+            _LEAF_CACHE_CHARS -= old[1]
+        _LEAF_CACHE[key] = (_leaf_cache_gen(), size, masked, tokens)
+        _LEAF_CACHE_CHARS += size
+        while _LEAF_CACHE and (_LEAF_CACHE_CHARS > _LEAF_CACHE_MAX_CHARS
+                               or len(_LEAF_CACHE) > _LEAF_CACHE_MAX):
+            _k, _v = _LEAF_CACHE.popitem(last=False)
+            _LEAF_CACHE_CHARS -= _v[1]
+
+
+def _ner_skip_epoch():
+    """NER「结果残缺」计数（拿不到模块时返回 None，两边相等 → 允许入库）。"""
+    try:
+        import ner_engine
+        return ner_engine.skip_epoch()
+    except Exception:
+        return None
+
+
+def _mask_text(text, sid):
     """脱敏文本。返回脱敏后的文本。
 
     命中明细通过会话的 last_hits 暴露（本次实际替换的唯一原文，含复用项），
@@ -3828,6 +4412,10 @@ def mask(text, sid):
     labels = s["labels"]
     rev = s["rev"]
     hit_orig = set()
+    # 本次真正登记过的命中（占位符 -> (标签, 原文摘要)，按首次出现保序）。叶子缓存
+    # 只存这份**清单**（不含原文，见 §G1），命中时再经 rev 把原文取回来重放 `_hit()`。
+    # 摘要不是可选项：代号本身不是原始值的身份（见 `_orig_digest`）。
+    hit_tokens = {}
     # 本次请求新增的原文（_remember 之前 fwd 里没有的）；用于 new_count 统计。
     # 注意必须在 _remember 之前判断，否则恒为 0（曾因先写 fwd 再判导致死代码）
     new_orig = set()
@@ -3840,6 +4428,31 @@ def mask(text, sid):
             # rev 增量维护：只有新增才补一条，避免每次 mask 全量重建（长会话 fwd 数千条）
             rev[fwd[orig]] = orig
         hit_orig.add(orig)
+        tok = fwd.get(orig)
+        if tok is not None:
+            hit_tokens.setdefault(tok, (label, _orig_digest(orig)))
+
+    # ── 叶子结果缓存命中路径（批次 8）───────────────────────────────────────
+    # 抽样自检：每 _LEAF_CACHE_VERIFY_EVERY 次调用里有一次故意不用缓存，走完整
+    # 重算，末尾由 `_leaf_cache_verify()` 比对（不一致即整体关闭缓存）。
+    _lc_expect = None
+    if _LEAF_CACHE_OK[0]:
+        # 计数**取模回绕**：这是个永不重置的进程级计数器，没必要把它加到无穷
+        # （大整数求模会随位数变慢，长期运行下纯属无谓开销）。
+        _LEAF_CACHE_TICK[0] = (_LEAF_CACHE_TICK[0] + 1) % _LEAF_CACHE_VERIFY_EVERY
+        _probe = _leaf_cache_lookup(text, fwd, rev)
+        if _probe is not None:
+            if _LEAF_CACHE_TICK[0] == 0:
+                _lc_expect = _probe[0]
+            else:
+                with _STATE_LOCK:
+                    for _tok, _lbl, _ in _probe[1]:
+                        _orig = rev.get(_tok)
+                        if _orig is not None:
+                            _hit(_orig, _lbl)
+                s.setdefault("last_hits", set()).update(hit_orig)
+                s.setdefault("new_orig", set()).update(new_orig)
+                return _probe[0]
 
     # Key 前缀命中归 API_KEY；可被 builtin_rules.API_KEY 关闭
     if _rule_enabled("API_KEY"):
@@ -3950,6 +4563,18 @@ def mask(text, sid):
     # 翻译至伤疤文本坐标系，再由 _ner_entity_spans 按占位符切分（测试验证见
     # tests/test_shield.py 中的 OffsetMapTests 与 tests/test_regressions.py）。
     # om_broken 或 om 为 None 时跳过 NER，严禁将 original 坐标作为回退直接用于伤疤文本。
+    #
+    # `_ner_clean`：本次 NER 是否**完整跑完**（没被预算/超时/失败降级）。只有完整跑完的
+    # 结果才允许进叶子缓存 —— 残缺结果一旦入库就等于把漏检永久固化（与 NER 负缓存
+    # 同一类坑）。判据是 `skip_epoch()` 前后是否变化：它只统计「结果残缺」类原因
+    # （见 ner_engine._CACHE_POISON_SKIPS），`model_unavailable` 不在其中。
+    _ner_clean = True
+    _ner_epoch0 = None
+    if NER_ENABLED:
+        if om_broken or om is None:
+            _ner_clean = False
+        else:
+            _ner_epoch0 = _ner_skip_epoch()
     if NER_ENABLED and not om_broken and om is not None:
         try:
             import ner_engine
@@ -4001,6 +4626,7 @@ def mask(text, sid):
                     text = _mask_by_spans(text, planned)
         except Exception as e:
             _ner_warn_once("runtime", "NER 识别降级，本次未做实体识别: %s: %s" % (type(e).__name__, e))
+        _ner_clean = _ner_skip_epoch() == _ner_epoch0
 
     # last_hits / new_orig 累积而非覆盖：mask() 被 _mask_tree 对每个字符串叶子
     # 各调一次，覆盖会让 count 只反映最后一个叶子的命中（曾导致 MASK 行
@@ -4008,6 +4634,14 @@ def mask(text, sid):
     # new_orig 累积全部新增；上报时与 last_hits 交集算「本次命中且新增」。
     s.setdefault("last_hits", set()).update(hit_orig)
     s.setdefault("new_orig", set()).update(new_orig)
+    # 抽样自检的比对必须排在 `_ner_clean` 判断**之前**：否则 NER 一降级这一轮就不比对，
+    # 缓存里的错误内容要等到下一次「完整跑完」才被发现。
+    if _LEAF_CACHE_OK[0]:
+        _leaf_cache_verify(_lc_expect, text)
+        # 只有「完整跑完」的结果才入库：NER 降级时这条叶子是残缺的，存进去等于把漏检
+        # 永久固化。代价是 NER 开启时命中率取决于预算是否充足，方向是保守的。
+        if _ner_clean:
+            _leaf_cache_store(original, text, [(t, l, d) for t, (l, d) in hit_tokens.items()])
     return text
 
 
@@ -4026,11 +4660,12 @@ def _touch_recent(token, orig, now=None):
     只刷 REV 的话照样会被连带删掉。
     """
     now = now or time.time()
+    tables = _tables()
     with _STATE_LOCK:
-        rev = _RECENT_REV.get(token)
+        rev = tables.rev.get(token)
         if rev is not None:
             rev[2] = now
-        fwd = _RECENT_FWD.get(orig)
+        fwd = tables.fwd.get(orig)
         if fwd is not None and fwd[0] == token:
             fwd[2] = now
 
@@ -4066,7 +4701,7 @@ def _lookup(token, sid):
             _touch_recent(token, hit)
 
     if hit is None:
-        recent = _RECENT_REV.get(token)
+        recent = _tables().rev.get(token)
         if recent:
             if _is_custom_word_orig(recent[0]) or _is_custom_word_token(token) or time.time() - recent[2] <= _recent_ttl():
                 _touch_recent(token, recent[0])
@@ -4074,7 +4709,7 @@ def _lookup(token, sid):
 
     # 兜底：如果 _RECENT_REV 没命中（例如外部重置了复用表），直接查永久映射表
     if hit is None:
-        c_rec = _CUSTOM_WORD_REV.get(token)
+        c_rec = _tables().cw_rev.get(token)
         if c_rec:
             hit = c_rec[0]
             _touch_recent(token, hit)
@@ -4087,14 +4722,14 @@ def _lookup(token, sid):
         if s:
             inner = s["rev"].get(hit)
         if inner is None:
-            rec = _RECENT_REV.get(hit)
+            rec = _tables().rev.get(hit)
             # 内层同样校验 TTL：套娃解包走的是「外层校验过、内层没校验」的缝隙，
             # 会用一条早已过期的映射完成还原，突破 24h 原文保留窗口契约
             if rec:
                 if _is_custom_word_orig(rec[0]) or _is_custom_word_token(hit) or time.time() - rec[2] <= _recent_ttl():
                     inner = rec[0]
             if inner is None:
-                c_rec = _CUSTOM_WORD_REV.get(hit)
+                c_rec = _tables().cw_rev.get(hit)
                 if c_rec:
                     inner = c_rec[0]
         if inner is not None and inner != hit:
@@ -4792,6 +5427,12 @@ def _restore_tree(obj, sid, key=None, depth=0):
     if isinstance(obj, list):
         return [_restore_tree(v, sid, key, depth + 1) for v in obj]
     if isinstance(obj, dict):
+        # 签名/密文思考块（含流式增量形态）不还原：与 `_sse_text_slots` 同口径。
+        # SSE 上思考增量事件会因"无槽位"改走本兜底，若不挡就会把明文还原回写入；
+        # 整包/回退（`_restore_json_body`）与 NDJSON 同样靠这里。
+        # 注意：挡的是**块**，不是字段名——同名业务字段仍照常还原。
+        if obj.get("type") in _RESTORE_SKIP_BLOCK_TYPES:
+            return obj
         return {k: _restore_tree(v, sid, k, depth + 1) for k, v in obj.items()}
     return obj
 
@@ -4826,7 +5467,7 @@ _MASK_SKIP_SCALAR_KEYS = {
 # 见 tests/test_regressions.py::MaskPathAwarenessTests 的反向锁用例。
 _MASK_SKIP_SUBTREE_KEYS = {"cache_control"}
 # role/type 是判别字段，但只在其协议容器内跳过；出现在业务自定义对象里
-# （如 {"type": "13812345678"}）必须扫描——审计实测 input.type 原文上行即此类。
+# （如 {"type": "手机号"}）必须扫描——审计实测 input.type 原文上行即此类。
 _MASK_ROLE_TYPE_PARENTS = {
     "message", "messages", "content", "contents", "parts", "block", "blocks",
     "tools", "tool", "tool_calls", "function", "response_format",
@@ -4856,10 +5497,20 @@ _MASK_CORRELATION_ID_KEYS = {"tool_call_id", "tool_use_id", "call_id"}
 _MASK_BUSINESS_KEYS = {"input", "arguments", "parameters", "partial_json", "documents"}
 _MASK_MAX_DEPTH = 24
 
+# ── 协议不可改写状态（签名/密文块，整块只读或只锁密文字段） ──────────────
+# 判据是**结构**而不是字段名：上游要校验「签名 = 被签正文」「密文原样回放」，而工具参数里
+# 的同名字段是业务数据（AstrLink `continuation_test.go:134` 锁定的反例）。
+# 2026-10-02 实测（§A1 E2c）：默认规则下这些 base64 载体侥幸不改写，但用户加一个 2 字符
+# 自定义词就能把它们打烂 —— 所以判定必须由契约表统一给出，不在这里写第二份。
+# 载体表、两种作用域（block/slot）与来源引用见 `protocol_contracts.py`。
+# 响应侧不还原的块类型由同一张表导出（请求/响应共用一套判据，§A2）；
+# `thinking_delta` 只以 SSE 增量事件出现，只归响应侧（已在表里并入）。
+_RESTORE_SKIP_BLOCK_TYPES = _contracts.restore_skip_types()
+
 # 数值型协议字段：这些键的**数值**是协议参数（采样参数、用量计数、序号），
 # 不是业务数据。{"seed": 1234567890123456} 这种随机大整数完全可能被 Luhn 校验
 # 误判成卡号 —— 一旦改写，请求当场被上游拒绝。所以数值分支对它们一律豁免。
-# ⚠️ 只对**数值**豁免，字符串形态照常扫描（`{"seed": "13800138000"}` 仍会命中）。
+# ⚠️ 只对**数值**豁免，字符串形态照常扫描（`{"seed": "手机号"}` 仍会命中）。
 _MASK_SKIP_NUMERIC_KEYS = {
     "max_tokens", "max_completion_tokens", "max_tokens_to_sample", "budget_tokens",
     "temperature", "top_p", "top_k", "n", "seed", "index", "created", "logprobs",
@@ -4871,7 +5522,7 @@ _MASK_SKIP_NUMERIC_KEYS = {
 
 # 对象**键名**的白名单：集合内的键永不脱敏，集合外一律当「数据键」扫描。
 #
-# 为什么需要这个集合：旧实现「键名一律不脱敏」让 `{"13800138000": "safe"}` 这种
+# 为什么需要这个集合：旧实现「键名一律不脱敏」让 `{"手机号": "safe"}` 这种
 # PII-as-key 形态整条明文上行（审计 B2 实测）。但直接放开又会踩另一个坑 ——
 # 用户自定义短词（比如加个 "con"）会命中 `content`，把协议骨架打坏，
 # 代价是**每个请求都坏**，比漏一个罕见载荷形状严重得多。
@@ -5058,6 +5709,49 @@ def _mask_hit(obj, sid, flag=None):
     return out
 
 
+def _note_signed_block_skip(sid):
+    """记一次「协议不可改写状态未扫描」（本轮计数）。
+
+    豁免是一条**漏检路径**，静默豁免等于用户以为扫了、其实没扫（与 NER 降级
+    同一个理由），所以必须计数并随 MASK 事件上报（`signed_blocks_skipped`）。
+    批次 3 起计数覆盖契约表里的全部载体（签名块 + 密文句柄），字段名保持不变，
+    免得面板与事件库跟着改口径。
+
+    累加在会话上、由 MASK 事件取走并清零，语义是「本次请求」；取不到会话时不记
+    （探测/单测路径不能因此抛异常）。
+    """
+    s = _session_get(sid)
+    if isinstance(s, dict):
+        s["signed_skipped"] = int(s.get("signed_skipped") or 0) + 1
+
+
+def _take_signed_skips(sid):
+    """取走本轮「协议不可改写状态未扫描」计数并清零（MASK 事件用）。
+
+    与 `_note_signed_block_skip` 成对：一个在 worker 线程累加，一个在事件循环侧
+    取走。取走即清零，语义是「本次请求」，不让会话级累计值冒充本轮数字。
+    """
+    s = _session_get(sid) if sid else None
+    if not isinstance(s, dict):
+        return 0
+    return int(s.pop("signed_skipped", 0) or 0)
+
+
+def _state_carrier_match(obj, key, parent, path, in_business, role):
+    """命中的协议不可改写状态载体（或 None），判据见 `protocol_contracts.py`。
+
+    这里是**唯一**的请求侧判据入口：载体表、两种作用域（`block` = 签名覆盖兄弟明文、
+    整块只读；`slot` = 自包含密文句柄、只锁该字段）与来源引用都在契约表里，
+    本文件不再写第二份（写两份等于给"请求/响应集合漂移"留门）。
+
+    为什么不能退回裸字段名豁免：工具参数里的同名业务字段必须照常扫描（AstrLink
+    `continuation_test.go:134` 锁定的反例）；只看块类型不看角色，会让 user 轮、
+    `tool_result` 里的同名块整块不受扫描 → 静默漏检。签名/密文缺失或为空的块上游
+    无从校验，照常脱敏才不白丢一个漏检面。
+    """
+    return _contracts.match(obj, key, parent, path, role, in_business)
+
+
 def _leaf_exempt(key, parent, in_business):
     """叶子（字符串 / 数值）是否落在「协议位置」从而豁免扫描。
 
@@ -5103,7 +5797,7 @@ def _leaf_exempt(key, parent, in_business):
     return False
 
 
-def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
+def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None, role=None):
     """递归脱敏 JSON 里的字符串叶子（完整路径判定 + 业务区强制扫描）。
 
     只处理 message.content 会整片漏掉多轮历史里的
@@ -5114,6 +5808,13 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
 
     flag：可选单元素 list，任一叶子真的被替换过就置 True（见 `_mask_hit`）。
     调用方靠它决定「要不要回写请求体」——没命中就一个字都不改，保住上游前缀缓存。
+
+    path：自根向下的真实路径，**数组下标也进 path**（契约表的"真实数组"判据要区分
+    "数组元素"与"同名对象字段"）。注意两条入口的起点不同：整包入口从 `path=()` 递归，
+    生产代理链路按顶层键逐个调用（顶层键留在 `key` 里）；契约表对此两种形态都认。
+
+    role：当前所在 message 的角色（字符串），由 dict 分支向下传递。只服务于
+    契约表的角色判据；旧调用方不传＝None，行为与之前一致。
     """
     control = getattr(_MASK_WORK_CONTEXT, "control", None)
     if control is not None:
@@ -5135,7 +5836,7 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
         return obj
     if isinstance(obj, (int, float)):
         # 数值型标量（审计 B2 阻断项）。规则全是文本正则，而旧实现到这里直接
-        # `return obj` —— 于是 {"phone": 13800138000} 这种形态**既不命中也不抛异常**，
+        # `return obj` —— 于是 {"phone": 手机号} 这种形态**既不命中也不抛异常**，
         # changed 保持 False → 零改写分支把客户端原始字节原样放行，明文出网；
         # 而 fail-closed 只兜异常，兜不住「静默判定为无需改写」。
         # 修法：取字符串形态过一遍规则，命中才把整个值换成占位符（类型由 number
@@ -5150,15 +5851,28 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
             return out
         return obj
     if isinstance(obj, list):
-        return [_mask_tree(v, sid, key, parent, path, depth + 1, flag) for v in obj]
+        # 数组下标必须进 path：契约表的"真实数组"判据要区分「数组元素」与
+        # 「同名对象字段」（Responses 的 `input[]` vs 工具参数里的 `input` 对象）。
+        return [_mask_tree(v, sid, key, parent, path + (i,), depth + 1, flag, role)
+                for i, v in enumerate(obj)]
     if isinstance(obj, dict):
         # 协议元数据对象整棵跳过。必须放在 dict 分支——str 分支的
         # _MASK_SKIP_SCALAR_KEYS 对对象值无效（见该集合上方的注释）。
         if not in_business and key in _MASK_SKIP_SUBTREE_KEYS:
             return obj
+        # 协议不可改写状态（契约表）：`block` 作用域整块只读（正文与签名必须原样上行，
+        # 改任一侧都让上游校验失败）；`slot` 作用域只锁住密文字段，兄弟字段照常扫描。
+        # 必须在 dict 分支（`_MASK_SKIP_SCALAR_KEYS` 对对象值无效）。
+        carrier = _state_carrier_match(obj, key, parent, path, in_business, role)
+        locked = frozenset()
+        if carrier is not None:
+            _note_signed_block_skip(sid)
+            if carrier.scope == "block":
+                return obj
+            locked = _contracts.protected_fields(carrier, obj)
         # 键名脱敏（2026-09 起，审计 B2）。旧实现是「键名一律不脱敏」，理由是
         # 键名承载结构语义、自定义短词误命中会把协议骨架打坏。这个顾虑成立，
-        # 但它同时让 {"13800138000": "safe"} 这种 PII-as-key 形态整条明文上行。
+        # 但它同时让 {"手机号": "safe"} 这种 PII-as-key 形态整条明文上行。
         #
         # 现在的判据翻转成**结构键白名单**：`_MASK_PROTECTED_KEY_NAMES` 内的键永不
         # 脱敏，集合外一律当数据键扫描。于是「用户加个 con 命中 content」这类误伤
@@ -5166,7 +5880,14 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
         # 注意 path 仍用**原键** k 推进：in_business 判定必须看客户端真实的键名，
         # 用脱敏后的占位符去判会让下游整棵子树丢失业务区语义。
         masked_obj = {}
+        # 角色下传：契约表的角色判据要看「所在 message 的 role」，而 role 是 message
+        # 的兄弟字段，只能在往下递归时带上下文（见 `_state_carrier_match`）。
+        branch_role = obj.get("role") if isinstance(obj.get("role"), str) else role
         for k, v in obj.items():
+            if k in locked:
+                # 不可改写字段原样保留（键名也不动）：签名/密文串被改写就等于把状态打烂。
+                masked_obj[k] = v
+                continue
             new_key = k
             if isinstance(k, str) and k not in _MASK_PROTECTED_KEY_NAMES:
                 masked_key = mask(k, sid)
@@ -5174,7 +5895,8 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None):
                     new_key = masked_key
                     if flag is not None:
                         flag[0] = True
-            masked_obj[new_key] = _mask_tree(v, sid, k, key, path + (k,), depth + 1, flag)
+            masked_obj[new_key] = _mask_tree(v, sid, k, key, path + (k,), depth + 1, flag,
+                                              branch_role)
         return masked_obj
     return obj
 
@@ -5193,7 +5915,7 @@ def _seed_known(text, sid):
         with _STATE_LOCK:
             if token in s["rev"]:
                 continue
-            recent = _RECENT_REV.get(token)
+            recent = _tables().rev.get(token)
             if recent and time.time() - recent[2] <= _recent_ttl():
                 s["rev"][token] = recent[0]
                 _touch_recent(token, recent[0])
@@ -5269,7 +5991,7 @@ def _load_json_pairs(text):
     """解析 JSON，并同时报告**是否存在重复键**。返回 (obj, has_dupes)。
 
     为什么要单独判重复键：`json.loads` 对重复键取「后者覆盖前者」，解析结果无法
-    代表原文。于是 `{"a":"13800138000","a":"safe"}` 的树里只剩 "safe"，`_mask_tree`
+    代表原文。于是 `{"a":"手机号","a":"safe"}` 的树里只剩 "safe"，`_mask_tree`
     扫不到那个手机号 → changed 保持 False → 零改写分支把**原始字节**原样放行
     （审计 B2 实测）。命中其它字段时同样不能走 `_splice_mask`：丢掉的键不在替换表里，
     而等价校验又会因为「splice 结果解析回来仍等于脱敏树」而误判通过，明文照样出网。
@@ -5399,15 +6121,51 @@ def _client_source(flow):
     return {"client": f"{host}:{port}", "client_host": host, "client_port": port}
 
 
-def _emit(typ, **kw):
+def mapping_stats() -> dict:
+    """内存映射规模快照（面板「清空内存映射」按钮与自检用；**不含任何原文**）。
+
+    计数通过 `engine-runtime.json` 跨进程外发：面板进程只能看到它自己那份
+    （扩展桥接链路），代理链路的真值在引擎进程，而用户想清的是**两者**。
+    只报数量不报内容，所以这个消息面本身不引入新的泄露面。
+    """
     try:
-        line = "SHIELD\t" + typ + "\t" + json.dumps(kw, ensure_ascii=False)
+        with _STATE_LOCK:
+            return {
+                "sessions": len(sessions),
+                "recent_entries": len(_RECENT_FWD),
+                "suffix_index": len(_RECENT_SUFFIX),
+                "custom_word_entries": len(_CUSTOM_WORD_FWD),
+            }
+    except Exception:
+        return {}
+
+
+def _emit(typ, **kw):
+    if typ == 'MASK':
+        session = _session_get(kw.get('sid'), {})
+        verification = session.pop('verification', {})
+        if verification:
+            kw['verification'] = verification
+    # 阻断事件的统一检测口径（§B1）：BLOCK 有十几处调用点，逐个加字段迟早漏一处
+    # （而漏掉的那处恰好会在列表里显示成“什么都没发生”），因此在这里一次性补全。
+    # 只在调用方没显式给 decision 时补，避免覆盖更精确的现场结论。
+    if typ == "BLOCK" and "decision" not in kw:
+        kw.update(inspection.report_for_skip(reason=str(kw.get("reason") or ""), blocked=True))
+    rec = onboarding.scrub({"ts": time.time(), "type": typ, **kw})
+    try:
+        # 日志分级（§D1）在**写侧**投影，stdout 与事件库共用同一函数。
+        # 为什么 stdout 也要：这一行会被桌面壳原样追加进 engine-stdout.log，
+        # 那是磁盘上的第二份正文副本；只在 DB 侧裁剪的话，最小模式下
+        # dialog/dialog_req/items[].original 照样躺在日志文件里。
+        stdout_rec = dict(rec)
+        stdout_rec.pop('verification', None)  # local DB only; never diagnostic log_tail
+        line = "SHIELD\t" + typ + "\t" + json.dumps(project_event_for_log(stdout_rec), ensure_ascii=False)
     except Exception:
         # 事件字段含不可序列化值（理论上不出现）：降级为仅记类型，不让异常穿透代理主流程
         line = "SHIELD\t" + typ + "\t{}"
     _log(line)
     try:
-        enqueue_event({"ts": time.time(), "type": typ, **kw})
+        enqueue_event(rec)
     except Exception:
         pass
 
@@ -5799,64 +6557,27 @@ def error(flow):
         path = flow.metadata.get("shield_orig_path") or getattr(flow.request, "path", "")
         s = _session_get(sid, {}) if sid else {}
         source = s.get("source", {})
-        err = getattr(flow, "error", None)
-        msg = ""
-        try:
-            msg = str(err)[:160]
-        except Exception:
-            pass
-        if not (sid or msg):
+        # 诊断串与 `_record_client_cancel` **同一份**（旧版本地各拼一份，导致先落地的
+        # 薄记录把这条富记录挡掉，2026-10-02 实测事故）。
+        detail, raw = _flow_error_detail(flow)
+        if not (sid or raw):
             return
         ev_type = "ERR"
-        if "Client disconnected" in msg:
+        if "Client disconnected" in raw:
             ev_type = "CANCEL"  # 客户端断开；不能据此推断用户主动操作
-        elif "getaddrinfo" in msg or "Name or service not known" in msg:
+        elif "getaddrinfo" in raw or "Name or service not known" in raw:
             ev_type = "DNS_ERROR"  # 上游域名解析失败，属上游侧
-        # resp 仅记录是否存在 response 对象；耗时与缺失响应都不能单独证明
-        # 复用了坏连接、请求已写出，或上游应用已经处理。
-        try:
-            _elapsed_ms = int((time.time() - float(getattr(flow.request, "timestamp_start", 0) or 0)) * 1000)
-        except Exception:
-            _elapsed_ms = -1
-        try:
-            _req_len = len(flow.request.raw_content or b"")
-        except Exception:
-            _req_len = -1
-        _err_name = type(err).__name__ if err is not None else "?"
-        _has_resp = 1 if getattr(flow, "response", None) is not None else 0
-        msg = f"[err={_err_name} resp={_has_resp} req={_req_len}B ms={_elapsed_ms}] " + msg
-        # P0-b：脱敏耗时与「脱敏完成到出错之间等了多久」必须进事件 —— 否则
-        # 「卡在脱敏」与「卡在上游」在事件行上长得一模一样（2026-09-28 实测就因此
-        # 把 58.5s 的冷缓存脱敏误读成上游问题、又把纯上游慢误判成脱敏问题，来回两次）。
-        # upstream_wait 仅为脱敏完成后的累计等待，不代表请求已到达上游。
-        # upstream_wait=-1 表示拿不到脱敏完成时刻（例如脱敏未跑完就出错）。
-        try:
-            _mask_ms = flow.metadata.get("shield_mask_ms")
-            _mask_done_at = flow.metadata.get("shield_mask_done_at")
-        except Exception:
-            _mask_ms, _mask_done_at = None, None
-        if _mask_ms is not None:
-            try:
-                _upstream_wait = (int((time.time() - float(_mask_done_at)) * 1000)
-                                  if _mask_done_at else -1)
-            except Exception:
-                _upstream_wait = -1
-            msg = f"[mask={_mask_ms}ms upstream_wait={_upstream_wait}ms] " + msg
-        # 流式接管中途被切断时 _finish() 不执行，没有 RESTORE 事件可对照，
-        # 光看 ERR 无法判断断在哪。带上回调次数/字节数还原现场。
-        if flow.metadata.get("shield_streamed"):
-            msg = (f"[stream calls={flow.metadata.get('shield_stream_calls')} "
-                   f"bytes={flow.metadata.get('shield_stream_bytes')}] " + msg)
-        # 走了出口代理的请求，失败时必须标出来：代理不通与上游不通的现象一样
-        # （连接超时/被拒），不标注就分不清该查代理还是查上游。
-        if flow.metadata.get("shield_via_proxy"):
-            msg = "[via egress_proxy] " + msg
         up_name = flow.metadata.get("shield_upstream") or (s.get("upstream_name") if s else "") or ""
         model = flow.metadata.get("shield_model") or (s.get("model") if s else "") or ""
-        if not getattr(flow, "_shield_cancel_recorded", False):
+        # 已完成交付的响应，其后的客户端关连接不算取消：连同「取消已记录过」一起去重，
+        # 判据与 `_record_client_cancel` 同源（只影响 CANCEL，ERR/DNS_ERROR 口径不变）。
+        concluded_cancel = ev_type == "CANCEL" and _response_concluded(flow)
+        if not getattr(flow, "_shield_cancel_recorded", False) and not concluded_cancel:
             _emit(ev_type, transport=_transport_snapshot(flow), host=host or "", method=getattr(flow.request, "method", "") or "",
                   path=path.split("?")[0] if isinstance(path, str) else "",
-                  sid=sid or "", msg="flow_error:" + msg,
+                  sid=sid or "", msg="flow_error:" + detail,
+                  failure_owner=_flow_failure_owner(flow, raw),
+                  error_type=_flow_error_type(flow),
                   upstream=up_name, model=model, **source)
     except Exception:
         pass
@@ -5952,6 +6673,26 @@ def _reasoning_effort_hint(reasoning_value):
     return (f"reasoning_effort={reasoning_value} 可能不被上游支持"
             f"（部分中转上游仅支持 low/medium/high）；"
             f"请检查客户端模型配置的思考强度映射（pi 侧 thinkingLevelMap off→None）")
+
+
+# 只给「上游明确拒绝请求体」的状态码附 reasoning_effort 提示：
+#   400 参数错误、422 语义不可处理。这两类才可能是「取值不被接受」。
+# **不得扩大到 5xx**：2026-10-02 实测，当天 27 条带该提示的事件里 25 条是 524
+# （Cloudflare 源站超时：首字节 0、上游耗时 127s）、2 条是 502，全部与思考强度取值
+# 无关；提示文案却指向「改客户端模型配置」，把排查方向带歪。
+# 也不包含 401/403（鉴权）、413（体积）、429（限流）：它们各有自己的归因。
+_REASONING_HINT_STATUSES = frozenset({400, 422})
+
+
+def _reasoning_effort_hint_for_status(status, reasoning_value):
+    """按上游状态码决定要不要给 reasoning_effort 提示（不给则返回空串）。
+
+    抽成独立函数是为了让"哪些状态码配给提示"可被测试钉住：这段判断过去内联在
+    事件组装里，只判 `>= 400`，于是超时也被判成参数问题。
+    """
+    if status not in _REASONING_HINT_STATUSES or not reasoning_value:
+        return ""
+    return _reasoning_effort_hint(reasoning_value)
 
 
 # 单请求的语义识别（NER）总预算。值按 **body 体积** 伸缩，而不是一个固定秒数。
@@ -6061,6 +6802,22 @@ def _ner_req_budget(body_bytes):
 # `_maybe_reload()` / `_sweep()`。前者会重建词表（就地 clear/update），若刚好压在
 # 本线程遍历词表的瞬间会抛异常 —— 走既有 fail-closed 分支阻断，**不会**放行原文；
 # 后者只在会话空闲超过 TTL 时回收，本次会话刚建，不受影响。
+def _available_cpu_count():
+    """本进程**实际可用**的核数（cgroup 配额 ∩ 亲和性掩码），拿不到就回落宿主核数。
+
+    池宽也必须用这个而不是 `os.cpu_count()`：16 核宿主上 `docker run --cpus=2` 时
+    后者返回 16，于是脱敏池开 4 个 worker、aux 池再开 4 个 —— **2 个核上摞 8 个线程**，
+    比 NER 线程数超配更严重（NER 那边已经改为同一判据，两处必须同源）。
+    判据本体在 `ner_engine.effective_cpu_count()`：那里已经把 cgroup v1/v2 配额与
+    亲和性两种情形都写了单测，不复刻一份（复刻的那份迟早会与它漂）。
+    """
+    try:
+        import ner_engine
+        return max(1, int(ner_engine.effective_cpu_count()))
+    except Exception:
+        return max(1, int(os.cpu_count() or 2))
+
+
 def _default_mask_workers():
     """脱敏池默认宽度（§8.1 定稿）。
 
@@ -6068,10 +6825,13 @@ def _default_mask_workers():
     ONNX 线程数。其余机器取 min(4, max(2, 核数 // 2)) —— 这一段（JSON 解析 +
     规则扫描）是百毫秒级的 CPU 活，4 个 worker 也压不满现代 CPU，收益主要体现在
     "NER 期间不再让其他请求排队"。
+
+    「弱机」按**实际可用**核数判（见 `_available_cpu_count`）：否则一个 `--cpus=2`
+    的容器会在 16 核宿主上被判成“好机器”，拿到 4 个 worker。
     """
     if MASKIT_MASK_WORKERS_ENV:
         return max(1, min(16, MASKIT_MASK_WORKERS_ENV))
-    cores = os.cpu_count() or 2
+    cores = _available_cpu_count()
     if cores <= 2:
         return 1
     return max(2, min(4, cores // 2))
@@ -6090,9 +6850,14 @@ _MASK_POOL = concurrent.futures.ThreadPoolExecutor(
 # 准入判据是 `queued_bytes + nbytes > 预算`，而 nbytes 就是这条请求自己的大小 ——
 # 预算比单条上限还小时，那条请求**永远**被自己顶出去（workers=1 时预算 8MB < 单条 32MB，
 # 于是 8~32MB 的 body 在 1~2 核机器上恒定 engine_busy，空闲机器也一样）。
-# 预算的用途是限制**堆积**（多条同时排队），不是限制单条：单条已由 32MB 闸门兜住。
-_MASK_QUEUE_BYTES = max(_MAX_REQUEST_BODY, _env_int(
-    "MASKIT_MASK_QUEUE_BYTES", _MASK_WORKER_COUNT * 8 * 1024 * 1024))
+# 预算的用途是限制**堆积**（多条同时排队），不是限制单条：单条已由体积闸门兜住。
+def _mask_queue_bytes_for(limit_bytes):
+    """排队字节预算 = max(单条上限, 环境变量/池宽默认)，见上方注释的下限理由。"""
+    return max(int(limit_bytes), _env_int(
+        "MASKIT_MASK_QUEUE_BYTES", _MASK_WORKER_COUNT * 8 * 1024 * 1024))
+
+
+_MASK_QUEUE_BYTES = _mask_queue_bytes_for(_MAX_REQUEST_BODY)
 # 同时在飞的请求条数上限：即使 body 都很小，条数也要有界（防线程池队列无界增长）
 _MASK_MAX_INFLIGHT = max(4, _MASK_WORKER_COUNT * 4)
 _MASK_ADMISSION_LOCK = threading.Lock()
@@ -6117,8 +6882,8 @@ def set_mask_workers(n):
     old = _MASK_POOL
     _MASK_WORKER_COUNT = n
     # 与模块级同口径（见 _MASK_QUEUE_BYTES 的注释）：下限必须是单条 body 上限，
-    # 否则换池之后 8~32MB 的请求又会被自己的体积顶出去（恒定 engine_busy）。
-    _MASK_QUEUE_BYTES = max(_MAX_REQUEST_BODY, _MASK_WORKER_COUNT * 8 * 1024 * 1024)
+    # 否则换池之后大 body 的请求又会被自己的体积顶出去（恒定 engine_busy）。
+    _MASK_QUEUE_BYTES = _mask_queue_bytes_for(_MAX_REQUEST_BODY)
     _MASK_MAX_INFLIGHT = max(4, _MASK_WORKER_COUNT * 4)
     _MASK_POOL = concurrent.futures.ThreadPoolExecutor(
         max_workers=n, thread_name_prefix="maskit-mask")
@@ -6127,6 +6892,30 @@ def set_mask_workers(n):
     except Exception:
         pass
     return n
+
+
+def set_max_request_body(mb=None):
+    """设置单条请求体上限（MiB，§H4a）。默认 32，范围 1~256。返回生效字节数。
+
+    与面板侧 `_clamp_max_request_body_mb` 同口径（两处各写一份，靠
+    `ConstantParityTests` 钉住）。抬高上限会同时抬高两样东西：
+      · 内存预算：最坏常驻 ≈ 池宽 × 单条上限；
+      · 单条脱敏耗时：实测 ≈112 ms/MiB（GIL 串行化的纯 Python + re）。
+    因此排队字节预算必须跟着抬（`_MASK_QUEUE_BYTES` 的下限就是单条上限，
+    否则大 body 会被自己的体积顶出准入，空闲机器也恒定 engine_busy）。
+    """
+    global _MAX_REQUEST_BODY, _MASK_QUEUE_BYTES
+    if mb is None:
+        _MAX_REQUEST_BODY = _DEFAULT_MAX_REQUEST_BODY
+    else:
+        try:
+            n = int(float(mb))
+        except (TypeError, ValueError):
+            n = 32
+        n = max(1, min(256, n))
+        _MAX_REQUEST_BODY = n * 1024 * 1024
+    _MASK_QUEUE_BYTES = _mask_queue_bytes_for(_MAX_REQUEST_BODY)
+    return _MAX_REQUEST_BODY
 
 
 def _mask_admit(nbytes):
@@ -6275,6 +7064,9 @@ def _write_runtime_metrics(force=False):
             "count": len(CUSTOM_WORDS),
             "issues": word_table_issues(),
         }
+        # 内存映射规模（§D3.3「清空内存映射」按钮旁边要显示“现在有多少东西可清”）。
+        # 引擎是代理链路的真值源，面板只能看到它自己那份（扩展桥接）。
+        payload["mappings"] = mapping_stats()
         try:
             import ner_engine
             payload["ner"] = {
@@ -6316,8 +7108,12 @@ def _retry_after_seconds():
 # A-3：响应侧重活在独立池执行，准入覆盖等待上游、排队和运行全生命周期。
 # worker 数限制 CPU 并发，条数/字节预算限制保留的任务输入。
 def _aux_pool_width():
-    """Conservative startup width; no runtime executor replacement."""
-    cores = (getattr(os, "process_cpu_count", os.cpu_count)() or 2)
+    """保守的启动宽度；运行时不替换执行器。
+
+    同样按**实际可用**核数判（见 `_available_cpu_count`）：aux 池与脱敏池会同时
+    干活，两个池各自按宿主核数开 4，在 2 核容器上就是 8 个线程抢 2 个核。
+    """
+    cores = _available_cpu_count()
     default = 1 if cores <= 2 else max(2, min(4, cores // 2))
     try:
         override = int(os.environ.get("MASKIT_AUX_WORKERS", "0"))
@@ -6722,6 +7518,98 @@ def _check_mask_work(deadline, cancel_event):
         raise TimeoutError("mask processing deadline exhausted")
 
 
+# ── NER 预取：最新消息优先（批次 8 / P0-2）───────────────────────────────────
+# 为什么需要：`_mask_tree` 按文档序走（system → 最老的消息 → … → 最新一条），而 NER
+# 的单请求预算是先到先得。长会话里预算总是先被最老的历史吃光，**用户刚发的那条**
+# （或刚拿到的 tool_result）反而整段不做语义识别 —— 恰恰是最该扫的部分。
+# 更糟的是它会自我维持：被跳过的叶子因为「不完整」不会进叶子结果缓存，下一轮仍然
+# 从头开始吃预算，最新那条永远轮不到。
+#
+# 做法：先把 body 里的字符串叶子按文档序收集起来，再**逆序**预热 `extract_entities`
+# （只填 NER 结果缓存，不改任何映射、不产生任何副作用），随后 `_mask_tree` 按正常
+# 顺序走到它们时直接命中缓存。
+# 预算只花掉一部分（`_NER_PREFETCH_SHARE`）：留一些给正常遍历，否则老历史永远
+# 拿不到识别，只是把「最新的漏」换成「最老的漏」。
+# 可用 `MASKIT_NER_PREFETCH_SHARE=0` 整个关掉（回退到旧行为）。
+_NER_PREFETCH_SHARE = min(0.9, max(0.0, _env_float("MASKIT_NER_PREFETCH_SHARE", 0.5)))
+_NER_PREFETCH_LEAVES = max(0, _env_int("MASKIT_NER_PREFETCH_LEAVES", 512))
+# 单条预取上限：预取只为了「让最新的那条排到前面」，不是把整包大附件搬去跑 NER。
+# 太大的叶子即使排前面也会自己撞 `CALL_BUDGET_S`（单次调用 10s 上限）并触发降级，
+# 白白把后续叶子的预算一起搭进去；超过这个量级的交给正常遍历按同一套降级路径处理。
+_NER_PREFETCH_MAX_CHARS = max(256, _env_int("MASKIT_NER_PREFETCH_MAX_CHARS", 32768))
+_NER_PREFETCH_WARNED = [False]
+
+
+def _collect_leaf_texts(obj, out, limit, depth=0):
+    """按文档序收集 body 里的字符串叶子（预取专用）。
+
+    不做路径判定（豁免/扫描范围）—— 那是 `_mask_tree` 的职责，这里复刻一份迟早会漂。
+    多抽到的叶子只浪费一点预算，不会漏扫也不会改变结果：预取只写 NER 结果缓存。
+    无汉字/纯符号的叶子由 `extract_entities` 的早返回免费跳过，不用在这里判。
+
+    深度与 `_mask_tree` **同上限**（`_MASK_MAX_DEPTH`）：超深的 body 随后会被
+    `_mask_tree` 抛异常 fail-closed 阻断，预取没必要先在它上面把递归跑到 Python
+    栈底再去撞同一个墙（那是纯浪费，还会在日志里多一条无关告警）。
+    """
+    if depth > _MASK_MAX_DEPTH:
+        return
+    if len(out) >= limit:
+        return
+    if isinstance(obj, str):
+        if 3 < len(obj) <= _NER_PREFETCH_MAX_CHARS:
+            out.append(obj)
+        return
+    if isinstance(obj, dict):
+        for v in obj.values():
+            _collect_leaf_texts(v, out, limit, depth + 1)
+        return
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            _collect_leaf_texts(v, out, limit, depth + 1)
+
+
+def _ner_prefetch_newest_first(body, budget_s):
+    """逆序预热 NER 结果缓存，返回实际预取的叶子数。
+
+    失败一律吞掉：预取是优化而不是正确性路径，它报错绝不能把请求打死。
+    降级（预算耗尽/槽位超时/推理失败）一开始就停：再往下只是白烧时间，
+    剩下的交给正常遍历按既有降级路径处理并如实记账。
+
+    吞异常 ≠ 无声无息：真出了意外（如超深嵌套 body 把 `_collect_leaf_texts`
+    递归到爆）会首次告警一行。
+
+    降级记账必须包在 `prefetch_scope()` 里：预取的降级是**推测性**的（可能只是撞上
+    瞬时额度不足），而正常遍历随后会对同一段文本重新裁定；写进请求级跳过记录会在
+    严格模式下把「其实完整扫完」的请求判成未完成而 503。
+    """
+    if not (NER_ENABLED and _NER_PREFETCH_LEAVES and _NER_PREFETCH_SHARE > 0):
+        return 0
+    try:
+        import ner_engine
+        if not ner_engine.is_ner_available():
+            return 0
+        texts = []
+        _collect_leaf_texts(body, texts, _NER_PREFETCH_LEAVES)
+        if not texts:
+            return 0
+        deadline = time.monotonic() + max(0.0, float(budget_s)) * _NER_PREFETCH_SHARE
+        epoch0 = ner_engine.skip_epoch()
+        done = 0
+        with ner_engine.prefetch_scope():
+            for text in reversed(texts):
+                if time.monotonic() >= deadline or ner_engine.skip_epoch() != epoch0:
+                    break
+                ner_engine.extract_entities(text)
+                done += 1
+        return done
+    except Exception as e:
+        if not _NER_PREFETCH_WARNED[0]:
+            _NER_PREFETCH_WARNED[0] = True
+            _log("[transparent] NER 最新消息优先预取失败，已跳过（不影响脱敏）: %s: %s"
+                 % (type(e).__name__, e))
+        return 0
+
+
 def _mask_pipeline_worker(body, sid, raw_content, enum_changed, has_dup_keys,
                           root_is_object, t_submit=0.0, deadline=None, cancel_event=None):
     """在 `_MASK_POOL` 线程里跑脱敏重活（纯计算 + 本模块全局态，不碰 mitmproxy 对象）。
@@ -6750,10 +7638,14 @@ def _mask_pipeline_worker(body, sid, raw_content, enum_changed, has_dup_keys,
         masked_bytes = None
         first_diff_byte = -1
         _check_mask_work(deadline, cancel_event)
-        with _ner_doc_budget(_ner_req_budget(len(raw_content)), deadline=deadline, cancel_event=cancel_event):
+        _ner_budget_s = _ner_req_budget(len(raw_content))
+        with _ner_doc_budget(_ner_budget_s, deadline=deadline, cancel_event=cancel_event):
             # 脱敏前记录扫描范围 + 各角色文本（仅内存，归因用，不落原文）
             scan_scope = _request_scope(body)
             role_texts = _collect_role_texts(body)
+            # P0-2：语义识别预算按「最新消息优先」花（详见 _ner_prefetch_newest_first）。
+            # 必须在本上下文管理器之内，与正常遍历共用同一份单请求预算。
+            _ner_prefetch_newest_first(body, _ner_budget_s)
             # 递归脱敏所有承载正文的顶层字段。逐格式硬编码会漏掉工具调用参数等嵌套位置，
             # 这里统一走 _mask_tree（内部路径感知：协议位置跳过、业务区强制扫描）。
             # 注意：必须遍历 body 全部顶层 key——曾只处理白名单 key，顶层自定义业务对象
@@ -6766,7 +7658,7 @@ def _mask_pipeline_worker(body, sid, raw_content, enum_changed, has_dup_keys,
             # 为什么之前漏了：这里按顶层 key 逐个取值送进 `_mask_tree`，于是键名本身
             # 一次都没经过 `mask()`。而扩展链路的 `mask_body` 是把整个 body 交给
             # `_mask_tree`（其 dict 分支会脱敏键名）——**同一个 body 走两条链路结果不同**，
-            # `{"13800138000": "safe"}` 在扩展链路已打码、在代理链路仍原样上行。
+            # `{"手机号": "safe"}` 在扩展链路已打码、在代理链路仍原样上行。
             #
             # 判据与 `_mask_tree` 的 dict 分支**完全一致**（同一个白名单、同一个 `mask()`），
             # 不另立一套，否则两边迟早再漂一次。
@@ -6994,7 +7886,7 @@ async def _request_impl(flow: http.HTTPFlow):
                 # 放行，fail_closed 的承诺就取决于**路径在不在白名单**，而不取决于
                 # fail_closed 本身。实测可达：未配 paths 时白名单只有 7 条默认路径，
                 # POST /v1/vector_stores、/v1/fine_tuning/jobs、/v2/chat、以及任意
-                # 厂商新端点 {"text":"张三 13800138000 …"} 都会明文上行。
+                # 厂商新端点 {"text":"张三 手机号 …"} 都会明文上行。
                 #
                 # 走主管线还顺带消掉一个倒挂：_looks_like_llm_request 对「声明 JSON
                 # 但解析失败」返回 True（交 fail_closed 脱敏），对「解析成功但键不
@@ -7064,18 +7956,32 @@ async def _request_impl(flow: http.HTTPFlow):
     # event loop。超限一律拒绝（不看 fail_closed）——放行等于把原文原样上行，
     # 正是脱敏代理绝不能做的事。
     if len(raw_content) > _MAX_REQUEST_BODY:
+        # §H4(b)：超限必须能归因。错误体只写 `shield_request_too_large` 时，用户
+        # 不知道该删什么（实测：带大附件的合法请求被整条拒掉且无法自查）。
+        # 注意：闸门是**内容盲**的（在 json.loads 之前），看不到"大在正文还是大在媒体"，
+        # 所以措辞只能到"缩小附件或上下文"，不能声称"附件过大"。
+        _too_large_hint = (
+            "请求体 %d 字节，超过单条上限 %d 字节（≈%.1f MiB），已在本机阻断、未上行。"
+            "请缩小附件或上下文后重试。"
+            % (len(raw_content), _MAX_REQUEST_BODY, _MAX_REQUEST_BODY / 1048576.0)
+        )
         _emit("BLOCK", host=host, method=method, path=path.split("?")[0],
               reason="request_too_large", block_source="engine", bytes=len(raw_content),
+              msg=_too_large_hint,
               upstream=up_name, **source)
         flow.response = http.Response.make(
             413,
             json.dumps({"error": "shield_request_too_large",
                         "reason": "request_too_large",
-                        "limit_bytes": _MAX_REQUEST_BODY}, ensure_ascii=False).encode("utf-8"),
+                        "blocking": True,
+                        "limit_bytes": _MAX_REQUEST_BODY,
+                        "hint": _too_large_hint,
+                        **inspection.report_for_skip(reason="request_too_large", blocked=True)},
+                       ensure_ascii=False).encode("utf-8"),
             {"content-type": "application/json"},
         )
         return
-    # 重复键（{"a":"13800138000","a":"safe"}）：json.loads 取后者覆盖前者，树里
+    # 重复键（{"a":"手机号","a":"safe"}）：json.loads 取后者覆盖前者，树里
     # 已经丢了被覆盖的值，扫不到 → 零改写分支会放行原始字节（审计 B2 实测）。
     # 检出后强制走重序列化，并禁用 splice（见下方回写分支）。
     body, has_dup_keys = _load_json_pairs(raw_content)
@@ -7099,7 +8005,7 @@ async def _request_impl(flow: http.HTTPFlow):
         except Exception:
             pass
     # 顶层不是对象（JSON 数组/字符串/数字）。没有任何主流 LLM API 用这种形态，
-    # 但它完全可能载有原文——["手机号 13800138000"] 就是一次完整的泄漏。
+    # 但它完全可能载有原文——["手机号 手机号"] 就是一次完整的泄漏。
     # 曾在这里直接 _emit_skip 放行，与相邻两个分支（non_json_body / invalid_json
     # 在 fail_closed 下都阻断）不一致，也与 fail_closed「绝不放行原文上行」的承诺
     # 冲突（SHIELD-NONOBJECT-BYPASS-001）。
@@ -7438,6 +8344,36 @@ async def _request_impl(flow: http.HTTPFlow):
         flow.metadata["shield_mask_done_at"] = time.time()
     except Exception:
         pass
+    _s_signed = _take_signed_skips(sid)
+    # 严格模式闸门（§B3）必须在**请求出网前**生效：此时脱敏已完成（命中/占位符已定），
+    # 只差回写与放行。判据用 inspection 的类别表：exempt（签名块按契约不扫）与 info
+    # （取消/直通）不阻断，只有「检测没跑完」类降级才阻断。
+    # 代价（如实声明）：占位符已签发，会留在跨请求复用表里（同值复用，不新增泄漏面）；
+    # 本条请求本身未上行、也未回写 flow。
+    if NER_REQUIRE_COMPLETE and inspection.has_blocking_reason(ner_skips):
+        _strict_codes = sorted(c for c in ner_skips if ner_skips.get(c))
+        _strict_report = inspection.build_report(
+            decision=inspection.DECISION_BLOCKED,
+            reasons=dict(ner_skips, semantic_incomplete=1),
+            failed=True,
+        )
+        _emit("BLOCK", host=host, method=method, path=path.split("?")[0], sid=sid,
+              reason="semantic_incomplete", block_source="engine",
+              bytes=len(raw_content),
+              msg=("严格模式：本次语义检测未完整执行（%s），已阻断，未上行"
+                   % ", ".join(_strict_codes)),
+              upstream=up_name, **source, **_strict_report)
+        flow.response = http.Response.make(
+            503,
+            json.dumps({"error": {"code": "shield_semantic_incomplete",
+                                  "reason": "semantic_incomplete",
+                                  "hint": "已开启「语义检测必须完整」，本条未上行。请稍后重试，或在面板关掉该开关。"},
+                        **_strict_report},
+                       ensure_ascii=False).encode("utf-8"),
+            {"content-type": "application/json", "Retry-After": "5"},
+        )
+        _drop(sid)
+        return
     _emit(
         "MASK",
         host=host,
@@ -7474,6 +8410,12 @@ async def _request_impl(flow: http.HTTPFlow):
         body_rewritten=body_rewritten,
         first_diff_byte=first_diff_byte,
         suffix_reused=bool(_session_get(sid, {}).get("suffix_reused")),
+        # 签名思考块整块豁免计数（本轮）：静默豁免必须可见，否则用户会以为全扫过了。
+        # 缺省不加字段，避免常态噪声（与 ner_truncated 同一做法）。
+        **({"signed_blocks_skipped": _s_signed} if _s_signed else {}),
+        # 统一检测口径（§B1）：处置结论 + 完整度 + 原因码，与扩展桥接同源。
+        **inspection.report_for_mask(changed=bool(hit_count), ner_skips=ner_skips,
+                                     signed_skipped=_s_signed),
         **source,
     )
 
@@ -7782,11 +8724,10 @@ def _scan_response(flow, sid, host, method, path, source, streamed_text=None):
         def _is_known_orig(val):
             if val in fwd or val in restored_origs:
                 return True
-            rec = _RECENT_FWD.get(val)
+            rec = _tables().fwd.get(val)
             if rec and (now - rec[2] <= recent_ttl):
                 return True
             return False
-
         # 流式接管时 flow.response.content 不可用，用回调累积文本
         if streamed_text is not None:
             body = streamed_text
@@ -7980,8 +8921,16 @@ def _sse_text_slots(data):
             blk = data.get("index", 0)
             if isinstance(d.get("text"), str):
                 slots.append((f"a{blk}.text", d["text"], _setter(d, "text"), False))
-            if isinstance(d.get("thinking"), str):
-                slots.append((f"a{blk}.think", d["thinking"], _setter(d, "thinking"), False))
+            # Anthropic 思考增量**不建还原槽位**（2026-10-02 定案，D6-B）。
+            # 思考块带 `signature`、上游校验「签名 = 被签正文」；还原会把正文改成明文，
+            # 而签名覆盖的是占位符形态 → 下一轮历史回放必 400，而正文不可编辑，
+            # 用户无法自救。不能改成「按块判断是否签名块」：签名在流末的
+            # `signature_delta` 才到，delta 时点根本不知道——流式下只有"不还原"是安全的。
+            # 未列入槽位的字段由 `_restore_sse_data` 原样透传（它只改槽位），故去掉槽位
+            # 就是逐字节透传；但该事件会改走 `_restore_tree` 兜底，所以另一边必须同步
+            # 挡 `thinking_delta`（见 `_RESTORE_SKIP_BLOCK_TYPES`）。
+            # OpenAI `reasoning_content`/`reasoning`、Responses `reasoning_text`、
+            # Gemini 无签名的思考文本都不受这条影响，继续还原（上下的其它槽位）。
             # tool_use 参数按 partial_json 增量下发，不还原客户端就拿占位符去执行工具
             if isinstance(d.get("partial_json"), str):
                 slots.append((f"a{blk}.pj", d["partial_json"], _setter(d, "partial_json"), True))
@@ -8586,6 +9535,9 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
         # state["text"] 里，直接传给事件/审计/扫描，不再碰 flow.response.content。
         restored_text = "".join(state["text"])
         state["text"] = []          # 文本已转入局部变量，提前释放列表引用
+        # 标记「整条流已交付」：客户端随后的关连接不再算取消（见 `_record_client_cancel`）。
+        # 判据只此一处落点——本回调是唯一能证明「整条流转交给 mitmproxy」的时刻。
+        flow.metadata["shield_response_concluded"] = _RESPONSE_CONCLUDED_STREAM_DONE
         # 还原摘要留在循环上发（它只是读几个计数 + 800B 预览，已成微秒级）：
         # 这样 RESTORE → AUDIT/SCAN 的事件顺序与搬走之前**完全一致**。
         _transport_complete(flow)
@@ -8918,18 +9870,18 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
                 items.append(item)
     except Exception:
         items = []
-    # 上游 4xx + 请求带可疑 reasoning_effort：附加排查提示。透明代理不改请求
-    # （下游配置问题由下游修），但事件里把原因说清楚，面板一眼可见。
+    # 上游参数类错误（400/422）+ 请求带可疑 reasoning_effort：附加排查提示。透明代理
+    # 不改请求（下游配置问题由下游修），但事件里把原因说清楚，面板一眼可见。
+    # 5xx/超时不附：那是上游侧超时或故障，与思考强度取值无关（见 `_REASONING_HINT_STATUSES`）。
     hint = ""
     # A-7：RESTORE 事件的 503 一律来自上游（引擎只是把上游的状态码如实记下来）。
     # 四种 503 来源（上游 / 请求侧 fail-closed / 响应侧阻断 / 兜底占位）此前
     # 混在一个 http_status 里，用户和我们都只能靠猜——这个字段是"归因"的唯一依据。
     block_source = "upstream"
     try:
-        hs = getattr(flow.response, "status_code", None)
-        re_val = flow.metadata.get("shield_reasoning_effort")
-        if hs is not None and hs >= 400 and re_val:
-            hint = _reasoning_effort_hint(re_val)
+        hint = _reasoning_effort_hint_for_status(
+            getattr(flow.response, "status_code", None),
+            flow.metadata.get("shield_reasoning_effort"))
     except Exception:
         pass
     summary = dict(
@@ -9400,6 +10352,10 @@ def _maybe_reload(force=False):
     global FAIL_CLOSED, RESPONSE_SCAN, STREAM_RESPONSE, STREAM_EXCLUDE_HOSTS
     global SENSITIVE_DISABLED, SENSITIVE_WORD_DISABLED, SENSITIVE_WORD_WHOLE, BUILTIN_RULES, EGRESS_PROXY
     global COMMAND_BLOCK, _EXTRA_HEADER_SKIP_WARNED, _CUSTOM_WORD_RX_CACHE
+    # 跨进程信号（清空内存映射）必须在 config mtime 的**提前返回之前**检查：
+    # 它不依赖配置文件是否变过。读盘已由 event_store 做 5s 节流，热路径只是一次
+    # 缓存查找，不新增 syscall。
+    _maybe_apply_mapping_reset()
     try:
         mt = _DATA_ROOT.joinpath("config.json").stat().st_mtime
     except Exception:
@@ -9467,6 +10423,8 @@ def _maybe_reload(force=False):
     COMMAND_BLOCK = s.get("command_block") or _parse_command_block(None)
     global NER_ENABLED
     NER_ENABLED = bool(s.get("ner_enabled", False))
+    global NER_REQUIRE_COMPLETE
+    NER_REQUIRE_COMPLETE = bool(s.get("ner_require_complete", False))
     # P0-a：预算上限随配置热重载（内部已处理优先级与环境变量硬覆盖）
     set_ner_req_budget(s.get("ner_req_budget_s"))
     UPSTREAMS = s["upstreams"]
@@ -9478,8 +10436,13 @@ def _maybe_reload(force=False):
     try:
         import event_store as _es
         _es.set_record_plaintext_words(s.get("record_plaintext_words", True))
+        # 日志写入模式基值（§D1）：引擎是主要写入方，必须与面板同口径热重载。
+        # trace 是限时运行时状态，不在这里（由 engine-signals.json 单独控制）。
+        _es.set_log_mode(s.get("log_mode"))
     except Exception:
         pass
+    # 单条请求体上限（§H4a）：与面板 _EXT_MAX_BODY 同源，可配置热重载。
+    set_max_request_body(s.get("max_request_body_mb"))
     RESPONSE_SCAN = bool(s.get("response_scan", True))
     STREAM_RESPONSE = bool(s.get("stream_response", True))
     # 空集合是用户在面板里显式清空黑名单的意思，必须原样生效。
@@ -9519,6 +10482,12 @@ def load(l):
     _maybe_reload(force=True)
     _warmup_recent_from_db()
     _prune_debug_logs()
+    # 重启即关闭限时排障（§D1：trace 不跨重启）。面板启动时也会清一次，
+    # 两处都清是为了覆盖「只重启引擎」与「只重启面板」两种启法。
+    try:
+        _stop_log_trace()
+    except Exception:
+        pass
     _log("=" * 50)
     _log("[LLM Shield] proxy started; config hot reload enabled")
     _log("=" * 50)

@@ -36,6 +36,7 @@ import { getLogs } from '@/api/logs'
 import { mergeMaskRestore } from '@/lib/log-events'
 import { EventTypeIcon, EVENT_TYPE_META } from '@/components/events/EventTypeIcon'
 import { EventDetailDialog } from '@/components/events/EventDetailDialog'
+import { DiagnosticPreviewButton } from '@/components/settings/DiagnosticPreviewButton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -379,6 +380,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{t('dash.engineError')}{status.last_error}</span>
+          <DiagnosticPreviewButton />
         </div>
       )}
 

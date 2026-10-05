@@ -123,6 +123,24 @@ export interface ProxyStatus {
     budget_env_override?: boolean
     /** 缓存冷热计数（本进程视角；代理链路真值在 engine-runtime.json） */
     cache?: { hit?: number; miss?: number; hit_rate?: number | null }
+    /**
+     * 治理器实际生效值（批次 8）：并发、预算容量与**单位**、可用核数、ONNX 线程数。
+     * 单位是 `cpu_ms_per_s`（CPU 毫秒/秒），不是墙钟——旧口径按墙钟计，同样的
+     * 数字实际能吃掉近两倍 CPU。用户问「为什么 CPU 跑满」时先看 `cpu_cores`
+     * 与本机核数是否对得上（容器里旧版会按宿主核数配）。
+     */
+    governor?: {
+      concurrency?: number
+      budget_ms_per_s?: number
+      budget_unit?: string
+      cpu_cores?: number
+      cpu_threads?: number
+      bucket_tokens_ms?: number
+      skipped_throttled?: number
+      skipped_sem_timeout?: number
+      wait_ms_total?: number
+      wait_ms_max?: number
+    }
   }
   /**
    * 敏感词表生效口径：`configured`/`regex_words` 来自配置，`engine_count`/`issues`
@@ -219,6 +237,17 @@ export interface ShieldEvent {
   ner_truncated?: boolean
   /** 降级明细：原因 → 本轮由此原因跳过的叶子数。键见 EventDetailDialog 的 NER_SKIP_LABELS。 */
   ner_skip_reasons?: Record<string, number>
+  /**
+   * 批次 2 统一检测口径：本次请求的处置结论。四种状态此前在列表里都表现为「0 命中」，
+   * 现在分开：已脱敏 / 已扫描未命中 / 主动阻断 / 明确直通（未脱敏）。
+   */
+  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'passthrough'
+  /** 所配置的检测执行到什么程度；complete 只表示「已执行完」，不保证现实无漏检。 */
+  completeness?: 'complete' | 'partial' | 'failed' | 'not_applicable' | 'unknown'
+  /** 原因码计数（NER 降级 / 协议契约豁免 / 阻断原因），键见 EventDetailDialog 的标签表。 */
+  reason_codes?: Record<string, number>
+  /** 签名思考块整块未扫描的块数（协议契约豁免，属漏检路径故必须可见）。 */
+  signed_blocks_skipped?: number
   items: SlimItem[] | EventItem[]
   dialog?: string
   dialog_req?: string
@@ -278,6 +307,28 @@ export interface LogsResponse {
   next_since?: number
   /** 游标重置（清空日志/库隔离重建后 id 从 1 重新开始）：丢弃旧游标从 0 重拉 */
   reset?: boolean
+  /** 反向游标（§D3.1）：更早处还有符合当前筛选的行 */
+  has_older?: boolean
+  /** 下一页的 `before_seq`（本页最旧一条的 seq）；未反向翻页时为 0 */
+  before_cursor?: number
+  /** 当前**实际生效**的日志写入模式（§D1）：summary/detailed/trace */
+  log_mode?: LogMode
+  /** 限时排障窗口的截止时间戳（秒）；0 表示未开启 */
+  trace_until?: number
+}
+
+/** 日志写入模式（§D1）：summary=最小记录；detailed=本地详细；trace=限时排障 */
+export type LogMode = 'summary' | 'detailed' | 'trace'
+
+/** /api/logs/mode */
+export interface LogModeState {
+  ok: boolean
+  /** 持久模式（summary/detailed） */
+  mode: 'summary' | 'detailed'
+  /** 实际生效模式（排障窗口内为 trace） */
+  effective: LogMode
+  trace_active: boolean
+  trace_until: number
 }
 
 export interface LogDetailResponse {

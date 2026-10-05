@@ -24,6 +24,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, RunEvent};
 
+#[cfg(target_os = "linux")]
+mod linux_tray;
+
 /// 引擎 API 端口（panel.py PANEL_PORT = 5801）。
 ///
 /// **必须优先读 `LLM_SHIELD_PANEL_PORT`**：那是 panel.py 自己决定监听端口的变量
@@ -733,9 +736,13 @@ impl EngineManager {
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 // 全局托盘「启动/停止代理」菜单项引用：用于动态切换文案
+#[cfg(not(target_os = "linux"))]
 static TRAY_TOGGLE_ITEM: OnceLock<tauri::menu::MenuItem<tauri::Wry>> = OnceLock::new();
 
 pub fn update_tray_proxy_text(running: bool) {
+    #[cfg(target_os = "linux")]
+    linux_tray::update_proxy_text(running);
+    #[cfg(not(target_os = "linux"))]
     if let Some(item) = TRAY_TOGGLE_ITEM.get() {
         let text = if running { "停止代理" } else { "启动代理" };
         let _ = item.set_text(text);
@@ -993,6 +1000,57 @@ fn show_and_focus(w: &tauri::WebviewWindow) {
     let _ = w.set_always_on_top(true);
     std::thread::sleep(Duration::from_millis(50));
     let _ = w.set_always_on_top(false);
+}
+
+// 所有平台的托盘菜单共用动作；Linux 的 D-Bus 回调也走这里。
+fn handle_tray_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "show" => {
+            if let Some(w) = app.get_webview_window("main") {
+                show_and_focus(&w);
+            }
+        }
+        "toggle" => {
+            // 必须另开线程：菜单回调跑在主线程，这里要发两个阻塞 HTTP
+            // （查状态 + 启停），而 start_proxy 拉 mitmdump 可能好几秒——
+            // 在主线程里等于把托盘和窗口一起冻住
+            std::thread::spawn(|| {
+                let token = token_candidates()
+                    .iter()
+                    .find_map(|p| std::fs::read_to_string(p).ok())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                let base = format!("http://127.0.0.1:{}", engine_port());
+                if let Ok(client) = reqwest::blocking::Client::builder().no_proxy()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                {
+                    let running = client
+                        .get(format!("{base}/api/status"))
+                        .header("X-Shield-Token", &token)
+                        .send()
+                        .ok()
+                        .and_then(|r| r.json::<serde_json::Value>().ok())
+                        .and_then(|v| v.get("proxy_running").cloned())
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let path = if running { "stop" } else { "start" };
+                    let res = client
+                        .post(format!("{base}/api/proxy/{path}"))
+                        .header("X-Shield-Token", &token)
+                        .send();
+                    if res.is_ok() {
+                        update_tray_proxy_text(!running);
+                    }
+                }
+            });
+        }
+        "quit" => {
+            // 三段式退出（Exit 事件统一处理）
+            app.exit(0);
+        }
+        _ => {}
+    }
 }
 
 // ========== Tauri Commands ==========
@@ -1717,6 +1775,9 @@ pub fn run() {
             std::thread::spawn(heal_autostart);
 
             // 系统托盘：显示窗口 / 启停代理（Rust 直连引擎 API）/ 退出
+            #[cfg(target_os = "linux")]
+            linux_tray::install(app.handle())?;
+            #[cfg(not(target_os = "linux"))]
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::TrayIconBuilder;
@@ -1742,53 +1803,7 @@ pub fn run() {
                             }
                         }
                     })
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "show" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                show_and_focus(&w);
-                            }
-                        }
-                        "toggle" => {
-                            // 必须另开线程：菜单回调跑在主线程，这里要发两个阻塞 HTTP
-                            // （查状态 + 启停），而 start_proxy 拉 mitmdump 可能好几秒——
-                            // 在主线程里等于把托盘和窗口一起冻住
-                            std::thread::spawn(|| {
-                                let token = token_candidates()
-                                    .iter()
-                                    .find_map(|p| std::fs::read_to_string(p).ok())
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default();
-                                let base = format!("http://127.0.0.1:{}", engine_port());
-                                if let Ok(client) = reqwest::blocking::Client::builder().no_proxy()
-                                    .timeout(Duration::from_secs(5))
-                                    .build()
-                                {
-                                    let running = client
-                                        .get(format!("{base}/api/status"))
-                                        .header("X-Shield-Token", &token)
-                                        .send()
-                                        .ok()
-                                        .and_then(|r| r.json::<serde_json::Value>().ok())
-                                        .and_then(|v| v.get("proxy_running").cloned())
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-                                    let path = if running { "stop" } else { "start" };
-                                    let res = client
-                                        .post(format!("{base}/api/proxy/{path}"))
-                                        .header("X-Shield-Token", &token)
-                                        .send();
-                                    if res.is_ok() {
-                                        update_tray_proxy_text(!running);
-                                    }
-                                }
-                            });
-                        }
-                        "quit" => {
-                            // 三段式退出（Exit 事件统一处理）
-                            app.exit(0);
-                        }
-                        _ => {}
-                    })
+                    .on_menu_event(|app, event| handle_tray_menu_event(app, event.id.as_ref()))
                     .build(app)?;
                 let _ = tray;
             }
@@ -1822,6 +1837,8 @@ pub fn run() {
         .run(|app, event| match event {
             // 三段式退出：Exit 前同步清理（引擎停 + 进程树）
             RunEvent::Exit => {
+                #[cfg(target_os = "linux")]
+                linux_tray::shutdown();
                 let mgr = app.state::<Arc<EngineManager>>();
                 mgr.shutdown();
             }

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import statistics
@@ -113,11 +114,15 @@ def _setup_env(tmp):
 
 
 def bench_mask_single(tr, iters):
-    """单请求脱敏：最接近用户感知的一段（规则扫描 + 签发 + 拼接）。"""
-    text = ("客户压测敏感词01 与 02，编号 %d，" % iters) + FILLER % 1
+    """单请求脱敏：最接近用户感知的一段（规则扫描 + 签发 + 拼接）。
+
+    ⚠️ 每次迭代用**不同**的文本：叶子结果缓存（批次 8）对同一段文本的第二次调用
+    会直接命中，用固定文本测出来的是「缓存命中」而不是「规则扫描」。
+    """
     samples = []
     for i in range(iters):
         sid = "bench-single-%d" % (i % 8)
+        text = ("客户压测敏感词01 与 02，编号 %d，" % i) + FILLER % 1
         t0 = time.perf_counter()
         tr.mask(text, sid)
         samples.append((time.perf_counter() - t0) * 1000)
@@ -144,11 +149,15 @@ def bench_mask_pool(tr, concurrency, per_thread):
 
         async def one(i):
             sid = "bench-pool-%d" % (i % 4)
+            # ⚠️ 每条用**不同**的文本（尾部带请求序号）：叶子结果缓存对同一段文本的
+            # 第二次调用会直接命中，用固定文本测出来的吞吐是「缓存命中吞吐」，
+            # 比真实脱敏快一个数量级，会把并发基线整个测歪。
+            text = workload + (" #%d" % i)
             t0 = time.perf_counter()
             # ⚠️ 每条自己记账、并发提交（gather）：要把"排队 + 执行"都算进该条的
             # 延迟里，才能看出队头阻塞。写成"先提交一堆再顺序 await"会把
             # await 之前的等待时间漏掉，宽池反而显得更慢（实测踩过）。
-            await loop.run_in_executor(pool, tr.mask, workload, sid)
+            await loop.run_in_executor(pool, tr.mask, text, sid)
             lat.append((time.perf_counter() - t0) * 1000)
 
         await asyncio.gather(*(one(i) for i in range(total)))
@@ -219,6 +228,229 @@ def bench_audit(tr, sizes_kb, iters):
     return out
 
 
+def bench_long_context(tr, sizes_kb, iters):
+    """长上下文脱敏：逐个体积点量 `json.loads + _mask_tree + dumps` 三段耗时。
+
+    与 `size_probe.py` 的区别：那个回答「闸门会不会挡住 1M token」，本组是
+    **可重复跑的性能基线**（固定体积点、给 p50/p95、给每 MiB 单价），
+    用来在后续改动后判断长上下文有没有变慢。
+    """
+    out = {}
+    for kb in sizes_kb:
+        raw = _make_response_body(kb)
+        loads, mask, dumps, total = [], [], [], []
+        # ⚠️ 每次迭代换一个会话 id：叶子结果缓存按文本命中，同一会话重跑同一段 body
+        # 会从第 2 次起全部命中，测出来的是缓存而不是规则扫描。
+        for it in range(iters):
+            t0 = time.perf_counter()
+            body = json.loads(raw)
+            t1 = time.perf_counter()
+            masked = tr._mask_tree(body, "bench-long-%d" % it)
+            t2 = time.perf_counter()
+            json.dumps(masked, ensure_ascii=False).encode("utf-8")
+            t3 = time.perf_counter()
+            loads.append((t1 - t0) * 1000)
+            mask.append((t2 - t1) * 1000)
+            total.append((t3 - t0) * 1000)
+            dumps.append((t3 - t2) * 1000)
+        st = _stats(total)
+        mib = len(raw) / 1024 / 1024
+        st.update({
+            "body_mib": round(mib, 3),
+            "loads": _stats(loads), "mask_tree": _stats(mask), "dumps": _stats(dumps),
+            # 换算单价：GIL 占用与体积近似线性，单价是跨体积可比的常量
+            "ms_per_mib": round(st["mean"] / mib, 1) if mib else 0.0,
+        })
+        out["%dKB" % kb] = st
+    return out
+
+
+def bench_multiturn(tr, msgs, msg_chars, turns, iters):
+    """多轮长会话：客户端每轮重发整段历史，只追加一条新消息。
+
+    这是叶子结果缓存（批次 8）的**唯一**卖点所在，也是长会话变慢的直接原因：
+    没有缓存时每轮都要把整段历史重跑 20~50 条正则（实测 ≈140 ms/MiB）。
+
+    两个数必须分开报，否则看不出差别：
+      cold  本会话第一次见这段历史（全未命中）；
+      warm  同一会话的后续轮次（只有尾部新消息未命中）。
+    `speedup` 就是缓存带来的收益；`deepcopy` 单列，因为它不属于脱敏耗时。
+    """
+    per_msg = max(1, msg_chars // max(1, len(FILLER % 0)))
+
+    def make(n):
+        messages = []
+        for i in range(n):
+            messages.append({
+                "role": "user",
+                "content": "第%d条：" % i + (FILLER % i) * per_msg
+                           + " 手机 %s 邮箱 %s" % (FAKE_PHONE, FAKE_EMAIL),
+            })
+            messages.append({"role": "assistant", "content": "已记录第%d条。" % i})
+        return {"model": "bench-model", "messages": messages}
+
+    def run(body, sid):
+        t0 = time.perf_counter()
+        b = copy.deepcopy(body)
+        t1 = time.perf_counter()
+        tr._mask_tree(b, sid)
+        t2 = time.perf_counter()
+        return (t2 - t1) * 1000, (t1 - t0) * 1000
+
+    cold, warm, dup = [], [], []
+    for it in range(max(1, iters)):
+        sid = "bench-mt-%d" % it
+        tr._leaf_cache_clear()
+        c, d = run(make(msgs), sid)
+        cold.append(c)
+        dup.append(d)
+        body = make(msgs)
+        for t in range(max(2, turns)):
+            body["messages"].append({"role": "user",
+                                     "content": "追加第%d条：%s" % (t, FAKE_EMAIL)})
+            w, d = run(body, sid)
+            dup.append(d)
+            if t >= 1:                 # 第 2 轮起才算 warm（第 1 轮是首次填缓存）
+                warm.append(w)
+    out = {"messages": msgs, "msg_chars": msg_chars, "turns": max(2, turns),
+           "cold": _stats(cold), "warm": _stats(warm), "deepcopy": _stats(dup)}
+    out["speedup"] = (round(out["cold"]["p50"] / out["warm"]["p50"], 1)
+                      if out["warm"]["p50"] else 0.0)
+    if hasattr(tr, "_LEAF_CACHE_STATS"):
+        out["leaf_cache"] = dict(tr._LEAF_CACHE_STATS)
+        out["leaf_cache_size"] = len(tr._LEAF_CACHE)
+    return out
+
+
+def bench_ner_cache(tr, iters, doc_chars_list):
+    """NER 冷/热缓存：模型加载、缓存未命中、同文本命中，按**文档长度**分档。
+
+    三件事分开量，因为它们的数量级完全不同，混在一起就什么都看不出来：
+      model_load  首次调用会建 ONNX 会话（秒级，只付一次）；
+      miss        缓存未命中 → 真的跑一遍推理；
+      hit         命中 → 只做 HMAC 键比对 + 坐标切出（§G1 后值只存位置三元组）。
+
+    按长度分档而不是只报一个点：只看单点会得到「NER 很快」或「NER 很慢」两种
+    相反结论（小文本被 per-call 开销主导、长文本被分段与预算主导）。
+
+    同时必须回传 skip 计数：超出预算/截止时间时引擎会**主动不做识别**（漏检），
+    此时耗时低不代表“跑得快”，而是“根本没跑”——不报这个数就是拿漏检冒充性能。
+
+    模型不可用（文件缺失或 onnxruntime 未装）时**如实返回 unavailable**，
+    不拿 mock 结果冒充 §7.3「中文 NER 效果已验证」。
+    """
+    import ner_engine
+    out = {
+        # 两个字段分开报：文件齐 ≠ 能推理（onnxruntime 缺失时只差后者），
+        # 合成一个布尔就分不清「没装模型」与「装了但跑不起来」。
+        "available": bool(ner_engine.is_ner_available()),
+        "initialized_before": bool(ner_engine.status().get("initialized")),
+    }
+    if not out["available"]:
+        out["note"] = "模型文件缺失，未执行"
+        return out
+
+    # 样本必须含 NER 认得出的实体，否则整条路径会被「无实体」短路，测得的是空转。
+    unit = ("张三向李四汇报了与北京华创科技有限公司的合同进展，"
+            "王五负责对接上海办事处。请尽快确认。")
+
+    # 单调递增的文档计数器：**每一个**生成的文档都必须与本次运行里任何
+    # 其它文档不同（包括其它长度档）。否则后跑的档会命中先跑那档的分段缓存：
+    # 实测 8000 字的第一个窗口正好等于 4000 字档的文档，于是 8000 字只花了
+    # 658 ms（看着像「越长越便宜」），实际是少跑了一段推理。
+    _seq = [0]
+
+    def _doc(n, unique=True):
+        """造 n 字符的文档；unique=True 时每段带唯一编号，且全文唯一。
+
+        ⚠️ 为什么必须唯一：超过 `MAX_TEXT_CHARS` 的文本走**分段识别**，
+        分段结果同样进缓存。拿重复模板凑长度会让后续段全部命中缓存，
+        测出「长文本反而更快」的假象（本脚本首轮就跑到 4000 字 25.8 ms/千字、
+        而 2000 字是 173 ms/千字）。基线里绝不允许这种误导性数字。
+        """
+        _seq[0] += 1
+        seed = _seq[0]
+        parts, total, i = [], 0, 0
+        while total < n:
+            seg = unit + (("流水%09d，" % (seed * 100000 + i)) if unique else "")
+            parts.append(seg)
+            total += len(seg)
+            i += 1
+        return "".join(parts)[:n]
+
+    max_chars = int(ner_engine.status().get("max_text_chars") or 0)
+    out["max_text_chars"] = max_chars
+
+    before = ner_engine.cache_stats()
+    tr.NER_ENABLED = True
+    try:
+        longest = max(doc_chars_list)
+        t0 = time.perf_counter()
+        # 首个调用触发模型加载 + 未命中推理，两件事都算在 model_load 里 ——
+        # 拆不开：会话创建就在第一次 extract_entities 内部。
+        tr.mask(_doc(200), "bench-ner-load")
+        out["model_load_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        out["initialized_after"] = bool(ner_engine.status().get("initialized"))
+
+        by_chars = {}
+        for chars in doc_chars_list:
+            # 命中组必须**固定同一份文档**：命中测的是「同一文本重复脱敏」
+            # （多轮对话里模型每轮都把相同上下文发回来），不是「又一份新文本」。
+            # 拿 `_doc(chars)` 在循环里现生成 = 每轮都是一份新文档 = 测出的是 miss。
+            hit_doc = _doc(chars)
+            tr.mask(hit_doc, "bench-ner-warm")
+            hits, miss = [], []
+            for i in range(max(1, iters)):
+                t0 = time.perf_counter()
+                tr.mask(hit_doc, "bench-ner-hit-%d" % (i % 4))
+                hits.append((time.perf_counter() - t0) * 1000)
+            for i in range(max(1, iters)):
+                # 每个文档全局唯一 → 每一个分段窗口都必然未命中。
+                # 只改尾部编号、或只按档位给种子都不够：分段窗口是 4000 字的窗，
+                # 只要窗口内容与别处重叠就会命中缓存（详见 `_doc` 的注释）。
+                t0 = time.perf_counter()
+                tr.mask(_doc(chars) + " 仅此一次%06d。" % i, "bench-ner-miss-%d" % (i % 4))
+                miss.append((time.perf_counter() - t0) * 1000)
+            entry = {"chars": chars, "hit": _stats(hits), "miss": _stats(miss),
+                     "segmented": bool(max_chars and chars + 12 > max_chars)}
+            if entry["miss"]["mean"]:
+                entry["hit_miss_ratio"] = round(entry["hit"]["mean"] / entry["miss"]["mean"], 4)
+                entry["ms_per_1k_chars"] = round(entry["miss"]["mean"] / (chars / 1000.0), 2)
+            by_chars[str(chars)] = entry
+        out["by_chars"] = by_chars
+        out["by_chars_longest"] = by_chars[str(longest)]
+
+        # 分段缓存的可利用性（解释「为什么同样的长度会差 20 倍」）：
+        # 重复模板文档的第二轮几乎全是段缓存命中，这是真实机制，但**不是**
+        # 线性推理单价，两个数必须分开报。
+        if max_chars:
+            rep = (unit * ((max_chars * 3) // len(unit) + 2))[:max_chars * 3]
+            tr.mask(rep, "bench-ner-rep-warm")
+            reps = []
+            for i in range(max(1, iters)):
+                t0 = time.perf_counter()
+                tr.mask(rep + " 尾%06d。" % i, "bench-ner-rep-%d" % (i % 2))
+                reps.append((time.perf_counter() - t0) * 1000)
+            out["repeat_doc"] = {
+                "chars": len(rep), "p50_ms": _stats(reps)["p50"],
+                "note": "重复模板 → 分段缓存可用；与 by_chars 的单价不可比",
+            }
+
+        after = ner_engine.cache_stats()
+        out["cache"] = {k: after.get(k) for k in ("hit", "miss", "hit_rate", "size", "chars")}
+        out["cache_delta"] = {
+            "hit": int(after.get("hit") or 0) - int(before.get("hit") or 0),
+            "miss": int(after.get("miss") or 0) - int(before.get("miss") or 0),
+        }
+        # 漏检证据：非空即意味着上面那些「很快的 miss」里有一部分根本没跑推理。
+        # 不放进结果就不能拿耗时下性能结论（归因会错到与 2026-10-02 同款的跟头上）。
+        out["skips"] = ner_engine.request_skips(reset=False)
+        out["governor"] = ner_engine.governor_status()
+    finally:
+        tr.NER_ENABLED = False
+    return out
+
+
 def _diff(before, after):
     """对比两组结果，只对"延迟型"指标给结论（越大越差）。"""
     rows = []
@@ -247,7 +479,24 @@ def main():
     ap.add_argument("--restore-kb", type=float, default=8192, help="整包还原的 body 体积（KB）")
     ap.add_argument("--restore-iters", type=int, default=3)
     ap.add_argument("--concurrency", type=int, default=16, help="mask_pool 并发数")
+    ap.add_argument("--concurrency-list", default="1,4,8",
+                    help="mask_pool 并发扫描点（逗号分隔；空串则只用 --concurrency）")
     ap.add_argument("--per-thread", type=int, default=4, help="mask_pool 每并发请求数")
+    ap.add_argument("--long-sizes", default="256,1024,4096",
+                    help="长上下文体积点（KB，逗号分隔）")
+    ap.add_argument("--long-iters", type=int, default=3)
+    ap.add_argument("--mt-msgs", type=int, default=150,
+                    help="多轮长会话的历史消息数（bench_multiturn）")
+    ap.add_argument("--mt-msg-chars", type=int, default=400, help="每条消息的目标字符数")
+    ap.add_argument("--mt-turns", type=int, default=3, help="续跑轮数（含首轮）")
+    ap.add_argument("--mt-iters", type=int, default=2, help="多轮长会话重复几次")
+    ap.add_argument("--skip-multiturn", action="store_true", help="跳过多轮长会话组")
+    ap.add_argument("--ner-iters", type=int, default=8, help="NER 冷/热各跑几次")
+    ap.add_argument("--ner-chars-list", default="500,2000,4000,8000",
+                    help="NER 文档长度档次（字符，逗号分隔）")
+    ap.add_argument("--pool-total", type=int, default=32,
+                    help="并发扫描的总请求数（各宽度**总量相同**，否则延迟只反映工作量）")
+    ap.add_argument("--skip-ner", action="store_true", help="跳过 NER 冷/热组")
     ap.add_argument("--audit-sizes", default="16,128,512", help="审计体积点（KB，逗号分隔）")
     ap.add_argument("--audit-iters", type=int, default=5)
     ap.add_argument("--json", action="store_true", help="只输出 JSON（供脚本消费）")
@@ -269,10 +518,33 @@ def main():
     }
     result["mask_single"] = bench_mask_single(tr, args.iters)
     result["mask_pool"] = bench_mask_pool(tr, args.concurrency, args.per_thread)
+    levels = [int(x) for x in args.concurrency_list.split(",") if x.strip()]
+    if levels:
+        # §G3 要求的 1/4/8 并发扫描。**各宽度总量必须相同**：把总量也按并发数放大
+        # 会把「工作量变大」误读成「并发变慢」（本脚本首轮实测就踩了：p50 2.8→12.6→18.2 ms
+        # 看着像队头阻塞，其实就是 4/16/32 条的总量差异）。
+        result["mask_pool_by_concurrency"] = {
+            str(c): bench_mask_pool(tr, c, max(1, args.pool_total // c)) for c in levels
+        }
+        result["pool_total_per_level"] = args.pool_total
     result["audit_scan"] = bench_audit(
         tr, [int(x) for x in args.audit_sizes.split(",") if x.strip()], args.audit_iters)
     if not args.skip_restore:
         result["restore_whole"] = bench_restore_whole(tr, args.restore_kb, args.restore_iters)
+    if args.long_sizes.strip():
+        result["long_context"] = bench_long_context(
+            tr, [int(x) for x in args.long_sizes.split(",") if x.strip()], args.long_iters)
+    # 多轮长会话（叶子结果缓存）：必须紧跟在 long_context 之后、NER 组之前 ——
+    # NER 组会改 `NER_ENABLED`，跑在它后面就不再是「规则模式」的基线。
+    if not args.skip_multiturn:
+        result["multiturn"] = bench_multiturn(
+            tr, args.mt_msgs, args.mt_msg_chars, args.mt_turns, args.mt_iters)
+    # NER 组必须排在最后：它会加载 ONNX 会话并改 `NER_ENABLED`，
+    # 跑在其他组之前会让后面的「规则模式」基线不再纯净。
+    if not args.skip_ner:
+        result["ner_cache"] = bench_ner_cache(
+            tr, args.ner_iters,
+            [int(x) for x in args.ner_chars_list.split(",") if x.strip()])
 
     if args.save:
         p = Path(args.save)
@@ -287,6 +559,37 @@ def main():
         for group in ("mask_single", "mask_pool", "restore_whole"):
             if group in result:
                 print("  %-16s %s" % (group, json.dumps(result[group], ensure_ascii=False)))
+        for c, st in (result.get("mask_pool_by_concurrency") or {}).items():
+            print("  %-16s %s" % ("pool@%s" % c, json.dumps(st, ensure_ascii=False)))
+        for kb, st in (result.get("long_context") or {}).items():
+            print("  long %-8s body=%.2f MiB  p50=%.0f ms  p95=%.0f ms  mask_tree p50=%.0f ms  %.1f ms/MiB"
+                  % (kb, st["body_mib"], st["p50"], st["p95"], st["mask_tree"]["p50"],
+                     st["ms_per_mib"]))
+        mt = result.get("multiturn")
+        if mt:
+            print("  多轮长会话    %d 条×%d 字  冷跑 p50=%.0f ms  续跑 p50=%.0f ms  加速 %.1fx  缓存 %s"
+                  % (mt["messages"], mt["msg_chars"], mt["cold"]["p50"], mt["warm"]["p50"],
+                     mt["speedup"], json.dumps(mt.get("leaf_cache") or {}, ensure_ascii=False)))
+        ner = result.get("ner_cache")
+        if ner:
+            if not ner.get("available"):
+                print("  ner_cache     未执行：%s" % ner.get("note", "模型不可用"))
+            else:
+                print("  ner_cache     load=%.0f ms  initialized=%s  skips=%s"
+                      % (ner.get("model_load_ms", 0.0), ner.get("initialized_after"),
+                         json.dumps(ner.get("skips") or {}, ensure_ascii=False)))
+                for chars, e in (ner.get("by_chars") or {}).items():
+                    print("    %6s chars  hit p50=%.2f ms  miss p50=%.2f ms  miss p95=%.1f ms  %.2f ms/千字%s"
+                          % (chars, e["hit"]["p50"], e["miss"]["p50"], e["miss"]["p95"],
+                             e.get("ms_per_1k_chars", 0.0),
+                             "  [分段]" if e.get("segmented") else ""))
+                rep = ner.get("repeat_doc")
+                if rep:
+                    print("    重复模板 %s chars  p50=%.1f ms（分段缓存命中，不可与上行单价比较）"
+                          % (rep["chars"], rep["p50_ms"]))
+                print("    cache delta=%s  总计=%s"
+                      % (json.dumps(ner.get("cache_delta"), ensure_ascii=False),
+                         json.dumps(ner.get("cache"), ensure_ascii=False)))
         for kb, st in result["audit_scan"].items():
             print("  audit %-8s scan(p50/p95)=%.1f/%.1f ms  full_parse(p50)=%.1f ms  cpu_ratio=%.2f"
                   % (kb, st["scan_128k_window"]["p50"], st["scan_128k_window"]["p95"],

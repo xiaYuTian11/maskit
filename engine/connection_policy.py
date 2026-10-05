@@ -78,6 +78,9 @@ class ConnectionGovernance:
         self.observation_errors = 0
         self._evictions = 0
         self._finished = 0
+        # 「证据已定论之后才到的客户端 FIN」计数。这类断开不再落 CANCEL 事件
+        # （见 flow_cancelled），但必须仍可观测——静默丢弃与「没发生过」无法区分。
+        self._cancelled_after_complete = 0
         self._installed = False
         self._capabilities = None
 
@@ -247,6 +250,9 @@ class ConnectionGovernance:
         if marker is not None:
             marker["phase"] = evidence["phase"]
             marker["conn"] = record["conn"]
+            # 证据已定论（complete 或 request_failed）。之后客户端再关连接时，
+            # `flow_cancelled` 不能把这个事实抹回完成前的 phase。
+            marker["settled"] = True
         if failed:
             evidence["reason"] = evidence["reason"] or "request_failed"
         else:
@@ -278,7 +284,16 @@ class ConnectionGovernance:
             self._finish(flow, True)
         else:
             evidence = self.snapshot(flow)
-            evidence.update(reason=reason, phase=marker["phase"] or evidence["phase"])
+            if marker.get("settled"):
+                # 证据已定论后的客户端 FIN：保留原 phase（通常是 complete），只追加
+                # 「这次断开发生在收尾之后」。
+                # 不再写 `phase=marker["phase"]`——marker 里存的是**完成前**的 phase，
+                # 写回去会把「已完成」从证据里抹掉（2026-10-02 实测：同一批 CANCEL
+                # 记录全部显示 response_stream，其实响应已交付完毕，无从归因）。
+                evidence.update(reason=reason, cancelled_after_complete=True)
+                self._cancelled_after_complete += 1
+            else:
+                evidence.update(reason=reason, phase=marker["phase"] or evidence["phase"])
             flow.metadata["_maskit_transport"] = evidence
             state = self._connections.get(marker.get("conn"))
             if state is not None:
@@ -332,6 +347,7 @@ class ConnectionGovernance:
         oldest = max((now - r["started"] for r in self._flows.values()), default=0)
         return {"connections": len(self._connections), "inflight": len(self._flows),
                 "finished": self._finished, "evictions": self._evictions,
+                "cancelled_after_complete": self._cancelled_after_complete,
                 "observation_errors": self.observation_errors, "timers": 0,
                 "oldest_request_age_s": max(0, oldest),
                 "observation_installed": self._installed, "capabilities": dict(self._capabilities)}

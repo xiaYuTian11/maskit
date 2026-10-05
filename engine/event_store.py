@@ -9,6 +9,7 @@
 import json
 import locale
 import os
+import onboarding
 import queue
 import re
 import sqlite3
@@ -327,6 +328,320 @@ def set_record_plaintext_words(enabled) -> None:
     RECORD_PLAINTEXT_WORDS = bool(enabled)
 
 
+# ========== 日志写入分级（§D1：少存、找得到、删得明白）==========
+# 三种模式的差别落在**写侧**，不是读取裁剪。
+#   为什么必须写侧：升级前的 `slim` 只是列表接口的读取裁剪，明文照样躺在库里，
+#   任何绕过列表的读取都能捞回原文（`/api/logs/detail` 按 id 原样回源、导出、
+#   诊断包、直接打开 sqlite）。「最小模式」如果只在 UI 上少显示几列，等于没做。
+#   summary  最小：只留时间/入口/状态/原因/类别数量/耗时。不存对话正文、敏感原值、
+#            业务路径元数据；词统计也只保留类别计数。
+#   detailed 本地详细：保持既有全部能力（普通 PII「脱敏 ↔ 原文」对照 + 词榜明文），
+#            凭据仍恒不落原文。老用户缺字段时迁移到这里，不静默改变既有功能。
+#   trace    临时排障：detailed 去掉全部 `items[].original` 明文、正文片段截断到上限。
+#            由面板限时开启（默认关、重启后关，见 log_trace_state/start_log_trace）。
+LOG_MODE_SUMMARY = "summary"
+LOG_MODE_DETAILED = "detailed"
+LOG_MODE_TRACE = "trace"
+LOG_MODE_DEFAULT = LOG_MODE_DETAILED
+LOG_MODE = LOG_MODE_DEFAULT
+
+# 运行期信号文件：面板写、引擎读（两个进程通过它传递**纯运行时**控制）。
+# 为什么不用 config.json：引擎进程不该去写配置文件（两进程写同一份配置会互相覆盖），
+# 而这些信号（限时排障截止时间、映射重置代号）都是运行期状态，不是持久配置项。
+# 为什么共用一个文件：两个信号用同一套「节流读 + 原子写」机制就够了；各开一个文件
+# 只会多一份读盘节流与一个容易漂移的命名约定。
+#
+# 【已知局限（已评估、有意接受）】合并写是「读→改→写」，两个进程同时写会丢更新
+# （lost update）。两个写入者及其频率：面板（仅在用户点击时）、引擎（仅在 `load()`
+# 时把 `trace_until` 归零一次）。频率差好几个数量级，且面板的 `engine_applied=pending`
+# 已如实告知「无法确认是否生效」，用户再点一次即可。不上文件锁：跨平台语义不一，
+# 成本大于这个窗口的收益。
+SIGNALS_FILE = _DATA_ROOT / "engine-signals.json"
+# 信号缓存：`log_trace_state()` 与 `mapping_reset_generation()` 都在请求路径上被调，
+# 不能每条事件/每个请求都 stat 一次文件。5s 窗口内的多次读共用一次解析结果。
+_SIGNALS_CACHE = {"ts": 0.0, "data": {}}
+_SIGNALS_LOCK = threading.Lock()
+_SIGNALS_CACHE_TTL_S = 5.0
+
+
+def _read_signals(now=None) -> dict:
+    """读取运行期信号（带 5s 缓存）。文件缺失/损坏一律返回空字典。
+
+    返回**副本**：调用方不会意外改到缓存（改缓存会让另一个进程看不到真实值）。
+    """
+    now = time.time() if now is None else float(now)
+    with _SIGNALS_LOCK:
+        if now - _SIGNALS_CACHE["ts"] < _SIGNALS_CACHE_TTL_S:
+            return dict(_SIGNALS_CACHE["data"])
+    data = {}
+    try:
+        loaded = json.loads(SIGNALS_FILE.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    except Exception:
+        data = {}
+    with _SIGNALS_LOCK:
+        _SIGNALS_CACHE["ts"] = now
+        _SIGNALS_CACHE["data"] = data
+    return dict(data)
+
+
+def _write_signals(patch: dict, now=None) -> dict:
+    """合并写入运行期信号（原子替换：读者不会看到半截 JSON）。
+
+    合并而不是整份覆盖：两个信号由不同动作写入（开排障 / 重置映射），
+    整份覆盖会让后写的那个把另一个静默抹掉。以**文件当前内容**为基准合并，
+    而不是用本进程缓存，否则缓存过期时会把对方刚写的字段抹掉。
+    """
+    now = time.time() if now is None else float(now)
+    cur = {}
+    try:
+        loaded = json.loads(SIGNALS_FILE.read_text(encoding="utf-8"))
+        cur = dict(loaded) if isinstance(loaded, dict) else {}
+    except Exception:
+        cur = {}
+    cur.update(patch)
+    # 暂存名带 pid：面板与引擎是**两个进程**，用同一个 `.tmp` 名字时，A 写完刚要
+    # `os.replace` 而 B 把它截断重写 → 先 replace 的那个会搬走对方的半成品，
+    # 后 replace 的拿到 FileNotFoundError（实测风险，不是假想）。
+    tmp = SIGNALS_FILE.with_name("%s.%d.tmp" % (SIGNALS_FILE.name, os.getpid()))
+    tmp.write_text(json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+    os.replace(str(tmp), str(SIGNALS_FILE))
+    with _SIGNALS_LOCK:
+        _SIGNALS_CACHE["ts"] = now
+        _SIGNALS_CACHE["data"] = cur
+    return dict(cur)
+
+
+def set_log_mode(mode) -> None:
+    """同步「日志写入模式」基值（配置热重载时调用，两个写入进程各调各的）。
+
+    只接受 summary/detailed 两个**可持久化**值：trace 是限时运行时状态，
+    由 `start_log_trace()` 单独控制，不能从配置文件里长期打开。
+    """
+    global LOG_MODE
+    m = str(mode or "").strip().lower()
+    LOG_MODE = m if m in (LOG_MODE_SUMMARY, LOG_MODE_DETAILED) else LOG_MODE_DEFAULT
+
+
+def log_trace_state(now=None) -> dict:
+    """当前限时排障状态：{"active": bool, "until": epoch}。
+
+    读盘按 5s 节流：本函数会被请求路径上的事件写入调用，不能每条事件都 stat
+    一次文件（`_log` 与 `enqueue_event` 都在请求路径上）。
+    """
+    now = time.time() if now is None else float(now)
+def log_trace_state(now=None) -> dict:
+    """当前限时排障状态：{"active": bool, "until": epoch}。
+
+    读盘按 5s 节流（`_read_signals`）：本函数会被请求路径上的事件写入调用，
+    不能每条事件都 stat 一次文件（`_log` 与 `enqueue_event` 都在请求路径上）。
+    """
+    now = time.time() if now is None else float(now)
+    try:
+        until = float(_read_signals(now).get("trace_until") or 0.0)
+    except Exception:
+        until = 0.0
+    return {"active": until > now, "until": until}
+
+
+def start_log_trace(minutes=15, now=None) -> dict:
+    """开启限时排障（默认 15 分钟，上限 60）。到点后自动回到基模式。
+
+    `minutes` 由面板做一次钳制后写文件；这里再钳一次，避免任何调用方
+    （含测试与脚本）写进一个「永不回退」的超长窗口。
+    """
+    now = time.time() if now is None else float(now)
+    try:
+        minutes = max(1, min(int(minutes or 15), 60))
+    except Exception:
+        minutes = 15
+    until = now + minutes * 60
+    try:
+        _write_signals({"trace_until": until, "trace_started_at": now, "trace_minutes": minutes}, now)
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+    return {"ok": True, "until": until, "minutes": minutes}
+
+
+def stop_log_trace() -> dict:
+    """关闭限时排障。用户手动关闭与进程启动都会调用。
+
+    只把 `trace_until` 写成 0，不删文件：同一文件里还有「映射重置代号」这类
+    别的信号，删文件会把它们一起抹掉。残留的 `trace_until=0` 不含任何正文。
+    """
+    try:
+        _write_signals({"trace_until": 0.0})
+    except Exception:
+        return {"ok": False}
+    return {"ok": True, "until": 0.0}
+
+
+def mapping_reset_generation() -> int:
+    """「清空内存映射」的代号（单调递增）。
+
+    面板与引擎是两个进程，面板无法直接清引擎里的映射表，所以面板只把代号 +1，
+    引擎在请求路径上发现代号变了就清一次（见 `transparent.reset_mappings`）。
+    代号语义是「变化即重置」，不是「大于多少才重置」——用单调值而不是布尔标记，
+    是因为布尔标记需要「消费后清零」，而清零又要二次同步（多一层竞态）。
+    """
+    try:
+        return int(_read_signals().get("mapping_reset_gen") or 0)
+    except Exception:
+        return 0
+
+
+def request_mapping_reset(now=None) -> int:
+    """请求清空内存映射（面板端点调用）。返回新的代号。"""
+    now = time.time() if now is None else float(now)
+    cur = 0
+    try:
+        cur = int(_read_signals(now).get("mapping_reset_gen") or 0)
+    except Exception:
+        cur = 0
+    new = cur + 1
+    try:
+        _write_signals({"mapping_reset_gen": new, "mapping_reset_at": now}, now)
+    except Exception as e:
+        return -1
+    return new
+
+
+def effective_log_mode(now=None) -> str:
+    """当前**生效**模式：排障窗口内恒为 trace，否则为配置基模式。
+
+    降级方向是保守的：排障窗口只可能让记录**更多**（trace 仍不含明文原文、
+    不含凭据），不会让 summary 变成 detailed —— 所以 summary 用户开排障
+    也不会把正文原值落盘，只会拿到打码片段。
+    """
+    if log_trace_state(now)["active"]:
+        return LOG_MODE_TRACE
+    return LOG_MODE
+
+
+# summary 允许落盘的字段（**白名单，fail-closed**）。
+# 为什么是白名单而不是「正文黑名单」：黑名单漏一个字段就是一次原文落盘，
+# 而漏判的代价是不可逆的。白名单的代价只是「将来新增的诊断字段在 summary 下
+# 看不到」——用户想看就切 detailed/trace，方向安全。
+# 收录口径：DB 结构化列 + 枚举/原因码 + 纯数字计数 + 耗时。
+_SUMMARY_KEEP_FIELDS = frozenset({
+    "verification",  # bounded marker digests only; omitted from diagnostic exports
+    # 结构化列（列表筛选与排序依赖，与 events 表列同源）
+    "ts", "type", "sid", "host", "method", "path", "count", "restored",
+    "status", "restore_status", "http_status", "ingress",
+    # 归因：谁、走哪条链路、什么协议形态
+    "model", "upstream", "client_app", "stream_mode", "stream_actual", "body_shape",
+    # 检测结论与原因码（§B 状态通道；枚举/数字，不含正文）
+    "decision", "completeness", "reasons", "reason_codes", "blocked", "failed",
+    "reason", "block_source", "ner_truncated", "ner_skip_reasons",
+    "signed_blocks_skipped", "bytes", "error_code", "failure_phase",
+    # 失败归因（批次 8 / P0-5）：责任方与异常类名。前者让用户一眼看出该查谁
+    # （引擎/上游/客户端/DNS/出口代理），后者让同一类断开能聚合计数。
+    # 两者都是短枚举字符串，不含正文。
+    "failure_owner", "error_type",
+    "upstream_may_have_executed", "engine_busy", "engine_queue_bytes", "engine_queue_depth",
+    # 还原结果计数
+    "restored_unique", "unresolved", "degraded", "success", "usage",
+    # 耗时（毫秒）、前缀保真诊断、扫描范围计数
+    "mask_ms", "upstream_ms", "first_byte_ms", "queue_wait_ms", "aux_wait_ms",
+    "body_rewritten", "first_diff_byte", "suffix_reused", "short_hits", "scan_scope",
+    # 语义识别/审计阶段计数
+    "ner_init_ms", "ner_infer_ms", "ner_budget_wait_ms", "ner_calls", "ner_windows",
+    "ner_cache_hits", "ner_cache_misses", "ner_global_throttled", "ner_sem_wait_ms",
+    "audit_ms", "audit_scan_bytes", "audit_scan_truncated",
+    "stream_degraded_reason", "resp_ts", "total_ms",
+})
+# 单字段最大保留长度（summary/trace 共用）。超长一律截断：即便某个新加的正文型
+# 字段被误纳入白名单，也不会整段落盘。
+_TEXT_FIELD_MAX = 160
+# trace 模式下正文片段的上限（「受控脱敏片段」）。
+_TRACE_TEXT_MAX = 1000
+
+
+def _bounded_meta(raw, max_keys=24):
+    """把「标签→计数」这类字典投影成有界标量字典：非数字/超长值一律丢弃。
+
+    用在 summary。宁可少几个诊断计数，也不让将来新增的正文型字典字段整段落盘。
+    """
+    out = {}
+    try:
+        items = list(raw.items())[:max_keys]
+    except Exception:
+        return out
+    for k, v in items:
+        key = str(k)[:64]
+        if isinstance(v, bool) or isinstance(v, (int, float)):
+            out[key] = v
+        elif isinstance(v, str):
+            out[key] = v[:_TEXT_FIELD_MAX]
+    return out
+
+
+def _project_summary(rec):
+    """最小记录投影：只放行白名单字段，items 只保留类别标签。"""
+    out = {}
+    for k, v in rec.items():
+        if k not in _SUMMARY_KEEP_FIELDS:
+            continue
+        if v is None or isinstance(v, bool) or isinstance(v, (int, float)):
+            out[k] = v
+        elif isinstance(v, str):
+            out[k] = v[:_TEXT_FIELD_MAX]
+        elif isinstance(v, dict):
+            out[k] = _bounded_meta(v)
+        elif isinstance(v, (list, tuple)):
+            out[k] = [x[:_TEXT_FIELD_MAX] if isinstance(x, str) else x
+                      for x in list(v)[:32]]
+    # 类别数量：只留 label，**不留 preview/digest/original**。
+    # preview（如 `1**@***.com`）看着像脱敏，但它仍是可识别的部分信息，
+    # 与「最小模式只留类别数量」的口径不符。
+    items = rec.get("items")
+    if isinstance(items, list):
+        labels = [{"label": str(it.get("label") or "")}
+                  for it in items if isinstance(it, dict)]
+        if labels:
+            out["items"] = labels
+    return out
+
+
+def _project_trace(rec):
+    """限时排障投影：去掉全部 `items[].original` 明文，正文片段截断到上限。
+
+    trace 的定位是「比 detailed 更克制的一次性排障」：保留结构的可读性
+    （对话/预览片段，便于定位是脱敏没生效还是上游改写），但不保留**任何**
+    精确原文——所以逐项剔除 `original`，只留 preview/digest/label。
+    """
+    out = dict(rec)
+    items = out.get("items")
+    if isinstance(items, list):
+        out["items"] = [
+            {k: v for k, v in it.items() if k != "original"} if isinstance(it, dict) else it
+            for it in items
+        ]
+    for k in ("dialog", "dialog_req", "dialog_resp", "req_preview", "resp_preview",
+              "prompt", "answer", "msg", "hint"):
+        v = out.get(k)
+        if isinstance(v, str) and len(v) > _TRACE_TEXT_MAX:
+            out[k] = v[:_TRACE_TEXT_MAX] + "…(已截断)"
+    return out
+
+
+def project_event_for_log(rec):
+    """按当前生效模式投影一条事件（DB 与 stdout 两个出口共用同一函数）。
+
+    为什么要给 stdout 也用：引擎的 `SHIELD\t...` 行会被桌面壳原样追加进
+    `engine-stdout.log`，那是磁盘上的第二份正文副本。只在 DB 侧裁剪的话，
+    最小模式下明文照样躺在日志文件里（§D1 明确把 stdout 列为必须覆盖的出口）。
+    """
+    rec = onboarding.scrub(rec)
+    mode = effective_log_mode()
+    if mode == LOG_MODE_SUMMARY:
+        return _project_summary(rec)
+    if mode == LOG_MODE_TRACE:
+        return _project_trace(rec)
+    return rec
+
+
 def _update_stats(conn, rec, replay=False):
     """增量维护日统计摘要（与 events 同事务提交，失败静默——事件照常落库）。
 
@@ -407,6 +722,11 @@ def _update_stats(conn, rec, replay=False):
             return
         if typ != "MASK":
             return
+        # 词级明细随写入模式收敛（§D1）：最小模式只保留**类别计数**（词位固定 "?"，
+        # 排行榜的 label 分布照常），trace/detailed 才保留词级明细；明文词只在
+        # detailed + 用户显式开启时落盘。凭据类任何模式都只走 preview。
+        mode = effective_log_mode()
+        keep_plain = RECORD_PLAINTEXT_WORDS and mode == LOG_MODE_DETAILED
         for it in rec.get("items") or []:
             if not isinstance(it, dict):
                 continue
@@ -419,7 +739,9 @@ def _update_stats(conn, rec, replay=False):
             # 明文仍只经 /api/logs/detail 回源；这里是用户显式选择的统计维度。
             # 凭据类 items 强制绝不落原文（防 legacy 数据重放/历史残留）：恒只走 preview。
             is_cred = bool(it.get("cred")) or lbl in CREDENTIAL_LABELS
-            if RECORD_PLAINTEXT_WORDS and not is_cred:
+            if mode == LOG_MODE_SUMMARY:
+                word = "?"
+            elif keep_plain and not is_cred:
                 word = str(it.get("original") or it.get("preview") or "")
             else:
                 word = str(it.get("preview") or "")
@@ -797,9 +1119,12 @@ def _normalize_ingress(rec):
 
 def append_event(record):
     _ensure_db()
-    rec = _normalize_ingress(_enrich_source(record))
+    rec = _normalize_ingress(_enrich_source(onboarding.scrub(record)))
     rec.setdefault("ts", time.time())
-    payload = json.dumps(rec, ensure_ascii=False)
+    # 统计永远用**完整** rec（口径不变：请求数/告警数/费用不受记录模式影响），
+    # 只有落库的 payload 按写入模式投影。反过来的话，「最小模式」会把统计一起改小，
+    # 用户看到的是「脱敏次数掉了一半」，而实际只是不记正文了。
+    payload = json.dumps(project_event_for_log(rec), ensure_ascii=False)
     with closing(_connect()) as conn:
         cur = conn.execute(
             """
@@ -1142,9 +1467,10 @@ def _append_many(records):
     _ensure_db()
     with closing(_connect()) as conn:
         for rec in records:
-            rec = _normalize_ingress(_enrich_source(rec))
+            rec = _normalize_ingress(_enrich_source(onboarding.scrub(rec)))
             rec.setdefault("ts", time.time())
-            payload = json.dumps(rec, ensure_ascii=False)
+            # 与 append_event 同口径：统计用完整 rec，落库 payload 按模式投影。
+            payload = json.dumps(project_event_for_log(rec), ensure_ascii=False)
             conn.execute(
                 """
                 INSERT INTO events
@@ -1530,6 +1856,52 @@ def fetch_restore_items(now=None, limit=200):
     }
 
 
+def _event_filters(since=None, before_seq=None, before_ts=None, sensitive_only=False,
+                   query="", fulltext=False, event_type=None, ingress=None):
+    """构造事件列表的 WHERE 子句与参数（向前/向后游标、导出、计数共用一份）。
+
+    共用是必须的：正向「拉新」与反向「看更早」如果各写一套筛选，同一个筛选条件下
+    的两页会给出不同口径的行（漏筛/漏重），用户看到的是「翻页后条数对不上」。
+    `since` 与 `before_seq` 为 None 表示不加该侧游标；两者可同时给（取交集）。
+    """
+    where = []
+    params = []
+    if since is not None:
+        where.append("id > ?")
+        params.append(int(since or 0))
+    if before_seq is not None:
+        where.append("id < ?")
+        params.append(int(before_seq or 0))
+    if before_ts is not None:
+        where.append("ts < ?")
+        params.append(float(before_ts))
+    if event_type:
+        where.append("type = ?")
+        params.append(str(event_type).strip().upper())
+    elif sensitive_only:
+        # 「隐藏透传」：隐藏 PASS/SKIP（过网关但未脱敏的只读/非LLM）
+        # MASK/RESTORE/BLOCK/BYPASS 即使 count=0 也显示
+        where.append("type NOT IN ('SKIP', 'PASS')")
+    ing = str(ingress or "").strip().lower()
+    if ing in INGRESS_VALUES:
+        # COALESCE：老数据/legacy 导入的 ingress 为 NULL，按 'proxy' 解读。
+        # 没有 ingress 索引，但它总是与 id 游标条件同用，扫描面已被游标限住。
+        where.append("COALESCE(ingress, 'proxy') = ?")
+        params.append(ing)
+    q = str(query or "").strip()
+    if q:
+        like = f"%{q}%"
+        # 结构化列优先（host/path/method/status/type 是短列，扫描成本远低于 payload）；
+        # payload LIKE 仅在显式 fulltext=True 时加入同一括号（任一字段命中即匹配，
+        # 与旧语义一致），默认避免搜索框触发全表大字段扫描（审计性能项 P0-5）。
+        cols = ["host", "path", "method", "status", "type"]
+        if fulltext:
+            cols.append("payload")
+        where.append("(" + " OR ".join(f"{c} LIKE ?" for c in cols) + ")")
+        params.extend([like] * len(cols))
+    return where, params
+
+
 def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=False,
                  event_type=None, max_limit=1000, ascending=False, ingress=None):
     """读取事件列表。
@@ -1556,33 +1928,9 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
     _ensure_db()
     since = int(since or 0)
     limit = max(1, min(int(limit or 500), int(max_limit or 1000)))
-    where = ["id > ?"]
-    params = [since]
-    if event_type:
-        where.append("type = ?")
-        params.append(str(event_type).strip().upper())
-    elif sensitive_only:
-        # 「隐藏透传」：隐藏 PASS/SKIP（过网关但未脱敏的只读/非LLM）
-        # MASK/RESTORE/BLOCK/BYPASS 即使 count=0 也显示
-        where.append("type NOT IN ('SKIP', 'PASS')")
-    ing = str(ingress or "").strip().lower()
-    if ing in ("proxy", "ext"):
-        # COALESCE：老数据/legacy 导入的 ingress 为 NULL，按 'proxy' 解读。
-        # 这里不用 idx_events_*（没有 ingress 索引），但它与 id 游标条件同用，
-        # 扫描面已被 id > ? 限住，不会退化成全表。
-        where.append("COALESCE(ingress, 'proxy') = ?")
-        params.append(ing)
-    q = str(query or "").strip()
-    if q:
-        like = f"%{q}%"
-        # 结构化列优先（host/path/method/status/type 是短列，扫描成本远低于 payload）；
-        # payload LIKE 仅在显式 fulltext=True 时加入同一括号（任一字段命中即匹配，
-        # 与旧语义一致），默认避免搜索框触发全表大字段扫描（审计性能项 P0-5）。
-        cols = ["host", "path", "method", "status", "type"]
-        if fulltext:
-            cols.append("payload")
-        where.append("(" + " OR ".join(f"{c} LIKE ?" for c in cols) + ")")
-        params.extend([like] * len(cols))
+    where, params = _event_filters(
+        since=since, sensitive_only=sensitive_only, query=query, fulltext=fulltext,
+        event_type=event_type, ingress=ingress)
     sql = (
         "SELECT id, payload FROM events WHERE "
         + " AND ".join(where)
@@ -1593,6 +1941,67 @@ def fetch_events(since=0, limit=500, sensitive_only=False, query="", fulltext=Fa
         conn.row_factory = sqlite3.Row
         rows = conn.execute(sql, params).fetchall()
     return [_row_to_event(row) for row in (rows if ascending else reversed(rows))]
+
+
+def fetch_events_before(before_seq=None, limit=500, sensitive_only=False, query="",
+                        fulltext=False, event_type=None, max_limit=1000, ingress=None,
+                        before_ts=None):
+    """反向游标：取 `id < before_seq` 的一页历史事件（页内按 id 升序返回）。
+
+    与 `fetch_events` 的 `since` 互补：`since` 只能向前增量轮询（看「打开页面之后」
+    的新事件），历史一旦超过首屏上限就再翻不回来（实测超过列表上限后「加载更多」
+    失效，用户只能看到最近一批）。`before_ts` 是可选时间上界（id 与 ts 同序，
+    供按时间区间回看）。筛选条件与向前翻**同源**（`_event_filters`）。
+
+    返回 `(events, has_more)`：has_more=True 表示更早处还有符合筛选的行。
+    """
+    _ensure_db()
+    limit = max(1, min(int(limit or 500), int(max_limit or 1000)))
+    where, params = _event_filters(
+        before_seq=int(before_seq or 0) if before_seq else None,
+        before_ts=before_ts, sensitive_only=sensitive_only, query=query,
+        fulltext=fulltext, event_type=event_type, ingress=ingress)
+    sql = ("SELECT id, payload FROM events WHERE " + " AND ".join(where)
+           + " ORDER BY id DESC LIMIT ?")
+    params.append(limit + 1)
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return [_row_to_event(row) for row in reversed(rows)], has_more
+
+
+def count_events(sensitive_only=False, query="", fulltext=False, event_type=None, ingress=None):
+    """当前筛选下的匹配行数（导出的截断提示用：只返回数字，不读 payload）。"""
+    _ensure_db()
+    where, params = _event_filters(sensitive_only=sensitive_only, query=query,
+                                   fulltext=fulltext, event_type=event_type, ingress=ingress)
+    sql = "SELECT COUNT(*) FROM events" + ((" WHERE " + " AND ".join(where)) if where else "")
+    with closing(_connect()) as conn:
+        return int(conn.execute(sql, params).fetchone()[0] or 0)
+
+
+def clear_stats():
+    """清空**数字统计摘要**（daily_stats/status/tokens/prefix/models）。
+
+    与 `clear_events()` 是两个独立动作（§D3.3）：清日志不动统计，清统计不动日志。
+    合并成一个「彻底清除」按钮会让只想清对话日志的用户把几个月的趋势图一起抹掉。
+    本函数不删 `events`，也不删 `daily_words`（后者属日志明细，随 `clear_events` 走）。
+    """
+    _ensure_db()
+    with closing(_connect()) as conn:
+        for table in ("daily_stats", "daily_status", "daily_tokens", "daily_prefix", "daily_models"):
+            try:
+                conn.execute(f"DELETE FROM {table}")
+            except Exception:
+                pass  # 老库可能缺某张摘要表：少清一张不影响其余口径
+        # 摘要表清空后**保留** daily_stats_migrated 标记：它的作用是防重复回填，
+        # 不是“允许重新回填”。删掉它会让下一次 today_stats() 触发
+        # `_migrate_daily_stats` 把 ts < daily_stats_created 的历史事件再灌回一遍，
+        # 用户会看到“刚清完统计又冒出数字”（历史导入过的库尤其明显）。
+        conn.commit()
+    return {"ok": True}
 
 
 def prune_events(now=None, retention_days=RETENTION_DAYS):

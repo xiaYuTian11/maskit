@@ -102,7 +102,8 @@ class RequestLifecycleTests(unittest.TestCase):
     def test_complete_positive_cache_survives_inference_budget_exhaustion(self):
         text = "语义缓存回归专用名字"
         entity = {"type": "NAME", "start": 0, "end": 2, "text": text[:2]}
-        ner._cache_put(text, [entity])
+        # §G1：键是进程密钥摘要，值只有 (start,end,type)，原文不留在缓存里。
+        ner._cache_put(ner._cache_fingerprint(text), [entity], len(text))
         event = threading.Event()
         try:
             ner.begin_budget(-120, cancel_event=event)
@@ -114,8 +115,9 @@ class RequestLifecycleTests(unittest.TestCase):
         finally:
             ner.end_budget()
             with ner._CACHE_LOCK:
-                if ner._CACHE.pop(text, None) is not None:
-                    ner._CACHE_CHARS -= len(text)
+                popped = ner._CACHE.pop(ner._cache_fingerprint(text), None)
+                if popped is not None:
+                    ner._CACHE_CHARS -= int(popped[0])
 
     def test_recursive_leaf_boundary_stops_large_message_array_after_cancel(self):
         event = threading.Event()

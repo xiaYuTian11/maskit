@@ -28,22 +28,40 @@ FAKE_EMAIL = "bench-user" + "@" + "example" + ".invalid"
 
 class WorkerWidthTests(unittest.TestCase):
     def test_adaptive_width(self):
+        # 判据是 `_available_cpu_count()`（cgroup 配额 ∩ 亲和性掩码），不是
+        # `os.cpu_count()`：`--cpus=2` 的容器跑在 16 核宿主上时后者报 16，
+        # 会给出 4 个 worker（2 个核上撐 4 个线程）。2026-10-04 改为同源判据。
         with mock.patch.object(tr, "MASKIT_MASK_WORKERS_ENV", 0):
-            with mock.patch.object(tr.os, "cpu_count", lambda: 2):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 2):
                 self.assertEqual(tr._default_mask_workers(), 1, "弱机必须为 1")
-            with mock.patch.object(tr.os, "cpu_count", lambda: 4):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 4):
                 self.assertEqual(tr._default_mask_workers(), 2)
-            with mock.patch.object(tr.os, "cpu_count", lambda: 8):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 8):
                 self.assertEqual(tr._default_mask_workers(), 4)
-            with mock.patch.object(tr.os, "cpu_count", lambda: 64):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 64):
                 self.assertEqual(tr._default_mask_workers(), 4, "上限 4（再多只是互相抢核）")
+
+    def test_width_follows_cgroup_quota_not_host_cores(self):
+        """容器配额优先于宿主核数（否则 2c4g 容器会拿到 4 个脱敏 worker + 4 个 aux）。"""
+        import ner_engine as ner
+        with mock.patch.object(ner, "_cgroup_cpu_quota", lambda: 2.0), \
+             mock.patch.object(ner.os, "process_cpu_count", lambda: 16, create=True):
+            self.assertEqual(tr._available_cpu_count(), 2)
+            with mock.patch.object(tr, "MASKIT_MASK_WORKERS_ENV", 0):
+                self.assertEqual(tr._default_mask_workers(), 1)
+                self.assertEqual(tr._aux_pool_width(), 1)
+
+    def test_available_cpu_count_falls_back_without_ner_engine(self):
+        """拿不到 ner_engine（拆包运行）时不能让池宽计算直接抛异常。"""
+        with mock.patch.dict(sys.modules, {"ner_engine": None}):
+            self.assertGreaterEqual(tr._available_cpu_count(), 1)
 
     def test_env_override_wins_and_is_clamped(self):
         with mock.patch.object(tr, "MASKIT_MASK_WORKERS_ENV", 1):
-            with mock.patch.object(tr.os, "cpu_count", lambda: 32):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 32):
                 self.assertEqual(tr._default_mask_workers(), 1, "MASKIT_MASK_WORKERS=1 必须能压回去")
         with mock.patch.object(tr, "MASKIT_MASK_WORKERS_ENV", 999):
-            with mock.patch.object(tr.os, "cpu_count", lambda: 32):
+            with mock.patch.object(tr, "_available_cpu_count", lambda: 32):
                 self.assertEqual(tr._default_mask_workers(), 16)
 
     def test_set_mask_workers_swaps_pool(self):

@@ -4800,6 +4800,23 @@ class ReasoningEffortCleanTests(unittest.TestCase):
         self.assertEqual(tr._reasoning_effort_hint(""), "")
         self.assertEqual(tr._reasoning_effort_hint(None), "")
 
+    def test_hint_only_for_parameter_errors(self):
+        """提示只跟「上游拒绝请求体」走，不得挂到 5xx/超时上。
+
+        2026-10-02 实测：当天 27 条带该提示的事件里 **25 条是 524（Cloudflare 源站
+        超时，首字节 0、127s）**、2 条是 502，全部与思考强度取值无关。提示文案却说
+        "reasoning_effort=max 可能不被上游支持"，把用户往"改模型配置"上带 —— 而真正
+        该看的是上游网关超时。这不是文案措辞问题，是归因错误。
+        """
+        for status in (400, 422):
+            hint = tr._reasoning_effort_hint_for_status(status, "max")
+            self.assertIn("max", hint, f"{status} 是参数类错误，应给提示")
+        for status in (500, 502, 503, 524, 530, 401, 403, 404, 413, 429, None):
+            self.assertEqual(tr._reasoning_effort_hint_for_status(status, "max"), "",
+                             f"{status} 不是参数类错误，不得给 reasoning_effort 提示")
+        self.assertEqual(tr._reasoning_effort_hint_for_status(400, None), "")
+        self.assertEqual(tr._reasoning_effort_hint_for_status(400, ""), "")
+
 
 class WordLimitTests(unittest.TestCase):
     """敏感词长度/数量限制（审计 P1）：超大词表拖慢合并正则扫描。"""

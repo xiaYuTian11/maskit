@@ -80,13 +80,19 @@ When using **Cursor, Claude Code, Codex, Pi, OpenCode, ChatGPT, or any AI coding
 ### ⚡ 4. Millisecond SSE Stream Takeover (Native Typewriter Flow)
 - Intercepts `text/event-stream` chunk by chunk with incremental restoration;
 - Automatically reassembles split tokens across chunk boundaries, **maintaining native typewriter responsiveness without lag**.
+- **Reasoning traces stay protocol-faithful (disclosed)**: Anthropic extended-thinking (`thinking`) blocks carry an upstream signature; rewriting the signed text invalidates verification and permanently breaks that conversation with HTTP 400. The gateway therefore restores placeholders **only in visible text and tool arguments**, keeps placeholders inside reasoning traces, and leaves signed thinking blocks unmasked as a whole (the count is reported in the event detail instead of silently skipped). Other reasoning channels without a signature keep being restored as usual.
 
 ### 🔌 5. No Root CA Installation + Native Fallback Passthrough (Never Breaks Your API)
 - **Multi-port Reverse Proxy**: Dedicated local ports per model channel (e.g. `18701` for OpenAI, `18703` for Anthropic). Change `base_url` to local port without installing untrusted self-signed root CAs;
 - **Fallback Passthrough Guarantee**: If the proxy is stopped or closed, ports automatically fallback to raw transparent passthrough. **Your coding tools will never experience unexpected connection dropouts!**
 
-### 📊 6. Real-time Logs, Security Audit & Cost Tracking
+### 🧪 6. Local Offline Lab & Coding Assistant Skill Contract
+- **Try It Out (Offline Local Lab)**: No API key needed, nothing sent upstream. Paste any text on the Clients page to inspect masked tokens, round-trip restoration, and hit breakdowns in milliseconds, clearly illustrating the difference between unique entities and occurrences;
+- **Coding Assistant Skill (Placeholder Contract)**: Ships built-in with the package (`maskit-placeholders`), downloadable with a single click or installable via command line. Guides Claude Code, Cursor, Codex, and other assistants to use placeholders verbatim without inventing tokens, splitting them, substituting mock data, or needlessly refusing requests.
+
+### 📊 7. Real-time Logs, Security Audit & Cost Tracking
 - Inspect full request/response diffs with one-click highlight mode;
+- **Adjustable log write detail (minimal / detailed / time-boxed trace)**: minimal mode stores no conversation body or plaintext **at the write side** (database, engine logs, diagnostics bundle and export share one projection) and keeps label distribution only; keep “detailed” when you need long-lived masked↔original comparison; troubleshooting can open a 15-minute time-boxed window (auto-closes on expiry and on restart, and still stores no plaintext). The logs page can also **page back into history** and return to live at any time.
 - **Passive Security Audit & Prompt Injection Detection**: Monitors upstream model responses and detects prompt extraction attempts, credential exfiltration instructions, and destructive command patterns;
 - **Dangerous Command Interception (opt-in, record-only by default)**: Flags model-issued commands such as `rm -rf /`, `mkfs`, `DROP DATABASE` and fork bombs into the Risky-action timeline. By default it neither rewrites nor blocks (zero byte change); you can switch to "rewrite with a harmless notice" or "block", and define custom rules plus an allow list. **Literal shapes only** (`a=rm; $a`, or writing the command into a script, will slip through) — a safety net, not a vault.
 - **Command interception scope (stated as-is)**: detection only looks at the **tool-argument channel** — the arguments of `Write`/`Edit` (i.e. the content about to be written to a file) are on that channel too, so writing `DROP TABLE users` into a `.sql` migration matches as well; browser-extension traffic (ChatGPT / Claude web) does **not** go through command interception; in "block" mode only the **selected channels** stop streaming (unselected channels keep flowing) and non-streaming responses are replaced with a 503.
@@ -278,12 +284,16 @@ Maskit's masking runs **only on your own machine** — every request costs local
 |---|---|
 | 1–2 agents on a personal machine | Defaults are fine. Semantic recognition (NER) stays on. |
 | 4+ agents, or NER enabled on a 1–2 core box | Turn **NER off** in Settings, or give the container/machine more CPU. NER is the single biggest CPU consumer. |
-| Docker on a small VPS | Set `--cpus` to what you actually have (e.g. `--cpus=2`) and set `MASKIT_NER_THREADS=1`. Without `--cpus` the process happily uses every core it can see and looks "pinned at 100%". |
+| Docker on a small VPS | Set `--cpus` to what you actually have (e.g. `--cpus=2`): thread count, concurrency, pool widths and the NER budget all adapt to the **actually available** cores (cgroup quota ∩ affinity mask). Without `--cpus` the process treats every core it can see as its own and looks "pinned at 100%". |
 | Large bodies / many parallel streams | Lower concurrency at the client; the queue budget (`MASKIT_MASK_QUEUE_BYTES`) is **backpressure, not throughput** — raising it only delays the rejection. |
 
-Masking pool width adapts to the core count (1–4) and can be overridden with `MASKIT_MASK_WORKERS`.
-Note that plain-Python rule scanning is GIL-bound: adding workers helps most with NER (ONNX releases the GIL)
-and with avoiding head-of-line blocking, not with raw regex throughput.
+Masking pool width adapts to the **actually available** core count (1–4, always 1 on ≤2 cores) and can be overridden
+with `MASKIT_MASK_WORKERS`. Note that plain-Python rule scanning is GIL-bound: adding workers helps most with NER
+(ONNX releases the GIL) and with avoiding head-of-line blocking, not with raw regex throughput.
+
+The NER **global CPU budget** defaults to 75% of what the NER thread pool could consume
+(concurrency × ONNX threads × 750, measured in **CPU milliseconds per second**, not wall-clock) and can be
+overridden with `MASKIT_NER_BUDGET`; exhausting it behaves exactly like the per-request budget below.
 
 The NER **per-request budget** defaults to **10 seconds** (Settings → Proxy behaviour → per-request budget,
 or the `MASKIT_NER_REQ_BUDGET_S` environment variable, which overrides the UI). It caps how slow masking

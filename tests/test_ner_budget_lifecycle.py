@@ -149,12 +149,13 @@ class BudgetLifecycleTests(unittest.TestCase):
             return [entity], False
         self.decode.side_effect = decode
         self.assertEqual(ner.extract_entities("测试文本"), [entity])
-        self.assertNotIn("测试文本", ner._CACHE)
+        # §G1：缓存键是进程密钥摘要，不再是原文本身（键里不得留原文）。
+        self.assertNotIn(ner._cache_fingerprint("测试文本"), ner._CACHE)
         ner.begin_budget(10)
         self.decode.side_effect = None
         self.decode.return_value = ([entity], True)
         self.assertEqual(ner.extract_entities("测试文本"), [entity])
-        self.assertIn("测试文本", ner._CACHE)
+        self.assertIn(ner._cache_fingerprint("测试文本"), ner._CACHE)
         self.assertEqual(self.decode.call_count, 2)
 
     def test_complete_cache_hit_survives_inference_expiry_but_not_cancellation(self):

@@ -36,9 +36,28 @@ export function getDiagnostics(): Promise<DiagnosticsBundle> {
   return shieldFetch('/api/diagnostics?lang=' + encodeURIComponent(getI18nLang()))
 }
 
-export function saveDiagnostics(): Promise<{ ok: boolean; path?: string; size?: number; error?: string }> {
+export function saveDiagnostics(previewId?: string): Promise<{ ok: boolean; path?: string; size?: number; error?: string }> {
   // 结论跟界面语言走：英文界面导出的诊断包里不该出现中文结论。
-  return shieldFetch('/api/diagnostics/save?lang=' + encodeURIComponent(getI18nLang()), { method: 'POST', timeoutMs: 30000 })
+  return shieldFetch('/api/diagnostics/save?lang=' + encodeURIComponent(getI18nLang()), {
+    method: 'POST', timeoutMs: 30000,
+    ...(previewId ? { body: JSON.stringify({ preview_id: previewId }) } : {}),
+  })
+}
+
+/** Immutable preview snapshot, held locally for ten minutes; exports use these bytes. */
+export interface DiagnosticPreview {
+  ok: boolean
+  id: string
+  body: string
+  size: number
+  generated_at: number
+  expires_at: number
+}
+
+export function previewDiagnostics(): Promise<DiagnosticPreview> {
+  return shieldFetch('/api/diagnostics/preview?lang=' + encodeURIComponent(getI18nLang()), {
+    method: 'POST', timeoutMs: 30000,
+  })
 }
 
 /** 一键自检结论（§16）。与诊断包的分工：这里是**结论**，诊断包是**原始证据**。 */

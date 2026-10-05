@@ -170,6 +170,57 @@ export function demoMask(text?: string): Promise<{
   return shieldFetch('/api/demo/mask', { method: 'POST', body: JSON.stringify({ text: text ?? '' }) })
 }
 
+/** 下载占位符 Skill 包（`GET /api/skill/bundle`，与 Release 资产同源）。
+ *
+ * `raw: true`：要的是二进制 zip 本身，不走 JSON 解析（与 `exportLogs` 同一写法）。
+ * 必须由前端带 `X-Shield-Token` 拉取后再存盘 —— 直接给 `<a href>` 会漏掉
+ * `api_guard` 的令牌校验（该端点在 `/api/` 前缀下，见 `AGENTS.md` §3.7）。
+ * `timeoutMs: 0`：打包在引擎进程内完成，磁盘慢时可能超过默认 15s。
+ */
+export function downloadSkillBundle(): Promise<Response> {
+  return shieldFetch<Response>('/api/skill/bundle', { raw: true, timeoutMs: 0 })
+}
+
+/** 本地试验台：脱敏 → 还原往返（`POST /api/demo/lab`）。
+ *
+ * 与 `demoMask`（上游探针，要 API Key）分开：本接口不碰上游、不要 key，
+ * 回答的是「这段文本会被怎样脱敏、能不能原样还原」。样本只在本机内存里。
+ */
+export function demoLab(text: string): Promise<DemoLabResult> {
+  return shieldFetch('/api/demo/lab', { method: 'POST', body: JSON.stringify({ text }), timeoutMs: 30000 })
+}
+
+export interface DemoLabHit {
+  token: string
+  label: string
+  original_len: number
+  occurrences: number
+  reused: boolean
+}
+
+export interface DemoLabResult {
+  ok: boolean
+  input_len?: number
+  masked?: string
+  restored?: string
+  roundtrip_ok?: boolean
+  count?: number
+  occurrences?: number
+  by_label?: Record<string, number>
+  items?: DemoLabHit[]
+  changed?: boolean
+  restored_count?: number
+  unresolved?: number
+  mask_ms?: number
+  restore_ms?: number
+  ner_skips?: unknown
+  isolated?: boolean
+  seeded_recent?: number
+  error?: string
+  hint?: string
+  limit?: number
+}
+
 export function getAutostart(): Promise<{ enabled: boolean }> {
   return shieldFetch('/api/autostart')
 }
@@ -240,4 +291,39 @@ export function restoreConfigBackup(file: string): Promise<{
     method: 'POST',
     body: JSON.stringify({ file }),
   })
+}
+
+// ========== 内存映射（§D3.3：与清日志/清审计/清数字统计并列的独立动作） ==========
+
+export interface MappingStats {
+  ok: boolean
+  /** 本进程（扩展桥接链路）的规模 */
+  panel: { sessions?: number; recent_entries?: number; suffix_index?: number; custom_word_entries?: number }
+  /** 引擎进程（代理链路）的规模，来自 engine-runtime.json 快照 */
+  engine: { sessions?: number; recent_entries?: number; suffix_index?: number; custom_word_entries?: number }
+  /** 引擎快照是否过期：过期必须如实标注，不能拿旧数据当现状 */
+  engine_stale: boolean
+  engine_generation?: number
+  engine_generated_at?: number
+}
+
+/** 内存映射当前规模（按钮旁边显示「现在有多少东西可清」） */
+export function getMappingStats(): Promise<MappingStats> {
+  return shieldFetch<MappingStats>('/api/mappings/state')
+}
+
+/**
+ * 清空内存里的「占位符 ↔ 原文」映射。**必须显式 confirm**：
+ * 清掉之后当前对话里携带的历史占位符会全部还原不了，直到被重新扫描到。
+ * `engine_applied` 恒为 'pending'——引擎是异步消费信号的，不能说成已生效。
+ */
+export function clearMappings(): Promise<{
+  ok: boolean
+  panel?: { sessions?: number; recent_entries?: number }
+  engine_generation?: number
+  engine_applied?: string
+  hint?: string
+  error?: string
+}> {
+  return shieldFetch('/api/mappings/clear?confirm=true', { method: 'POST' })
 }

@@ -80,6 +80,48 @@ class EngineSpecCoverageTests(unittest.TestCase):
             self.assertIn("'" + name + "'", src)
             self.assertIn("ENGINE_DIR / '" + name + ".py'", src)
 
+    def _shipped_under_internal(self):
+        """由 spec 推导出产物 `_internal/` 下会出现的相对路径（三种形状）。
+
+        spec 里 datas 的源目录 → 产物里的 `_internal/<源相对路径>`（PyInstaller 的
+        onefile/onedir 都是这个布局）。目录型的用前缀记（带尾部斜杠）。
+        形状若变了这条会不匹配，正是想要的效果：让人回来同步断言。
+        """
+        src = self._spec_source()
+        shipped = {"_internal/" + name for name in re.findall(r"ENGINE_DIR / '([^']+)'", src)}
+        if "_skill_bundle(ROOT_DIR)" in src:
+            shipped.add("_internal/skill_bundle/")
+        if "_model_resources(ENGINE_DIR)" in src:
+            shipped.add("_internal/models/ner_mini_zh/")
+        return shipped
+
+    def test_every_release_asserted_file_is_produced_by_the_spec(self):
+        """`release.yml` 断言“包里必须有”的文件，spec 必须真的产出它。
+
+        为什么单钉一条：两处清单是**手写**的，分属两个文件、不同时间由不同人维护。
+        2026-10-04 实测：`inspection.py` / `protocol_contracts.py` 已加进 release.yml 的
+        断言与 `test_release_build.PACKAGE_ENTRIES`，**唯独 spec 的 datas 没加** ——
+        本地门禁全绿，产物里却没有这两个文件，发版时那一步断言会把整条流水线拦下
+        （拦下已是最好的结果；若哪天断言被弱化，就是打包实例 ImportError）。
+        这条把「断言」与「构建输入」钉在一起：只改一边必红。
+        """
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        required = set(re.findall(r"resources/engine/(\S+)", workflow))
+        self.assertIn("_internal/transparent.py", required,
+                      "解析不到 release.yml 的包内容断言（workflow 格式变了？请同步这条）")
+        shipped = self._shipped_under_internal()
+
+        def produced(path):
+            return path in shipped or any(
+                path.startswith(d) for d in shipped if d.endswith("/"))
+
+        missing = sorted(
+            "_internal/" + p[len("_internal/"):] for p in required
+            if p.startswith("_internal/") and not produced(p))
+        self.assertEqual(missing, [],
+                         "release.yml 断言这些文件必须在包里，但 spec 的 datas 产不出它们："
+                         "%s（本地门禁看不出来，发版那步会直接红）" % missing)
+
     def test_selfcheck_is_explicitly_listed(self):
         """`selfcheck` 必须**显式**在 hiddenimports 里（0.6.0 漏过一次）。
 

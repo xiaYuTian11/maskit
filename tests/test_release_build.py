@@ -46,6 +46,10 @@ class LinuxBuildSafetyTests(unittest.TestCase):
                 "engine/debug-test.log", "src-tauri/resources/engine/installed-marker"]
     PACKAGE_ENTRIES = ("resources/engine/MaskitEngine",
                        "resources/engine/_internal/transparent.py",
+                       "resources/engine/_internal/inspection.py",
+                       "resources/engine/_internal/protocol_contracts.py",
+                       "resources/engine/_internal/onboarding.py",
+                       "resources/engine/_internal/skill_bundle/SKILL.md",
                        "resources/engine/_internal/models/ner_mini_zh/model_quantized.onnx")
 
     def run_build(self, package_listing):

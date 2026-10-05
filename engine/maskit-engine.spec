@@ -35,6 +35,13 @@ hiddenimports = (
         'mitm_transport_adapter',
         'panel',
         'credential_labels',
+        'onboarding',
+        # 与 datas 同步：transparent.py（被 mitmdump 当脚本加载）在模块级 import 它们，
+        # 而它靠 PYTHONPATH 指向 _BUNDLE_ROOT 找文件，打进 PYZ 的 import 未必够得着。
+        # 两者必须同进 datas：漏了 datas 但只有 hiddenimports 时，产物里没有明文文件，
+        # 而 release.yml 的「Assert packaged engine contents」会因此把发版拦下（已实测）。
+        'inspection',
+        'protocol_contracts',
         'audit_signals',
         'audit_engine',
         'ner_engine',
@@ -77,6 +84,23 @@ def _model_resources(engine_dir):
     return [(str(model_dir), 'models/ner_mini_zh')]
 
 
+def _skill_bundle(root_dir):
+    """占位符 Skill 包（agent-bundle/maskit-placeholders）随引擎分发。
+
+    面板的 `GET /api/skill/bundle` 直接把它打成 zip 给用户下载，所以它必须在产物里：
+    装到 Program Files 的用户拿不到仓库文件，而这份契约是「模型看到占位符怎么用」的
+    唯一来源（缺了它，模型会自己发明规则）。
+
+    与 `_model_resources` 的「可选模型」不同：本目录已入库，缺它就是打包事故，
+    必须让构建当场失败而不是出一个「面板下载按钮 500」的包。
+    """
+    bundle = root_dir / 'agent-bundle' / 'maskit-placeholders'
+    for name in ('contract.md', 'SKILL.md', 'templates/AGENTS.snippet.md'):
+        if not (bundle / name).is_file():
+            raise SystemExit('Missing placeholder skill bundle file: %s' % (bundle / name))
+    return [(str(bundle), 'skill_bundle')]
+
+
 datas = (
     mitmproxy_data
     # 这几个必须以**明文源文件**随包分发：transparent.py 是被 mitmdump 当脚本加载的，
@@ -88,6 +112,9 @@ datas = (
        , (str(ENGINE_DIR / 'mitm_transport_adapter.py'), '.')
        , (str(ENGINE_DIR / 'shield_defaults.py'), '.')
        , (str(ENGINE_DIR / 'event_store.py'), '.')
+       , (str(ENGINE_DIR / 'onboarding.py'), '.')
+       , (str(ENGINE_DIR / 'inspection.py'), '.')
+       , (str(ENGINE_DIR / 'protocol_contracts.py'), '.')
        , (str(ENGINE_DIR / 'audit_signals.py'), '.')
        , (str(ENGINE_DIR / 'audit_engine.py'), '.')
        , (str(ENGINE_DIR / 'ner_engine.py'), '.')
@@ -99,6 +126,8 @@ datas = (
     + _model_resources(ENGINE_DIR)
     # 打包前端静态构建产物（若存在），支持在浏览器直接访问引擎端口展现 WebUI/登录页
     + ([(str(ROOT_DIR / 'frontend' / 'dist'), 'web_dist')] if (ROOT_DIR / 'frontend' / 'dist').exists() else [])
+    # 占位符 Skill 包：面板 /api/skill/bundle 的数据源（见 _skill_bundle）
+    + _skill_bundle(ROOT_DIR)
 )
 
 a = Analysis(

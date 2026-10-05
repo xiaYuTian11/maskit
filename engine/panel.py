@@ -15,11 +15,12 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.7.0'
+__version__ = '0.8.0'
 import json
 import codecs
 import copy
 import hashlib
+import onboarding
 import logging
 import math
 import io
@@ -62,6 +63,8 @@ from shield_defaults import (
     SSEUsageAccumulator,
 )
 from credential_labels import CREDENTIAL_LABELS
+import inspection
+import skill_bundle
 
 # 资源目录（打包后随 exe 发布的只读资源：templates、transparent.py、shield_defaults.py）
 # PyInstaller onefire 时为 sys._MEIPASS；开发时为脚本所在目录。
@@ -180,6 +183,20 @@ from event_store import (
     fetch_sibling_event,
     db_max_event_id,
     _ensure_db,
+)
+from event_store import (
+    LOG_MODE_SUMMARY,
+    LOG_MODE_DETAILED,
+    set_log_mode as _es_set_log_mode,
+    log_trace_state as _es_log_trace_state,
+    start_log_trace as _es_start_log_trace,
+    stop_log_trace as _es_stop_log_trace,
+    effective_log_mode,
+    fetch_events_before,
+    count_events,
+    clear_stats,
+    request_mapping_reset as _es_request_mapping_reset,
+    mapping_reset_generation as _es_mapping_reset_generation,
 )
 import audit_engine as audit_eng
 ROOT = DATA_ROOT  # 兼容旧引用（CONFIG_PATH/PID_FILE/ENV_BACKUP_PATH 等可写文件）
@@ -746,7 +763,8 @@ def _project_transport(raw):
             out[key] = _scrub_text(value, 160)
         elif key in raw and value is None:
             out[key] = None
-    for key in ("reused", "via_proxy", "evidence_complete", "request_written"):
+    for key in ("reused", "via_proxy", "evidence_complete", "request_written",
+                "cancelled_after_complete"):
         if key in raw and (raw[key] is None or isinstance(raw[key], bool)):
             out[key] = raw[key]
     for key in ("idle_s", "connect_ms", "tls_ms"):
@@ -3588,6 +3606,9 @@ def default_config():
         # 且装了 onnxruntime+tokenizers）。默认关：缺模型/缺依赖时是纯负收益，
         # 且概率模型只应作为规则打码的补充。开源包不含模型（见 .gitignore）。
         "ner_enabled": False,
+        # 严格模式（§B3，默认关）：开启语义识别后，要求“本次语义检测必须完整成功”，
+        # 否则在出网前阻断（503 semantic_incomplete）。老配置保持 best-effort，不自动变严。
+        "ner_require_complete": False,
         # 单请求语义识别（NER）预算上限（秒），默认 10s。
         # 为什么要可配（P0-a）：实测客户端解包超时 180s，而上游首包实测 p50 6.4s、
         # max 99.8s —— 旧默认 60s 会把脱敏堆到超时线的三分之一，冷缓存那一轮直接
@@ -3655,6 +3676,17 @@ def default_config():
         # 两种格式后端都会归一化，换源不用动前端。
         "update_check_url": "",
         "log_retention_days": 7,
+        # 日志写入模式（§D1）：这里（无配置/配置损坏的兜底）用 detailed 而不是
+        # 模板里的 summary，是故意的。判别「新装 vs 老配置」的唯一依据是
+        # **配置里有没有 log_mode 这个键**（见 _normalize_log_mode）：
+        #   · 新装：_migrate_data_files 先拷 config.example.json（含 log_mode=summary）；
+        #   · 老配置：文件里没这个键 → 迁到 detailed，不静默改变既有能力；
+        #   · 本函数：走到这里说明配置文件缺失或损坏，方向保守起见保住能力，
+        #     不要让一次解析失败把用户的明文对照能力悄悄关掉。
+        "log_mode": LOG_MODE_DETAILED,
+        # 单条请求体上限（MiB）：实际生效值在 `_EXT_MAX_BODY`（面板）与
+        # `transparent._MAX_REQUEST_BODY`（引擎）。默认 32，可用配置抬高到 256。
+        "max_request_body_mb": 32,
         "autostart": False,
         "start_minimized": False,
         "auto_start_proxy": True,
@@ -3729,6 +3761,54 @@ def _normalize_retention(raw):
     if n <= 0:
         return 0
     return min(3650, n)
+
+
+def _normalize_log_mode(raw, present=True):
+    """日志写入模式归一化（§D1/D3）。只接受 summary / detailed 两个可持久化值。
+
+    `present=False` 表示**老配置里压根没有这个键**——必须回落到 `detailed`，
+    绝不能统一 setdefault 成 `summary`：那会在一次升级里把所有老用户的
+    历史还原能力与词榜静默改掉（§D2 明确要求「老用户主动选择」）。
+    新安装走随包 `config.example.json`，那里写的就是 `summary`。
+    trace 是限时运行时状态（面板 `/api/logs/trace` 控制），不落在配置里。
+    """
+    if not present:
+        return LOG_MODE_DETAILED
+    m = str(raw or "").strip().lower()
+    return m if m in (LOG_MODE_SUMMARY, LOG_MODE_DETAILED) else LOG_MODE_DETAILED
+
+
+def _clamp_max_request_body_mb(raw):
+    """请求体单条上限（MiB）归一化：默认 32，范围 1~256。
+
+    与引擎侧 `transparent.set_max_request_body` 同口径（两处各写一份，靠
+    `ConstantParityTests` 钉住一致性，见 AGENTS.md §3 关于 413 的注释）。
+    上限 256 MiB 是经验值：抬高它会等比抬高「单条上限 × 脱敏池宽」的内存预算，
+    并按实测 ≈112 ms/MiB（GIL 串行化的纯 Python 正则）拉长单条脱敏耗时。
+    """
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        return 32
+    return max(1, min(256, n))
+
+
+# 上一次落到 _EXT_MAX_BODY 的配置值（MiB）。
+# 为什么要记：`_sync_runtime_config` 在每次 load_config 时都会跑，如果无条件重写
+# `_EXT_MAX_BODY`，测试/e2e 里「patch 它把闸门收紧到 1KB 来验阻断」就会在下一个
+# 请求里被静默复原，闸门用例会假绿。只在**配置值真的变了**时才改写。
+_EXT_BODY_MB_APPLIED = [None]
+
+
+def _apply_ext_body_limit(mb=None):
+    """把 `config.max_request_body_mb` 落到 `_EXT_MAX_BODY`（幂等、可被 patch 覆盖）。"""
+    global _EXT_MAX_BODY
+    n = _clamp_max_request_body_mb(mb)
+    if _EXT_BODY_MB_APPLIED[0] == n:
+        return _EXT_MAX_BODY
+    _EXT_BODY_MB_APPLIED[0] = n
+    _EXT_MAX_BODY = n * 1024 * 1024
+    return _EXT_MAX_BODY
 
 
 def _normalize_ner_budget(raw):
@@ -4174,6 +4254,9 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         "ext_record_events": bool(raw.get("ext_record_events", True)),
         "ext_convert_legacy_office": bool(raw.get("ext_convert_legacy_office", False)),
         "ner_enabled": bool(raw.get("ner_enabled", False)),
+        # 严格模式（§B3）：只在用户显式开启时生效；回滚/重置不得让它静默失效，
+        # 也不得因为它缺字段而默认变严（缺字段 = 老配置 = best-effort）。
+        "ner_require_complete": bool(raw.get("ner_require_complete", False)),
         # 单请求 NER 预算上限（秒）：非法值静默回落默认（同其他辅助配置，不为
         # 一个数字让整份配置保存失败），范围 1~120 与引擎侧硬上限同口径。
         "ner_req_budget_s": _normalize_ner_budget(raw.get("ner_req_budget_s")),
@@ -4194,6 +4277,12 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         # 上限放到 3650 天（10 年）是实际意义上的"不限"，同时避免把负数/天文数字
         # 传给 SQLite 的时间戳计算。负值一律归 0（=永久），不再回落成 1 天。
         "log_retention_days": _normalize_retention(raw.get("log_retention_days", 7)),
+        # 日志写入模式（§D1）：老配置缺键 → detailed（保持既有能力），
+        # 新装模板写 summary。区分靠「键在不在」，不能靠值。
+        "log_mode": _normalize_log_mode(raw.get("log_mode"), present="log_mode" in raw),
+        # 单条请求体上限（MiB，§H4a）：两进程同源（面板 _EXT_MAX_BODY / 引擎
+        # _MAX_REQUEST_BODY），改一边必须改另一边，由常量测试钉住。
+        "max_request_body_mb": _clamp_max_request_body_mb(raw.get("max_request_body_mb")),
         "autostart": bool(raw.get("autostart", False)),
         "start_minimized": bool(raw.get("start_minimized", False)),
         "auto_start_proxy": bool(raw.get("auto_start_proxy", True)),
@@ -4435,6 +4524,17 @@ def _sync_runtime_config(cfg):
         })
         try:
             set_record_plaintext_words(cfg.get("record_plaintext_words", True))
+        except Exception:
+            pass
+        # 日志写入模式基值（§D1）：面板自己也会写事件（扩展桥接/试验台/自检），
+        # 所以这个开关必须与引擎进程一样在每次配置热重载时同步。
+        try:
+            _es_set_log_mode(cfg.get("log_mode"))
+        except Exception:
+            pass
+        # 单条请求体上限（§H4a）：配置驱动，面板侧落 _EXT_MAX_BODY。
+        try:
+            _apply_ext_body_limit(cfg.get("max_request_body_mb"))
         except Exception:
             pass
 
@@ -5428,6 +5528,25 @@ def _price_sync_loop():
     t.start()
 
 
+def _log_prune_loop():
+    """日志保留策略的后台驱动（§D3.4）：每 30 分钟跑一次 prune_event_log。
+
+    为什么要独立任务：原先 `prune_event_log()` 只在 `GET /api/logs` 里按 1 小时
+    节流触发（`_last_log_prune`）——用户不打开日志页就**永不清理**，而磁盘增长
+    与有没有人看页面无关。prune_event_log 自身已有保留天数/重 VACUUM 阈值与
+    锁等待上限，这里只负责把它从“UI 副作用”变成“进程职责”。
+
+    用 Timer 自续期而不是常驻 while：单次清理抛异常不会杀死循环。
+    """
+    try:
+        prune_event_log()
+    except Exception:
+        pass
+    t = threading.Timer(1800, _log_prune_loop)
+    t.daemon = True
+    t.start()
+
+
 def _maybe_auto_sync_prices():
     """启动/定时触发：缓存缺失或超过配置间隔未同步 → 后台刷新。
 
@@ -5977,6 +6096,20 @@ def api_logs():
         prune_event_log()
         _last_log_prune[0] = time.time()
     since = _arg_int("since", 0, 0, 2**31)
+    # 反向游标（§D3.1）：取比 before_seq 更早的一页。与 since 互斥使用
+    # （前端「加载更早」只传 before_seq），筛选条件与向前翻同源，
+    # 保证同一筛选下两页看到的是同一批行（不会漏筛/漏重）。
+    before_seq = _arg_int("before_seq", 0, 0, 2**31)
+    # 时间下界（可选）：只在这个时间点**之前**的记录里翻。给「回看某个时间段」用，
+    # 与 before_seq 同属反向游标（id 与 ts 同序，两者一起给取交集）。
+    # 非法值返回 None（= 不限时间），不让一个手写错的参数把请求 500。
+    before_ts = None
+    _raw_before_ts = request.args.get("before_ts", "")
+    if _raw_before_ts:
+        try:
+            before_ts = float(_raw_before_ts)
+        except Exception:
+            before_ts = None
     limit = _arg_int("limit", 500, 1, 1000)
     # 默认显示全部事件（含 SKIP/PASS 噪声）。曾默认 '1' 隐藏，用户会误以为日志丢了。
     sensitive_only = request.args.get("sensitive", "0") != "0"
@@ -5999,13 +6132,32 @@ def api_logs():
         ingress = None
     # First load shows the latest page; subsequent polls consume the oldest unseen
     # records. Fetch one extra row to tell the client whether it needs to catch up.
-    incremental = since > 0
-    ev = fetch_events(since=since, limit=limit + int(incremental), sensitive_only=sensitive_only,
-                      query=query, fulltext=fulltext, event_type=event_type,
-                      max_limit=1001, ascending=incremental, ingress=ingress)
-    has_more = incremental and len(ev) > limit
-    ev = ev[:limit]
-    next_since = ev[-1]["seq"] if ev else since
+    # 反向翻页与正向增量互斥：since>0 是轮询，before_seq>0 是「看更早」。
+    incremental = since > 0 and before_seq <= 0
+    has_older = False
+    before_cursor = 0
+    if before_seq > 0 or before_ts is not None:
+        # before_seq 的哨兵用 int64 上界而不是 2**31：「id 与 ts 同序」才是时间游标成立的
+        # 前提，而 2**31 只是个“够大”的数 —— 库一旦跨过 21 亿条，这条 `id < 2**31`
+        # 会静默变成真正的上界，时间筛选结果就悄悄少了一截（不报错，最难查）。
+        # SQLite 的 rowid 是 64 位，用 int64 上界才是真正的「不限」。
+        ev, has_older = fetch_events_before(
+            before_seq=before_seq or (2 ** 63 - 1), before_ts=before_ts, limit=limit,
+            sensitive_only=sensitive_only, query=query, fulltext=fulltext,
+            event_type=event_type, ingress=ingress, max_limit=1001)
+        has_more = False
+        next_since = since
+        # ev 页内升序（与向前翻同形态），[0] 就是本页最旧一条 —— 下一页的 before_seq。
+        # 页为空时保留请求里的游标：否则 `before_cursor` 会被写成 0，
+        # 前端拿 0 去翻下一页就会又回到最新一批（重复而不是报“没有更早”）。
+        before_cursor = ev[0]["seq"] if ev else (before_seq or 0)
+    else:
+        ev = fetch_events(since=since, limit=limit + int(incremental), sensitive_only=sensitive_only,
+                          query=query, fulltext=fulltext, event_type=event_type,
+                          max_limit=1001, ascending=incremental, ingress=ingress)
+        has_more = incremental and len(ev) > limit
+        ev = ev[:limit]
+        next_since = ev[-1]["seq"] if ev else since
     # slim：剔除只有详情弹窗才用的正文字段。这四个字段占 events 体积 79%
     # （dialog 34% + dialog_req 28% + resp_preview 9% + req_preview 8%），
     # 而列表行一个都不渲染。全量 1000 条实测 8.2MB → slim 后约 1.7MB。
@@ -6063,9 +6215,13 @@ def api_logs():
     # 锁外做脱敏（避免持锁解析 JSON）：SHIELD 行只回传白名单字段
     tail = [_tail_line_sanitize(x) for x in raw_tail]
     try:
-        retention = _normalize_retention(load_config().get("log_retention_days", LOG_RETENTION_DAYS))
+        _cfg_for_logs = load_config()
+        retention = _normalize_retention(_cfg_for_logs.get("log_retention_days", LOG_RETENTION_DAYS))
+        _base_mode = _normalize_log_mode(_cfg_for_logs.get("log_mode"), present=True)
     except Exception:
         retention = LOG_RETENTION_DAYS
+        _base_mode = LOG_MODE_DETAILED
+    _trace = _es_log_trace_state()
     # 游标重置检测：清空日志（sqlite_sequence 重置）或损坏库隔离重建后 id 从 1
     # 重新开始，已打开的 Logs 页 cursor 仍是旧的高值 → `id > since` 永远空集，
     # 新日志一条不显示、用户误判代理不工作。给前端一个 reset 标志重新从 0 拉取。
@@ -6084,8 +6240,89 @@ def api_logs():
         "total": len(ev),
         "has_more": has_more,
         "next_since": next_since,
+        # 反向翻页（§D3.1）：has_older=更早处还有符合筛选的行；
+        # before_cursor=下一页的 before_seq（本页最旧一条）。
+        "has_older": has_older,
+        "before_cursor": before_cursor,
         "reset": reset,
+        # 日志写入模式（§D1）随列表回传：前端要把「最小模式」作为**当前生效的事实**
+        # 显示出来（否则用户会以为正文丢了是 bug），并据此把详情弹窗的正文区
+        # 标成「未记录」而不是空白。
+        "log_mode": "trace" if _trace.get("active") else _base_mode,
+        "trace_until": _trace.get("until") or 0,
     })
+
+
+def _logs_base_mode():
+    """当前持久日志模式（summary/detailed）。读配置失败时保守回落 detailed。"""
+    try:
+        return _normalize_log_mode(load_config().get("log_mode"), present=True)
+    except Exception:
+        return LOG_MODE_DETAILED
+
+
+def _logs_mode_payload():
+    st = _es_log_trace_state()
+    base = _logs_base_mode()
+    return {
+        "ok": True,
+        "mode": base,                                  # 持久模式
+        "effective": "trace" if st.get("active") else base,  # 实际生效模式
+        "trace_active": bool(st.get("active")),
+        "trace_until": float(st.get("until") or 0),
+    }
+
+
+@app.get("/api/logs/mode")
+def api_logs_mode_get():
+    """日志写入模式（§D1）：持久模式 + 限时排障窗口状态。"""
+    return jsonify(_logs_mode_payload())
+
+
+@app.post("/api/logs/mode")
+def api_logs_mode_set():
+    """切换**持久**日志写入模式：summary | detailed（trace 走 /api/logs/trace）。
+
+    必须走 load_config/save_config 正规路径（归一化 + 结构护栏 + 运行时开关同步），
+    不能直接改配置文件：否则会绕过归一化与内存开关，配置显示已切、实际照旧记。
+    """
+    body = request.get_json(silent=True) or {}
+    mode = str(body.get("mode") or request.args.get("mode") or "").strip().lower()
+    if mode not in (LOG_MODE_SUMMARY, LOG_MODE_DETAILED):
+        return jsonify({"ok": False, "error": "mode 只能是 summary 或 detailed"}), 400
+    try:
+        cfg = load_config()
+        cfg["log_mode"] = mode
+        save_config(cfg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+    return jsonify(_logs_mode_payload())
+
+
+@app.post("/api/logs/trace")
+def api_logs_trace_start():
+    """开启限时排障（trace）：默认 15 分钟、最多 60，到点自动回到持久模式。
+
+    重启后自动关闭（面板与引擎启动时都会清掉状态文件）——这是用户约定的
+    「临时排障」语义，不能变成“忘了关就一直开着”。
+    """
+    body = request.get_json(silent=True) or {}
+    raw = body.get("minutes", request.args.get("minutes", 15))
+    try:
+        minutes = int(raw)
+    except Exception:
+        minutes = 15
+    res = _es_start_log_trace(minutes)
+    if not res.get("ok"):
+        return jsonify(res), 500
+    return jsonify(_logs_mode_payload())
+
+
+@app.delete("/api/logs/trace")
+def api_logs_trace_stop():
+    """用户主动关闭限时排障（与到点自动关闭同一条路径）。"""
+    _es_stop_log_trace()
+    return jsonify(_logs_mode_payload())
 
 
 @app.get("/api/logs/detail")
@@ -6245,6 +6482,58 @@ def api_stats_models():
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
+# `/api/logs/export` 的字段白名单（导出清洗）。
+#
+# 为什么是**显式允许表**而不是黑名单：RESTORE 事件的 `dialog`/`resp_preview` 是
+# 还原后的正文（含普通 PII 明文），只删 `items[].original` 拦不住；正文类字段必须
+# 默认不出现，新增字段必须先在这里表态。
+#
+# “不导出”也是一次**决定**，而不是一次遗漏：确实不该外传、但引擎会发射的字段
+# 统一登记在 `tests/test_attribution.py` 的 `NOT_EXPORTED` 里（逐条写理由），
+# 那条守卫会把“既没进白名单、又没声明”的发射字段报出来。
+# 本表只装**导出确实需要**的东西：正文永远不在其中，只展示不追溯的计数也不在。
+_EXPORT_KEEP_FIELDS = {
+    "ts", "type", "sid", "host", "method", "path",
+    # ingress：入口维度。列表页能按 proxy/ext 筛，导出不带它就无法自证
+    # 「导出的就是筛出来的那批」（§D3.2 导出一致性）。
+    "ingress",
+    "upstream", "model", "stream_mode", "stream_actual", "transport",
+    "failure_phase", "upstream_may_have_executed",
+    "ner_init_ms", "ner_infer_ms", "ner_budget_wait_ms", "ner_calls", "ner_windows", "ner_cache_hits", "ner_cache_misses",
+    "count", "restored", "status", "http_status",
+    "mask_ms", "resp_ts", "first_byte_ms", "upstream_ms", "total_ms", "bytes", "usage", "cost_usd", "seq", "reason", "msg",
+    # ---- 0.6.0 新增的归因字段 ----
+    # 白名单是**显式**的：引擎里发了、这里没登记，导出后就是「看不出来源」。
+    # `degraded` 正是这么丢过一次（0.1.14 补进事件，却一直没进白名单）。
+    "block_source",        # 503 来源：upstream / engine / fallback（A-7）
+    "degraded",            # 靠宽松兜底修回来的占位符个数
+    "stream_degraded_reason",  # 流式退回整包的原因（C-2）
+    "queue_wait_ms",       # 脱敏池排队时长（A-6）
+    "engine_queue_depth",  # 提交时的队列深度（A-6）
+    "engine_queue_bytes",  # 提交时的排队字节（A-6；前端弹窗要显示，漏登记会被导出丢弃）
+    "aux_wait_ms",         # 响应侧等待 aux 池的时长（超阈值才记，见 transparent 注释）
+    "engine_busy",         # 是否因队列满被拒（A-6）
+    "ner_global_throttled",  # NER 全局令牌桶限流次数（B-2）
+    "ner_sem_wait_ms",     # NER 信号量等待时长（B-2）
+    # ---- 批次 8：失败归因（P0-5）----
+    # 导出的用途就是“拿日志找人看为什么失败了”，而现象层全是“连接断开”，
+    # 不带责任方就没法回答“该查引擎、上游还是客户端”。
+    "failure_owner",       # engine / upstream / client / dns / proxy
+    "error_type",          # 异常类名（ConnectionResetError / ReadTimeout …）
+    # ---- 统一口径（批次 2）：处置结论与完整度 ----
+    # 这几项是“这一条到底算不算扫干净了”的唯一机器可读结论，导出缺了它们，
+    # 拿日志找人复盘时就只能看现象（命中 0 条）而看不到结论（直通未脱敏 / 检测不完整）。
+    # ⚠️ 它们由 `**inspection.report(...)` **字典展开**发射，不是字面 keyword 参数，
+    # `test_attribution` 的 AST 扫描看不见它们 —— 漏登记不会报错，只会静默少一列。
+    "decision", "completeness", "reasons", "reason_codes", "blocked", "failed",
+    "error_code", "ner_truncated", "ner_skip_reasons", "signed_blocks_skipped",
+    # ---- 审计结果（计数/枚举，不含正文）----
+    # `audit_scan_truncated` 是审计结论本身（“没扫完整包”），与 NER 的 truncated 同理。
+    "audit_ms", "audit_scan_bytes", "audit_scan_truncated",
+    "body_shape", "client_app",
+}
+
+
 @app.get("/api/logs/export")
 def api_logs_export():
     """导出近期事件为 JSON。默认脱敏：items[].original（明文）一律剔除，
@@ -6262,35 +6551,30 @@ def api_logs_export():
     event_type = request.args.get("type", "").strip().upper() or None
     if event_type and not re.fullmatch(r"[A-Z_]{1,32}", event_type):
         event_type = None
-    ev = fetch_events(since=0, limit=limit, sensitive_only=sensitive_only,
-                      query=query, fulltext=fulltext, event_type=event_type, max_limit=EXPORT_MAX)
-    # 是否被上限截断——拿满 limit 就说明后面还有。静默截断过一次：接口写着允许
-    # 5000，底层却砍到 1000，用户导出一整天的日志只拿到 1000 条还以为是全部。
-    truncated = len(ev) >= limit
-    # 导出清洗：字段白名单。RESTORE 事件的 dialog/resp_preview 是还原后的正文
-    # （含普通 PII 明文），只删 items[].original 无法完全拦截。
+    # 入口维度必须与列表页同口径（§D3.2）：列表能按 proxy/ext 筛，导出不能——
+    # 用户勾着「只看浏览器扩展」，导出的却是全量，两边数量对不上就会判定导出坏了。
+    ingress = request.args.get("ingress", "").strip().lower() or None
+    if ingress not in INGRESS_VALUES:
+        ingress = None
+    # 时间上界（可选）：与反向游标同源，供「导出到某个时间点为止」用。
+    try:
+        before_ts = float(request.args.get("before_ts")) if request.args.get("before_ts") else None
+    except Exception:
+        before_ts = None
+    ev, has_older = fetch_events_before(
+        before_seq=2**31, before_ts=before_ts, limit=limit, sensitive_only=sensitive_only,
+        query=query, fulltext=fulltext, event_type=event_type, ingress=ingress,
+        max_limit=EXPORT_MAX)
+    # 截断判定不能再用「拿满 limit」（那是猜测）：直接数一次当前筛选的匹配行数，
+    # 主列表用 has_older 判「更早处还有」，两者相加才是确定结论。
+    try:
+        matched_total = count_events(sensitive_only=sensitive_only, query=query,
+                                     fulltext=fulltext, event_type=event_type, ingress=ingress)
+    except Exception:
+        matched_total = len(ev)
+    truncated = bool(has_older) or matched_total > len(ev)
+    # 导出清洗：字段白名单（定义在模块级 `_EXPORT_KEEP_FIELDS`，以便被门禁钉住）。
     # 正文类字段一律剔除，只保留元数据 + 打码 items。
-    _EXPORT_KEEP_FIELDS = {
-        "ts", "type", "sid", "host", "method", "path",
-        "upstream", "model", "stream_mode", "stream_actual", "transport",
-        "failure_phase", "upstream_may_have_executed",
-        "ner_init_ms", "ner_infer_ms", "ner_budget_wait_ms", "ner_calls", "ner_windows", "ner_cache_hits", "ner_cache_misses",
-        "count", "restored", "status", "http_status",
-        "mask_ms", "resp_ts", "first_byte_ms", "upstream_ms", "total_ms", "bytes", "usage", "cost_usd", "seq", "reason", "msg",
-        # ---- 0.6.0 新增的归因字段 ----
-        # 白名单是**显式**的：引擎里发了、这里没登记，导出后就是「看不出来源」。
-        # `degraded` 正是这么丢过一次（0.1.14 补进事件，却一直没进白名单）。
-        "block_source",        # 503 来源：upstream / engine / fallback（A-7）
-        "degraded",            # 靠宽松兜底修回来的占位符个数
-        "stream_degraded_reason",  # 流式退回整包的原因（C-2）
-        "queue_wait_ms",       # 脱敏池排队时长（A-6）
-        "engine_queue_depth",  # 提交时的队列深度（A-6）
-        "engine_queue_bytes",  # 提交时的排队字节（A-6；前端弹窗要显示，漏登记会被导出丢弃）
-        "aux_wait_ms",         # 响应侧等待 aux 池的时长（超阈值才记，见 transparent 注释）
-        "engine_busy",         # 是否因队列满被拒（A-6）
-        "ner_global_throttled",  # NER 全局令牌桶限流次数（B-2）
-        "ner_sem_wait_ms",     # NER 信号量等待时长（B-2）
-    }
     clean = []
     for e in ev:
         item = {k: v for k, v in e.items() if k in _EXPORT_KEEP_FIELDS}
@@ -6315,6 +6599,11 @@ def api_logs_export():
         "sensitive_only": sensitive_only,
         "query": query,
         "masked_export": True,  # 导出恒脱敏：不含任何 original 明文
+        # 当前**实际生效**的日志写入模式：最小模式下库里本来就没有正文，
+        # 导出的字段少不是导出 bug。带上它，用户/支持人员看文件就知道原因。
+        "log_mode": effective_log_mode(),
+        "ingress": ingress,
+        "matched_total": int(matched_total),
         # truncated=True 表示还有更早的事件没导出来。宁可让用户看见「只导了 N 条」，
         # 也不能让他以为手上这份就是全部——审计场景下这个误会代价很大。
         "truncated": truncated,
@@ -6325,6 +6614,12 @@ def api_logs_export():
     resp = make_response(body)
     resp.headers["Content-Type"] = "application/json; charset=utf-8"
     resp.headers["Content-Disposition"] = 'attachment; filename="maskit-events.json"'
+    # 前端是**下载文件**，看不到 body 里的 truncated —— 必须用响应头把
+    # 「导了多少 / 匹配多少 / 是否截断」带出来，让 toast 能如实告知。
+    # 不这样做的后果实测过：用户导出一天日志，只拿到上限条数却以为拿到了全部。
+    resp.headers["X-Maskit-Exported"] = str(len(clean))
+    resp.headers["X-Maskit-Matched"] = str(int(matched_total))
+    resp.headers["X-Maskit-Truncated"] = "1" if truncated else "0"
     return resp
 
 
@@ -6371,6 +6666,10 @@ _EXT_SWEEP_INTERVAL = 10.0
 # 超限一律 (A) 阻断，绝不半脱敏放行）。这里不 import transparent 取值——panel 进程能否
 # import transparent 取决于跑在哪个解释器（见下面 mask 端点的失败路径注释），
 # 把「闸门」这种必须无条件生效的判断绑到一个可能 import 失败的模块上不可接受。
+#
+# 默认 32MiB，但**可配置**（`config.max_request_body_mb`，§H4a）：用户带大附件的
+# 合法请求被 32MiB 闸住时，应当能自己抬高上限并看到内存/耗时的连带效应，
+# 而不是只能放弃。生效值由 `_apply_ext_body_limit` 从配置同步。
 _EXT_MAX_BODY = 32 * 1024 * 1024
 # 文档脱敏的 NER 总预算（秒）：逐 run 调用 mask()，单条短文本实测约 10ms，一份
 # 几千 run 的文档会线性堆到分钟级，而扩展侧 HTTP 超时更短——超预算后只停用语义
@@ -6455,6 +6754,17 @@ def _ner_status_payload(cfg):
         try:
             cs = ner_engine.cache_stats()
             info["cache"] = {k: cs.get(k) for k in ("hit", "miss", "hit_rate")}
+        except Exception:
+            pass
+        # 治理器快照（批次 8）：实际并发 / 预算口径与容量 / 生效核数与 ONNX 线程数。
+        # 「CPU 怎么又满了」第一步就是核对这几个数与本机可用核数是否对得上 ——
+        # 旧口径下 2 核容器会按宿主 16 核配（并发 2 + 4 个 ONNX 线程 + 按核数给的预算）。
+        try:
+            gov = ner_engine.governor_status()
+            info["governor"] = {k: gov.get(k) for k in (
+                "concurrency", "budget_ms_per_s", "budget_unit", "cpu_cores",
+                "cpu_threads", "bucket_tokens_ms", "skipped_throttled",
+                "skipped_sem_timeout", "wait_ms_total", "wait_ms_max")}
         except Exception:
             pass
         if enabled:
@@ -6560,7 +6870,12 @@ def api_ext_mask():
     # 只加前者会拿到 Flask 的 HTML 413 页，扩展按「无 blocking」归进 (B) 默认桶，
     # 于是超限体变成「未脱敏直通」，比现状更危险。
     if (request.content_length or 0) > _EXT_MAX_BODY or request.headers.get("Transfer-Encoding"):
-        return jsonify({"ok": False, "error": "payload_too_large", "blocking": True}), 413
+        # §H4(b)：与代理链路同口径的可归因错误体（含 hint、blocking 与统一检测口径）。
+        _ext_hint = ("请求体 %d 字节，超过单条上限 %d 字节，已在本机阻断、未上行；请缩小后重试。"
+                     % (request.content_length or 0, _EXT_MAX_BODY))
+        return jsonify({"ok": False, "error": "payload_too_large", "blocking": True,
+                        "limit_bytes": _EXT_MAX_BODY, "hint": _ext_hint,
+                        **inspection.report_for_skip(reason="request_too_large", blocked=True)}), 413
     data = request.get_json(force=True, silent=True) or {}
     text = data.get("text")
     if not isinstance(text, str) or not text:
@@ -6604,11 +6919,16 @@ def api_ext_mask():
                 s["ner_skips"] = ner_skips
             s["inflight"] = True
             _EXT_STATS["mask"] += 1              # += 是读改写三步，必须在锁内
+            # 签名块豁免计数（本轮）：取走即清零，与代理路径同语义
+            _signed = tr._take_signed_skips(sid)
         hit_count = len(s.get("last_hits") or set())
+        # 统一检测口径（§B4）：扩展链路与代理路径**同源**，否则扩展用户永远只看到“0 命中”
+        _report = inspection.report_for_mask(changed=hit_count > 0, ner_skips=ner_skips,
+                                             signed_skipped=_signed)
         # 仅当真实命中敏感词并发生打码时才产生 MASK 事件，彻底消除大量 0 命中的空白噪声日志。
         # 例外：本轮发生语义识别降级时即使 0 命中也要记 —— 降级意味着「本该识别出人名/
         # 机构/地址的文本没被识别」，而这恰好是最可能漏码的情形，不记就等于静默降级。
-        if _ext_cfg().get("ext_record_events", True) and (hit_count > 0 or ner_skips):
+        if s.get('verification') or _verification_ext_window_active() or (_ext_cfg().get("ext_record_events", True) and (hit_count > 0 or ner_skips)):
             # dialog / req_preview 落库前必须过凭据清洗（审计 B1）。
             # 这两个字段是**客户端原始请求体**，`items` 里凭据类只有 digest+preview，
             # 但同一行 payload 的 dialog 会把 API Key 原文一起写进 SQLite ——
@@ -6626,9 +6946,12 @@ def api_ext_mask():
                      req_preview=scrubbed_dialog[:800],
                      mask_ms=round((time.perf_counter() - t0) * 1000, 1),
                      **({"ner_truncated": True, "ner_skip_reasons": ner_skips}
-                        if ner_skips else {}))
+                        if ner_skips else {}),
+                     **(({"signed_blocks_skipped": _signed} if _signed else {})),
+                     **_report)
         return jsonify({"ok": True, "masked_text": masked, "sid": sid,
-                        **({"ner_skipped": ner_skips} if ner_skips else {})})
+                        **({"ner_skipped": ner_skips} if ner_skips else {}),
+                        **_report})
     except Exception as e:
         # (A) 类：引擎明确失败 → 无条件阻断（红线 2），无开关。
         # 失败路径**必须留一条日志**，否则用户只看到「网页全站请求失败」、事件页
@@ -6949,7 +7272,11 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
 def api_ext_mask_file():
     """扩展文档文件（docx / xlsx / pptx）打码。sid 由服务端签发或复用。"""
     if (request.content_length or 0) > _EXT_MAX_BODY or request.headers.get("Transfer-Encoding"):
-        return jsonify({"ok": False, "error": "payload_too_large", "blocking": True}), 413
+        # 与 /api/ext/mask 同口径（§H4b）：超限必须能归因，不能只丢一个裸错误码。
+        return jsonify({"ok": False, "error": "payload_too_large", "blocking": True,
+                        "limit_bytes": _EXT_MAX_BODY,
+                        "hint": "文件超过单条上限 %d 字节，已在本机阻断、未上行。" % _EXT_MAX_BODY,
+                        **inspection.report_for_skip(reason="request_too_large", blocked=True)}), 413
     data = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename") or "").strip()
     b64_content = data.get("base64")
@@ -7192,13 +7519,31 @@ def api_ext_rotate_token():
     return jsonify({"ok": True, "ext_token": new_token})
 
 
+# ========== 演示 / 连通性探针的样例文本 ==========
+#
+# **号码与 key 必须按片段拼接，不能写字面量。** 这是本机网关的一个真实陷阱：工具
+# 调用里写的占位符字面量会在落盘时被还原成它代表的真实值（AGENTS.md §3.9），于是
+# 「示例号码」落进源码后就成了一串真实号码。源码里出现真实形态的号码同时违反两条
+# 规矩：样例不再「一眼可见是伪造的」，且任何 PII 扫描器都会把它当成泄漏。
+#
+# 拼接后**源码文本里不存在完整的号码/key**，运行时拼出来的串仍然命中规则（否则
+# 演示就没意义了）。已有的 6 位 hash 判断：脏数据不是“看起来真”而是“就是真的”，
+# 只能靠字面量形态判，所以这里也一并把它们拆开。
+_DEMO_PHONE = "1" + "3" + "0" + "0" * 8        # 11 位、尾段全 0，肉眼可见是假号
+_DEMO_MAIL = "zhangsan" + "@" + "example.com"   # example.com 是 RFC2606 保留域
+_DEMO_KEY = "sk" + "-" + "demo" + "0" * 12     # 前缀 + 明显假尾（需 ≥8 位才命中前缀规则）
+_DEMO_SAMPLE_TEXT = ("我是张三，电话 " + _DEMO_PHONE + "，邮箱 " + _DEMO_MAIL
+                     + "，key 是 " + _DEMO_KEY)
+_DEMO_PROBE_TEXT = ("连通性测试：电话" + _DEMO_PHONE + " " + _DEMO_MAIL + " 请只回复OK")
+
+
 @app.post("/api/demo/mask")
 def api_demo_mask():
     """本地脱敏演示：不发上游，只验证规则是否生效。"""
     data = request.get_json(force=True) or {}
     text = str(data.get("text") or "").strip()
     if not text:
-        text = "我是张三，电话13812345678，邮箱 test@example.com，key 是 sk-1234567890abcdefghijklmnopqrst"
+        text = _DEMO_SAMPLE_TEXT
     if len(text) > 4000:
         return jsonify({"ok": False, "error": "文本过长（最多 4000 字）"}), 400
     try:
@@ -7242,6 +7587,135 @@ def api_demo_mask():
         })
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+
+
+# 试验台的准入上限。演示是**低优先级**工作：它不该与真实请求抢 CPU，也不该让
+# 十个浏览器标签页各起一份语义识别（每个 tab 一次 NER 就是一份模型推理）。
+# 拿不到槽位立即回 503 **不排队**——排队会让 UI 看起来是“卡住了”，而用户此刻
+# 想要的只是“先试一下”。释放一律在 finally（见 api_demo_lab）。
+_DEMO_LAB_SLOTS = threading.BoundedSemaphore(2)
+# 演示文本上限（字符）。与前端计数同一口径；一次性把整段文本进 NER，
+# 4000 字实测几十毫秒，再大就变成“演示把引擎占了”。
+_DEMO_LAB_MAX_CHARS = 4000
+
+
+@app.post("/api/demo/lab")
+def api_demo_lab():
+    """本地试验台：脱敏 → 还原往返 + 命中解释，**全程不出网**。
+
+    与 `POST /api/demo/mask` 的区别（两者共存，不是替代关系）：
+    - `/api/demo/mask` 是**上游探针**：要用户填 key，真的发一条请求——验证的是
+      “整条链路通不通”。
+    - 本端点是**本地试验台**：不碰上游、不要 key，回答的是“这段文本会被怎样脱敏、
+      能不能原样还原”。这是接入的第一体验（要用户先填 key 才能知道脱敏长什么样，
+      等于把新人挡在门外）。
+
+    三条硬约束（均在本函数与 `transparent.demo_store_scope` 里实现）：
+    1. **不留痕**：全程不写事件库、不进统计（`mask`/`restore` 本身不发事件，事件由
+       代理/扩展的 flow 钩子发出）；演示会话用后即删（与真实链路共用一张会话表）。
+    2. **不污染真实映射**：占位符表切到演示专用仓（`demo_store_scope`）——种子是
+       当前复用窗口的**快照副本**。这正是“演示里的 token 就是真实请求会拿到的
+       token”，而演示期间的写入一条也回不到真实表。
+    3. **有界**：文本 ≤ 4000 字，并发拿不到槽位就 503；语义识别与真实请求**同
+       预算口径**（`_ner_req_budget` + `begin_budget`），不绕过任何资源护栏。
+    """
+    data = request.get_json(force=True) or {}
+    text = str(data.get("text") or "").strip()
+    if not text:
+        text = _DEMO_SAMPLE_TEXT
+    if len(text) > _DEMO_LAB_MAX_CHARS:
+        return jsonify({"ok": False, "error": "text_too_long", "limit": _DEMO_LAB_MAX_CHARS,
+                        "hint": "试验台单次最多 %d 字（演示用不了更长的文本）" % _DEMO_LAB_MAX_CHARS}), 400
+    if not _DEMO_LAB_SLOTS.acquire(blocking=False):
+        return jsonify({"ok": False, "error": "busy",
+                        "hint": "试验台同时在跑 2 个演示，请稍后重试"}), 503
+    try:
+        import transparent as tr
+        # 与代理/扩展链路同口径地重载配置。注意 `_maybe_reload` 可能把**配置里的自定义词**
+        # 登记进全局表（`_sync_custom_word_mappings`）——那是配置驱动的全局行为，与本端点的
+        # 样本无关；因此 `seeded_recent` 在全新实例上也可能非 0。2026-10-02 为这 2 条（label=人名）
+        # 排查过一轮，结论是配置同步，不是演示泄漏。
+        tr._maybe_reload(force=True)
+        sid = f"demo-{secrets.token_hex(4)}"
+        t0 = time.perf_counter()
+        # 演示专用映射仓：进出都在 `finally`，异常也不会把演示仓或会话留给进程
+        with tr.demo_store_scope() as demo_store:
+            # 种子规模在**进入作用域时**取：mask 之后取会把本次新增也算进去，
+            # 看上去像是“真实复用窗口在长”——那正是要排除的事（本轮先量错过一次）。
+            seeded_recent = len(demo_store.fwd)
+            try:
+                with _EXT_LOCK:
+                    tr._new_session(sid, source={"kind": "demo"})
+                # 与真实链路同预算口径：`CALL_BUDGET_S` 只管单次调用，而一段文本里
+                # 有多少个字符串叶子是没有上限的（见 transparent._ner_req_budget）。
+                with tr._ner_doc_budget(tr._ner_req_budget(len(text.encode("utf-8")))):
+                    masked = tr.mask(text, sid)
+                mask_ms = (time.perf_counter() - t0) * 1000
+                ner_skips = tr._ner_skips_of_this_round()
+                t1 = time.perf_counter()
+                restored = tr.restore(masked, sid)
+                restore_ms = (time.perf_counter() - t1) * 1000
+                s = tr.sessions.get(sid) or {}
+                fwd = s.get("fwd") or {}
+                labels = s.get("labels") or {}
+                new_orig = s.get("new_orig") or set()
+                # 只看本会话（唯一 sid）——不会读到别人的映射
+                items = []
+                by_label = {}
+                occurrences = 0
+                for original, token in list(fwd.items())[:80]:
+                    n = masked.count(token)
+                    label = labels.get(original) or "X"
+                    occurrences += n
+                    by_label[label] = by_label.get(label, 0) + n
+                    items.append({
+                        "token": token,
+                        "label": label,
+                        # 只给长度，不给原文：面板是展示层，没有回传原文的必要
+                        "original_len": len(str(original or "")),
+                        "occurrences": n,
+                        # 沿用本机已有 token（与真实请求同口径）还是本次新签发
+                        "reused": original not in new_orig,
+                    })
+                items.sort(key=lambda it: (it["label"], it["token"]))
+                unresolved = int(s.get("unresolved") or 0)
+                restored_count = int(s.get("restored") or 0)
+            finally:
+                # 清理演示会话：与代理/扩展链路共用 `sessions`，留着就是残留
+                try:
+                    with _EXT_LOCK:
+                        tr.sessions.pop(sid, None)
+                except Exception as e:
+                    _log(f"[panel] demo lab session cleanup failed: {e}")
+        return jsonify({
+            "ok": True,
+            "input_len": len(text),
+            "masked": masked,
+            "restored": restored,
+            # 往返一致：还原结果与输入逐字相同。这是“看到 token 不慌”的前提
+            "roundtrip_ok": restored == text,
+            # 唯一实体数 vs 出现次数：同一个值出现多次只会拿到一个 token
+            "count": len(fwd),
+            "occurrences": occurrences,
+            "by_label": by_label,
+            "items": items,
+            "changed": masked != text,
+            "restored_count": restored_count,
+            "unresolved": unresolved,
+            "mask_ms": round(mask_ms, 1),
+            "restore_ms": round(restore_ms, 1),
+            # 语义识别降级（超预算/缺模型）：确定性规则照常生效，但要说清楚
+            "ner_skips": ner_skips,
+            # 演示仓的种子规模：让“用的是快照副本”这件事可自证（也便于回归断言）
+            "isolated": True,
+            "seeded_recent": seeded_recent,
+            # 本次在演示仓里新增的条目（真实表零变化，这里才是演示自己的写入）
+            "store_added": len(demo_store.fwd) - seeded_recent,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+    finally:
+        _DEMO_LAB_SLOTS.release()
 
 
 @app.post("/api/upstream/test")
@@ -7410,9 +7884,7 @@ def api_upstream_test():
             tips.append("请先拉模型，或手动填 model 名")
             return jsonify(result), 400
         # 支持自定义测试文本（工具页「真实脱敏测试」传入，默认内置占位符示例）
-        probe_text = str(data.get("content") or "").strip() or (
-            "连通性测试：电话13812345678 邮箱shield-test@example.com 请只回复OK"
-        )
+        probe_text = str(data.get("content") or "").strip() or _DEMO_PROBE_TEXT
         body = {
             "model": model,
             "messages": [{"role": "user", "content": probe_text}],
@@ -7514,6 +7986,97 @@ def api_open_url():
 def api_logs_clear():
     result = clear_logs()
     return jsonify(result)
+
+
+@app.post("/api/mappings/clear")
+def api_mappings_clear():
+    """清空**内存里的「占位符 ↔ 原文」映射**（§D3.3：与清日志/清审计/清统计并列的独立动作）。
+
+    为什么需要独立动作：以前想清映射只能重启代理，而重启会一并断掉在飞请求与
+    全部会话状态——比用户想要的东西重得多。
+
+    两个进程各有一份表，都要清：
+      · 本进程（面板）：扩展桥接链路用的是面板自己的 `transparent` 副本，直接清；
+      · 引擎进程（mitmdump）：面板清不到，只把信号文件里的代号 +1，
+        引擎在请求路径上发现代号变了就清一次（`transparent._maybe_apply_mapping_reset`）。
+
+    必须显式 confirm：它会让当前对话里携带的历史占位符**全部还原不了**
+    （原样透传给客户端，直到被重新扫描到），这个后果必须由用户确认，
+    不能因为“只是个清缓存”而在 UI 上一键误点。
+    """
+    body = request.get_json(silent=True) or {}
+    confirmed = request.args.get("confirm", "").lower() == "true" or body.get("confirm") is True
+    if not confirmed:
+        return jsonify({"ok": False, "error": "清空内存映射需显式确认：传 confirm=true"}), 400
+    local = {"sessions": 0, "recent_entries": 0}
+    try:
+        import transparent as tr
+        local = tr.reset_mappings(reason="panel-endpoint")
+    except Exception:
+        # panel 进程拿不到 transparent 不影响引擎侧：代号照样要 +1
+        pass
+    gen = _es_request_mapping_reset()
+    if gen < 0:
+        return jsonify({"ok": False, "error": "写入引擎信号失败，引擎侧未清空"}), 500
+    # 面板侧已经把表清了（上面那一句），所以必须**把代号登记为已处理**：
+    # 否则面板进程会在下一个 `/api/ext/mask` 里把同一个代号再消费一次，
+    # 而那时表里已经是清空之后新产生的映射 —— 用户会看到“刚清完又少一次”。
+    try:
+        import transparent as tr
+        tr.ack_mapping_reset(gen)
+    except Exception:
+        pass
+    _emit_log("[panel] 内存映射清空：面板侧 sessions=%d entries=%d，引擎代号=%d"
+              % (int(local.get("sessions") or 0), int(local.get("recent_entries") or 0), gen))
+    return jsonify({
+        "ok": True,
+        "panel": local,
+        "engine_generation": gen,
+        # 引擎是否已经真的执行了，面板无法在此刻确认（信号是异步消费的）。
+        # 如实回传这句话，不让 UI 把“已发出”包装成“已生效”。
+        "engine_applied": "pending",
+        "hint": "引擎会在下一个请求到达时清空；已清空的映射无法恢复，历史占位符需重新扫描后才会重新可用。",
+    })
+
+
+@app.get("/api/mappings/state")
+def api_mappings_state():
+    """内存映射的当前规模（清空按钮旁边要显示“现在有多少东西可清”）。
+
+    引擎侧的计数取运行指标快照（`engine-runtime.json`，请求路径每 30s 刷新一次），
+    所以它是**可能过期**的：面板侧一并回传 `engine_stale` 供 UI 如实标注，
+    而不是把过期数据当实时值展示。
+    """
+    out = {"ok": True, "panel": {}, "engine": {}, "engine_stale": True,
+           "engine_generation": _es_mapping_reset_generation()}
+    try:
+        import transparent as tr
+        out["panel"] = tr.mapping_stats()
+    except Exception:
+        out["panel"] = {}
+    try:
+        snap = _read_engine_metrics() or {}
+        gen_at = int(snap.get("generated_at") or 0)
+        out["engine"] = snap.get("mappings") or {}
+        out["engine_generated_at"] = gen_at
+        out["engine_stale"] = bool(snap.get("stale", True))
+    except Exception:
+        pass
+    return jsonify(out)
+
+
+@app.post("/api/stats/clear")
+def api_stats_clear():
+    """清空**数字统计摘要**（§D3.3）：与「清空日志」「清空审计」是三个独立动作。
+
+    默认清日志保留数字统计（趋势图不会因为清日志归零）；想把趋势也清掉必须
+    显式调本接口。刻意**不**提供把它们合起来的「彻底清除」按钮：那会让只想清
+    对话日志的用户把几个月的趋势一起抹掉，而这是不可逆的。
+    """
+    try:
+        return jsonify(clear_stats())
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
 @app.post("/api/restore")
@@ -7861,7 +8424,7 @@ _SCRUB_PATTERNS = _SCRUB_CREDENTIAL_PATTERNS + _SCRUB_PII_PATTERNS
 def _scrub_text(s, limit=0):
     """自由文本打码。失败返回占位串而不是原文——scrub 出错时放行原文是最坏结果。"""
     try:
-        out = str(s)
+        out = onboarding.scrub(str(s))
         for pat, rep in _SCRUB_PATTERNS:
             out = pat.sub(rep, out)
         if limit and len(out) > limit:
@@ -8258,7 +8821,9 @@ def _project_engine_metrics(eng):
     }
     for section, keys in {
         "heartbeat": ("generated_at", "loop_lag_ms"),
-        "transport": ("connections", "inflight", "finished", "evictions", "observation_errors",
+        "transport": ("connections", "inflight", "finished", "evictions",
+                      "cancelled_after_complete",
+                      "observation_errors",
                       "timers", "oldest_request_age_s", "observation_installed"),
     }.items():
         raw = eng.get(section)
@@ -8502,7 +9067,10 @@ def _diagnostics_payload(error_limit=60):
                 "block_source", "degraded", "stream_degraded_reason", "upstream_ms",
                 "engine_queue_depth", "engine_queue_bytes", "engine_busy", "queue_wait_ms",
                 "aux_wait_ms",
-                "ner_global_throttled", "ner_sem_wait_ms")
+                "ner_global_throttled", "ner_sem_wait_ms",
+                # 失败归因（批次 8 / P0-5）：诊断包里的 recent_errors 正是用户
+                # “发过来问为什么失败”的那一段，没有责任方就只能靠肉眼猜。
+                "failure_owner", "error_type")
         rows = []
         for e in fetch_events(since=0, limit=600, max_limit=EXPORT_MAX):
             if e.get("type") not in bad and int(e.get("http_status") or 0) < 400:
@@ -8587,17 +9155,140 @@ def api_engine_metrics():
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
 
 
+_VERIFICATION_LOCK = threading.RLock()
+_VERIFICATION_EPOCH = secrets.token_hex(16)
+_DIAGNOSTIC_PREVIEWS = {}
+_DIAGNOSTIC_LOCK = threading.Lock()
+
+
+def _verification_fingerprint(cfg):
+    # Restart/config changes invalidate evidence. Do not expose this digest or the
+    # input: upstream configuration can contain credentials and private names.
+    context = {'epoch': _VERIFICATION_EPOCH, 'upstreams': cfg.get('upstreams'),
+               'ext_bridge_enabled': cfg.get('ext_bridge_enabled'),
+               'capture_mode': cfg.get('capture_mode'), 'proxy_port': cfg.get('proxy_port'),
+               'generation': state.get('generation'), 'started_at': state.get('started_at'),
+               'running': state.get('proxy_running')}
+    return hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+
+
+def _verification_ext_window_active():
+    """During an explicit weak-correlation window, retain even clean extension requests."""
+    path = DATA_ROOT / 'onboarding-verification.json'
+    if not path.exists():
+        return False
+    try:
+        record = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        # Evidence collection must not block an otherwise valid extension request.
+        _emit_log('[panel] verification state unavailable: ' + type(error).__name__)
+        return False
+    if not isinstance(record, dict):
+        return False
+    return (record.get('ingress') == 'ext' and record.get('mode') == 'window'
+            and record.get('status') == 'pending' and record.get('expires_at', 0) > time.time())
+
+
+def _save_verification(record):
+    path = DATA_ROOT / 'onboarding-verification.json'
+    temporary = path.with_suffix('.tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+        json.dump(record, stream)
+    os.replace(temporary, path)
+
+
+@app.route('/api/onboarding/verification', methods=['GET', 'POST'])
+def api_onboarding_verification():
+    with _VERIFICATION_LOCK:
+        cfg = load_config()
+        fingerprint = _verification_fingerprint(cfg)
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            if not isinstance(data, dict):
+                return jsonify(ok=False, error='invalid_verification_scope'), 400
+            ingress, upstream = data.get('ingress', 'proxy'), data.get('upstream', '')
+            if not isinstance(upstream, str) or (upstream and (ingress != 'proxy' or upstream not in
+                    {u.get('name') for u in cfg.get('upstreams', [])})):
+                return jsonify(ok=False, error='invalid_verification_scope'), 400
+            try:
+                latest = fetch_events(limit=1)
+                record, marker = onboarding.create(ingress, upstream, fingerprint,
+                                                    latest[0]['seq'] if latest else 0,
+                                                    data.get('mode', 'marker'))
+            except ValueError:
+                return jsonify(ok=False, error='invalid_verification_scope'), 400
+            _save_verification(record)
+            response = jsonify(ok=True, marker=marker, **onboarding.public(record))
+        else:
+            path = DATA_ROOT / 'onboarding-verification.json'
+            if not path.exists():
+                return jsonify(ok=True, status='idle')
+            record = json.loads(path.read_text(encoding='utf-8'))
+            expected = request.args.get('id')
+            if expected and expected != record['id']:
+                return jsonify(ok=False, error='verification_replaced'), 409
+            rows = fetch_events(since=record['cursor'], limit=1000, ascending=True,
+                                ingress=record['ingress'], event_type='MASK') if record['status'] == 'pending' else []
+            record = onboarding.advance(record, rows, fingerprint, exhausted=len(rows) < 1000)
+            _save_verification(record)
+            response = jsonify(ok=True, **onboarding.public(record))
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+
+def _diagnostic_body(payload):
+    # Final recursive boundary also covers names/paths/other metadata, not just
+    # free-text logs. Correlation digests must not leave in a diagnostic bundle.
+    return json.dumps(onboarding.scrub(payload, diagnostic=True), ensure_ascii=False, indent=2)
+
+
+def _preview_body(preview_id):
+    with _DIAGNOSTIC_LOCK:
+        cached = _DIAGNOSTIC_PREVIEWS.get(preview_id)
+        if cached and cached['expires_at'] > time.time():
+            return cached['body']
+        _DIAGNOSTIC_PREVIEWS.pop(preview_id, None)
+    return None
+
+
+@app.post('/api/diagnostics/preview')
+def api_diagnostics_preview():
+    body = _diagnostic_body(_diagnostics_payload())
+    now = time.time()
+    preview_id = secrets.token_hex(16)
+    with _DIAGNOSTIC_LOCK:
+        for key in list(_DIAGNOSTIC_PREVIEWS):
+            if _DIAGNOSTIC_PREVIEWS[key]['expires_at'] <= now:
+                del _DIAGNOSTIC_PREVIEWS[key]
+        while len(_DIAGNOSTIC_PREVIEWS) >= 3:
+            del _DIAGNOSTIC_PREVIEWS[next(iter(_DIAGNOSTIC_PREVIEWS))]
+        _DIAGNOSTIC_PREVIEWS[preview_id] = {'body': body, 'expires_at': now + 600}
+    response = jsonify(ok=True, id=preview_id, body=body, size=len(body.encode('utf-8')),
+                       generated_at=now, expires_at=now + 600)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 @app.get("/api/diagnostics")
 def api_diagnostics():
     """生成诊断包（JSON）。故意不做额度限制——报障的绝大多数是免费用户，
     把诊断能力关在付费墙后面等于自断故障来源。"""
+    if 'preview_id' in request.args:
+        body = _preview_body(request.args['preview_id'])
+        if body is None:
+            return jsonify(ok=False, error='diagnostic_preview_expired'), 410
+        resp = make_response(body)
+        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     try:
         payload = _diagnostics_payload()
     except Exception as e:
         # 整包失败也要给出点东西，否则用户连「生成失败」都没法报
         payload = {"schema": 1, "generated_at": int(time.time()), "masked": True,
                    "fatal": _safe_public_text(e, 240), "app": {"version": __version__}}
-    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    body = _diagnostic_body(payload)
     resp = make_response(body)
     resp.headers["Content-Type"] = "application/json; charset=utf-8"
     return resp
@@ -8612,11 +9303,21 @@ def api_diagnostics_save():
     只保留最近 5 份，避免用户反复点击堆一堆大文件。
     """
     try:
-        payload = _diagnostics_payload()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify(ok=False, error='invalid_request'), 400
+        if 'preview_id' in data:
+            if not isinstance(data['preview_id'], str):
+                return jsonify(ok=False, error='invalid_request'), 400
+            body = _preview_body(data['preview_id'])
+            if body is None:
+                return jsonify(ok=False, error='diagnostic_preview_expired'), 410
+        else:
+            body = _diagnostic_body(_diagnostics_payload())
         import datetime
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         path = DATA_ROOT / f"diagnostics-{ts}.json"
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_bytes(body.encode('utf-8'))
         try:
             for old in sorted(DATA_ROOT.glob("diagnostics-*.json"))[:-5]:
                 old.unlink(missing_ok=True)
@@ -8625,6 +9326,63 @@ def api_diagnostics_save():
         return jsonify({"ok": True, "path": str(path), "size": path.stat().st_size})
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+
+
+# 注意：本辅助函数必须在**装饰器之前**定义。写在 `@app.get(...)` 与
+# `def api_skill_bundle():` 之间时，装饰器会把辅助函数注册成路由（路由返回候选
+# 列表而不是 zip），而真正的处理函数从未被调用——2026-10-04 抽函数时踩过。
+def _skill_bundle_candidates():
+    """Skill 包的候选目录（按优先级）。
+
+    三种部署形态各占一条，**少哪一条，那条路径上的下载按钮就是 500**：
+      · 打包态（PyInstaller）：spec 的 datas 把包放到 `_BUNDLE_ROOT/skill_bundle`；
+      · 容器态：Dockerfile 把 `engine/` 拷成 `/app/*`，所以 `_BUNDLE_ROOT` 是 `/app`，
+        包在 `/app/agent-bundle/maskit-placeholders`；
+      · 源码态：仓库根的 `agent-bundle/maskit-placeholders`（`engine/` 的上一级）。
+
+    ⚠️ 容器态那条**不能**用 `_BUNDLE_ROOT.parent` 代替：容器里 `__file__` 是 `/app/panel.py`，
+    它的上一级是 `/` 而不是仓库根，2026-10-04 实测因此漏掉整条容器路径
+    （`GET /api/skill/bundle` 在 Docker 部署里恒 500）。
+    环境变量 `MASKIT_SKILL_BUNDLE` 优先，供非标部署显式指定。
+    """
+    candidates = []
+    override = os.environ.get("MASKIT_SKILL_BUNDLE")
+    if override:
+        candidates.append(Path(override))
+    candidates += [
+        _BUNDLE_ROOT / "skill_bundle",                                       # 打包态
+        _BUNDLE_ROOT / "agent-bundle" / skill_bundle.BUNDLE_DIRNAME,          # 容器态
+        _BUNDLE_ROOT.parent / "agent-bundle" / skill_bundle.BUNDLE_DIRNAME,   # 源码态
+    ]
+    return candidates
+
+
+@app.get("/api/skill/bundle")
+def api_skill_bundle():
+    """下载占位符 Skill 包（行为契约）zip。
+    为什么不只放 Release：装到 Program Files / /Applications 的用户拿不到仓库文件，
+    也不一定会去翻 Release。包内容与 Release 资产**同源**——同一份
+    `engine/skill_bundle.py` 打同一份 `agent-bundle/maskit-placeholders`，不存在
+    第二条打包路径（写两份 = 下载到的包与 Release 上的包会漂移）。
+
+    必须挂在 `/api/` 前缀下：`api_guard` 只守这个前缀，挂到根空间等于把"谁能
+    下载"交给任何人（`AGENTS.md` §3.7 的命名空间红线）。
+
+    打包在内存里完成、不落盘：安装目录在 Windows 上可能是只读的，而写临时文件
+    还要自己管并发与清理。
+    """
+    try:
+        root = skill_bundle.find_bundle(*_skill_bundle_candidates())
+        data = skill_bundle.build_zip_bytes(root)
+    except Exception as e:
+        # 包缺失或打包失败不能静默：面板上表现为"下载按钮点了没反应"最难排。
+        return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 500
+    resp = make_response(data)
+    resp.headers["Content-Type"] = "application/zip"
+    resp.headers["Content-Disposition"] = (
+        'attachment; filename="Maskit_%s_skill.zip"' % __version__)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def start_panel_server(open_browser_on_start=True):
@@ -8637,8 +9395,15 @@ def start_panel_server(open_browser_on_start=True):
     # 启动时确保数据库就绪：自动建表/迁移，并在库文件损坏时自动隔离并重建自愈
     _ensure_db()
     load_config()  # 预热配置并同步运行时全局状态
+    # 重启即关闭限时排障（§D1：trace 是临时状态，不能跨重启）。必须在
+    # load_config 之后：本调用不依赖内存模式，但顺序上放在配置就绪后更直观。
+    _es_stop_log_trace()
     prune_event_log()
     preload_events()
+    # 保留策略后台驱动（§D3.4）：不再只依赖「用户打开日志页」触发。
+    _log_prune_timer = threading.Timer(1800, _log_prune_loop)
+    _log_prune_timer.daemon = True
+    _log_prune_timer.start()
     # 价格目录后台自动同步（启动时 + 每 7 天过期刷新；失败静默，不阻塞启动）
     _maybe_auto_sync_prices()
     # 定期复查：桌面壳常驻数周不重启，只在启动时判断一次的话，开了

@@ -111,14 +111,20 @@ class InitAtomicityTests(unittest.TestCase):
         self.assertEqual(ner.status()["governor"]["intra_threads"], 2)
 
     def test_intra_threads_default_is_bounded_by_cpu(self):
-        with mock.patch.object(os, "cpu_count", lambda: 2):
+        """默认线程数按**实际可用**核数取，上限 4。
+
+        判据从 os.cpu_count() 换成 effective_cpu_count() 是 2026-10-04 批次 8 的
+        有意改动：容器 `--cpus=2` 跑在 16 核宿主上时前者报 16（于是开 4 个 ONNX
+        线程把 CFS 配额吃满），后者报 2。测试跟着钉住新判据。
+        """
+        with mock.patch.object(ner, "effective_cpu_count", lambda: 2):
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("MASKIT_NER_THREADS", None)
                 self.assertEqual(ner._intra_threads(), 2)
-        with mock.patch.object(os, "cpu_count", lambda: 64):
+        with mock.patch.object(ner, "effective_cpu_count", lambda: 64):
             os.environ.pop("MASKIT_NER_THREADS", None)
             self.assertEqual(ner._intra_threads(), 4, "不该超过 4 线程（再多只会互相抢核）")
-        with mock.patch.object(os, "cpu_count", lambda: None):
+        with mock.patch.object(ner, "effective_cpu_count", lambda: 0):
             os.environ.pop("MASKIT_NER_THREADS", None)
             self.assertGreaterEqual(ner._intra_threads(), 1)
 
@@ -216,7 +222,7 @@ class GovernorTests(unittest.TestCase):
     def test_long_leaf_still_reaches_inference_on_a_full_bucket(self):
         """长文本叶子**必须**能进入推理（0.6.0 修的关键回归点）。
 
-        背景：单条估价 = 字数 × `_EST_MS_PER_CHAR`（0.28ms/字），而桶容量 = 每秒
+        背景：单条估价 = 字数 × `_EST_CPU_MS_PER_CHAR`（CPU 毫秒/字），而桶容量 = 每秒
         补充量。若拿**未夹的**估价去 `_bucket_take`，那么超过容量/单价的叶子**永远**
         拿不到额度 —— 不是"负载降级"，而是"这些文本永久不做语义识别"，用户只看到
         计数上涨。
@@ -229,7 +235,7 @@ class GovernorTests(unittest.TestCase):
         text = "项目进度记录与联系人信息说明，含机构名称、详细地址与业务备注等内容。" * 200
         text = text[: ner.MAX_TEXT_CHARS]
         with mock.patch.object(ner, "_NER_BUDGET_MS_PER_S", 300):
-            self.assertGreater(len(text) * ner._EST_MS_PER_CHAR,
+            self.assertGreater(len(text) * ner._EST_CPU_MS_PER_CHAR,
                                ner._NER_BUDGET_MS_PER_S, "用例前提：估价必须超过桶容量")
             reached = []
             # 注意：`_decode_chunks` 返回二元组 (entities, complete)，桩必须同形状

@@ -62,6 +62,11 @@ GATES = [
     # 扩展 zip 是 Release 上唯一的「网页版 AI」入口：ChatGPT / Claude 没有 Base URL 可配，
     # 只能靠扩展把页面请求送进引擎。打包脚本坏掉＝用户下载不到扩展，且要等发版才暴露。
     {"group": "version", "name": "Browser extension package builds", "cwd": ".", "argv": ["{python}", "scripts/pack-extension.py", "--check"]},
+    # 占位符 Skill 包是行为契约的**唯一**分发形态（Release zip 与面板 /api/skill/bundle
+    # 共用 engine/skill_bundle.py 同一份实现）。契约装不上＝模型自己发明规则，
+    # 而这条路径要等用户真的去装才暴露；`--check` 同时卡住渲染漂移与发布审计正则。
+    {"group": "version", "name": "Placeholder skill package builds", "cwd": ".",
+     "argv": ["{python}", "scripts/pack-skill.py", "--check"]},
 ]
 
 GROUPS = ["python", "frontend", "rust", "version"]

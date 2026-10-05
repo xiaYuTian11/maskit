@@ -5,7 +5,7 @@
 ## 代码与依赖
 
 - [ ] 工作区没有运行时文件、诊断包、事件库、`.env` 或凭据。
-- [ ] `python scripts/verify-all.py` 全绿（15 项，本地与 CI 同一份清单；分组用 `--list` 查看）。
+- [ ] `python scripts/verify-all.py` 全绿（**17 项**，本地与 CI 同一份清单；分组用 `--list` 查看）。
       `build.ps1` / `release.ps1` 内部已调用它，无需手工重跑，但发版前要确认输出里没有
       `verify-all: FAIL`。
 - [ ] `python scripts/check-version.py`，**7 处**版本号一致（`panel.py` / `tauri.conf.json` /

@@ -31,6 +31,7 @@ dist_releases/
 dist_engine/
 build_engine/
 dist_extension/
+dist_skill/
 build_temp/
 *.spec.bak
 proxy_token
@@ -57,6 +58,11 @@ engine/config.json
 config.json.bak-*
 model_prices_cache.json
 engine-runtime.json
+# 运行期信号（限时排障截止时间 + 清空映射代号）。开发态下 `_DATA_ROOT` 就是 engine/，
+# 所以它会落在源码目录里；不忽略就会在 `git status` 里冒出来 → 被择手提交。
+# `log-trace.json` 是 0.7.0 更名前的旧文件名，一并留着以免旧文件被误入库。
+engine-signals.json
+log-trace.json
 diagnostics-*.json
 shield-env-backup.json
 debug-*.log
@@ -123,4 +129,6 @@ docs/*-REFERENCES.md
 docs/DESIGN-*.md
 docs/AUDIT-*.md
 docs/RESEARCH-*.md
-
+# Local ingress verification evidence (contains no marker or request body).
+onboarding-verification.json
+onboarding-verification.tmp

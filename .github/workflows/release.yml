@@ -351,6 +351,10 @@ jobs:
           required=(
             resources/engine/MaskitEngine
             resources/engine/_internal/transparent.py
+            resources/engine/_internal/inspection.py
+            resources/engine/_internal/protocol_contracts.py
+            resources/engine/_internal/onboarding.py
+            resources/engine/_internal/skill_bundle/SKILL.md
             resources/engine/_internal/models/ner_mini_zh/model_quantized.onnx
           )
           listing="$RUNNER_TEMP/package-listing.txt"
@@ -454,10 +458,35 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # 占位符 Skill 包：与扩展同理，是「不在安装包里的用户可见产物」。
+  # 它是行为契约的唯一分发形态——契约装不上时模型会自己发明规则
+  # （把占位符换成 sk-test-*、对 token 做哈希、声称被阻断的任务已完成）。
+  # 纯静态文件 + stdlib 脚本，独立 job 以免跟着 120 分钟的桌面矩阵重跑。
+  skill:
+    name: Placeholder skill package
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Build skill zip
+        run: python scripts/pack-skill.py --out dist_skill
+      - name: Upload skill bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maskit-skill
+          path: dist_skill
+          if-no-files-found: error
+          retention-days: 14
+
   release-draft:
     name: GitHub Release draft
-    # 桌面端与扩展产物就绪即可直接发布，不被 Docker 多架构镜像构建阻塞
-    needs: [desktop, extension]
+    # 桌面端、扩展与 Skill 产物就绪即可直接发布，不被 Docker 多架构镜像构建阻塞
+    needs: [desktop, extension, skill]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30

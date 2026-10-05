@@ -17,7 +17,11 @@ shield.pid
 shield-env-backup.json
 model_prices_cache.json
 engine-runtime.json
+engine-signals.json
+log-trace.json
 diagnostics-*.json
+onboarding-verification.json
+onboarding-verification.tmp
 engine/config.json
 # 冒烟测试语料/脚本（根目录），不是运行时资产。
 _smoke_data/

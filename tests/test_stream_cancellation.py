@@ -137,9 +137,14 @@ class StreamCancellationTests(unittest.TestCase):
         driver.dispatch(events.HookCompleted(response))
         self.assertFalse(any(isinstance(c, HttpErrorHook) for c in driver.commands))
         self.assertFalse(driver.layer.streams)
-        self.assertEqual(self.g.snapshot(response.flow)["phase"], "response_stream")
+        # 2026-10-02 归因修正：证据已定论（phase=complete）之后才到的客户端 FIN，
+        # **不得**把 phase 写回完成前的 response_stream —— 那会把「已完成」从证据里
+        # 抹掉，生产日志上表现为一整屏无从归因的 CANCEL（详见 tests/test_cancel_attribution.py）。
+        self.assertEqual(self.g.snapshot(response.flow)["phase"], "complete")
+        self.assertTrue(self.g.snapshot(response.flow)["cancelled_after_complete"])
         self.assertEqual(self.g.snapshot(response.flow)["reason"], "client_disconnected")
         self.assertEqual(self.g.stats()["finished"], 1)
+        self.assertEqual(self.g.stats()["cancelled_after_complete"], 1)
 
     def test_baseline_late_public_hook_and_suppressed_response_error(self):
         self.g.done()

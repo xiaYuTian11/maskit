@@ -129,6 +129,20 @@ def _cgroup_mem_mb():
     return None
 
 
+def _effective_cpu_count():
+    """本进程实际可用核数；拿不到 ner_engine（拆包运行）就回落到宿主核数。
+
+    判据本体在 `ner_engine.effective_cpu_count()`，这里只做一次带兵底的转发：
+    自检进程（panel）与引擎进程可能不同，不能假设模块一定在。
+    不要 import transparent —— panel 不装 mitmproxy，一 import 就把自检打死了。
+    """
+    try:
+        import ner_engine
+        return max(1, int(ner_engine.effective_cpu_count()))
+    except Exception:
+        return max(1, int(os.cpu_count() or 2))
+
+
 def probe_environment(data_root=None):
     """环境探测：容器 / CPU 配额 / 限流计数 / 内存上限 / 磁盘 / 版本。
 
@@ -136,6 +150,9 @@ def probe_environment(data_root=None):
     """
     out = {
         "cpu_count": os.cpu_count(),
+        # 实际可用核数（cgroup 配额 ∩ 亲和性掩码）：进程内所有池宽 / ONNX 线程数 /
+        # 预算容量都是按它算的。报上去才能回答「为什么 2 核机器上 CPU 百分百」。
+        "effective_cpu_count": _effective_cpu_count(),
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "arch": platform.machine(),
@@ -348,7 +365,8 @@ def _s12(ctx):
 def _s20(ctx):
     if not _dig(ctx, "ner.enabled", False):
         return None
-    cores = _dig(ctx, "env.cgroup_cpu_quota") or _dig(ctx, "env.cpu_count")
+    cores = (_dig(ctx, "env.effective_cpu_count")
+             or _dig(ctx, "env.cgroup_cpu_quota") or _dig(ctx, "env.cpu_count"))
     # 取不到核数就**不判**：把"没数据"当成"核少"会误报一次高危，而自检的高危
     # 是要用户立刻动手的（宁可少报一条，也不要让结论页失去可信度）。
     if cores is None or _num(cores) <= 0 or _num(cores) > 2:

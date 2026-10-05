@@ -21,6 +21,8 @@ PyInstaller 入口不能带参数，本文件包装 panel 启动逻辑，复刻 
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
 import os
 import sys
+import threading
+import time
 
 # PyInstaller 在 Windows GUI 模式（console=False / windowed）下，若无依附控制台，
 # sys.stdin / sys.stdout / sys.stderr 会被操作系统与运行时置为 None。
@@ -99,6 +101,32 @@ def _warn_if_ner_unavailable() -> None:
         pass          # 预检失败绝不阻断启动
 
 
+def _warmup_ner_async() -> None:
+    """后台预热语义模型（只在配置开启且模型就绪时）。
+
+    为什么放后台线程：模型加载 + 首窗推理要数秒，放在主线程会拖晚面板可用；
+    而懒加载会把这份钱记在**第一个用户请求**的 `mask_ms` 上（长会话下还会直接
+    撞 `CALL_BUDGET_S` → 刚启动那几轮漏码）。预热失败不影响任何功能，
+    请求侧仍会懒加载重试。
+    """
+    def _run() -> None:
+        try:
+            import ner_engine
+            cfg = panel.load_config()
+            if not cfg.get("ner_enabled"):
+                return
+            if not ner_engine.is_ner_available():
+                return
+            started = time.monotonic()
+            ok = ner_engine.warmup()
+            panel._emit_log("[engine] 语义识别预热%s（%.1fs）"
+                            % ("完成" if ok else "未生效", time.monotonic() - started))
+        except Exception:  # noqa: BLE001 —— 预热失败绝不影响引擎可用性
+            pass
+
+    threading.Thread(target=_run, daemon=True, name="maskit-ner-warmup").start()
+
+
 def main() -> None:
     # -1. mitmdump 子进程模式：必须在任何 panel 初始化之前判断并接管，
     #     否则会在代理子进程里又起一个 Flask 面板、抢同一个端口。
@@ -123,6 +151,9 @@ def main() -> None:
     # models/、容器挂载漏了）时，功能会静默降级成"开了但没做"，用户只能靠
     # 结果反推 —— 启动日志 + 自检 S21 两处同时说清楚。
     _warn_if_ner_unavailable()
+
+    # 0.8 语义识别预热（批次 8）：开了 NER 才做，后台线程，不阻塞面板启动。
+    _warmup_ner_async()
 
     # 1.5 代理自启/fallback：Flask 主线程阻塞期间由后台线程触发
     threading.Thread(target=_autostart, daemon=True).start()

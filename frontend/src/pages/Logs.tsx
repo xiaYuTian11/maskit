@@ -19,8 +19,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Download, Trash2, RefreshCw, Search, HelpCircle, Loader2, X, Globe, FileText } from 'lucide-react'
-import { getLogs, exportLogs, clearLogs } from '@/api/logs'
+import { Download, Trash2, RefreshCw, Search, HelpCircle, Loader2, X, Globe, FileText, History } from 'lucide-react'
+import { getLogs, exportLogs, clearLogs, getLogMode, setLogMode, startLogTrace, stopLogTrace } from '@/api/logs'
 import { getAuditEvents } from '@/api/audit'
 import { EventTypeIcon, EVENT_TYPE_META } from '@/components/events/EventTypeIcon'
 import { EventDetailDialog } from '@/components/events/EventDetailDialog'
@@ -48,7 +48,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { toast } from '@/lib/toast'
 import { isTauri } from '@/lib/shield-fetch'
-import type { ShieldEvent, AuditEvent, AuditSeverity } from '@/types/api'
+import type { ShieldEvent, AuditEvent, AuditSeverity, LogMode, LogModeState } from '@/types/api'
 import dayjs from 'dayjs'
 import { cn } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
@@ -59,6 +59,12 @@ import { useVisibility } from '@/lib/useVisibility'
 /** 审计信号行合并进主列表（AGENTS.md：auditRows 前端合并，不改 events 表） */
 // 稳定空数组引用：避免 data 为 undefined 时每 render 创建新空数组导致 useMemo 失效
 const EMPTY_LIST: readonly never[] = []
+
+/** 秒 → mm:ss（限时排障倒计时）。超过一小时也不出现 hh：上限就是 60 分钟。 */
+function fmtCountdown(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  return `${Math.floor(s / 60).toString().padStart(2, '0')}:${(s % 60).toString().padStart(2, '0')}`
+}
 
 /** 事件累积列表的内存封顶（与服务端导出上限 2000 对齐）；轮询游标另存，不受截断影响 */
 const MAX_LOG_LIST = 2000
@@ -95,6 +101,12 @@ interface AuditRow {
   block_source?: string
   /** 靠宽松兜底（模型剥了花括号）修回来的占位符数。成功路径，但值得看见 */
   degraded?: number
+  /**
+   * 批次 2 统一检测口径：处置结论与完整度。列表必须能区分「已扫描未命中 / 明确直通 /
+   * 已阻断 / 检测不完整」——它们此前都长得像「什么都没发生」。
+   */
+  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'passthrough'
+  completeness?: 'complete' | 'partial' | 'failed' | 'not_applicable' | 'unknown'
   stream_actual?: string
   model?: string
   client_app?: string | number
@@ -126,6 +138,12 @@ interface LogsCache {
   tail: string[]
   /** 已消费到的最大 seq：列表被 MAX_LOG_LIST 截断后，下一轮轮询仍从这里续，不会重复拉取 */
   cursor: number
+  /** 反向游标（§D3.1）：已经翻到的最早 seq（再往前翻就用它作 before_seq） */
+  olderCursor?: number
+  /** 更早处是否还有符合筛选的行（决定「加载更早」是否可用） */
+  hasOlder?: boolean
+  /** 时间锚点（epoch 秒）：非空表示当前列表来自「某时间点之前」的查询 */
+  timeAnchor?: number
 }
 
 type LogRow = (AuditRow & { _audit: true }) | MergedEvent
@@ -158,7 +176,29 @@ export default function LogsPage() {
   const [pageSize, setPageSize] = useState(50)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  // —— 反向游标（§D3.1）：往回翻历史 ——
+  // 必须声明在 useQuery 之前：查询配置里的 refetchInterval 会引用 historyMode，
+  // 写在后面就是渲染期的 TDZ（Cannot access before initialization）。
+  const [historyMode, setHistoryMode] = useState(false)
+  const [olderLoading, setOlderLoading] = useState(false)
+  const [hasOlder, setHasOlder] = useState(false)
+  /** 时间锚点（epoch 秒）：只看这个时间**之前**的记录；null = 不限时间 */
+  const [timeAnchor, setTimeAnchor] = useState<number | null>(null)
+  /** datetime-local 输入框的值（本地时间字符串），仅作为输入缓存 */
+  const [beforeTsInput, setBeforeTsInput] = useState('')
+
   // 从 URL searchParams 同步初始筛选条件（支持外部/首页携带参数跳转）
+  // 筛选变化时重置反向翻页状态：历史游标是「当前筛选下」的定位，
+  // 换了筛选器还沿用旧游标会把两个口径的页拼在一起（条数对不上）。
+  useEffect(() => {
+    setHistoryMode(false)
+    setHasOlder(false)
+    // 时间锚点也是「当前筛选下」的定位：换了筛选器还沿用旧锚点，会得到一个
+    // 既不是新筛选的全部、也不是旧筛选的全部的中间集合（用户看到条数莫名变化）。
+    setTimeAnchor(null)
+    setBeforeTsInput('')
+  }, [filterType, sensitive, q, fulltext, ingress])
+
   useEffect(() => {
     const urlQ = (searchParams.get('q') || '').trim()
     const urlType = (searchParams.get('type') || '').trim().toUpperCase()
@@ -192,6 +232,19 @@ export default function LogsPage() {
     () => ['logs', { filterType, sensitive, q, fulltext, ingress }] as const,
     [filterType, sensitive, q, fulltext, ingress],
   )
+  // 筛选参数只写一份（轮询/前缀/加载更早/按时间回看四处共用）：
+  // 各写各的必然漂移——实测教训就是导出一致性（列表只看扩展、导出却是全量）。
+  const filterParams = useMemo(() => ({
+    type: filterType === FILTER_ALL || filterType === 'EXT_ALL' || filterType === 'PASS_COMBINED'
+      ? undefined : filterType,
+    sensitive,
+    q,
+    fulltext,
+    ingress: (filterType === 'EXT_ALL'
+      ? 'ext'
+      : ingress === INGRESS_ALL ? undefined : ingress) as 'proxy' | 'ext' | undefined,
+  }), [filterType, sensitive, q, fulltext, ingress])
+
   const logsQuery = useQuery<LogsCache>({
     queryKey: logsKey,
     queryFn: async ({ queryKey, signal }) => {
@@ -210,11 +263,7 @@ export default function LogsPage() {
         const resp = await getLogs({
           since,
           limit: 200,
-          type: filterType === FILTER_ALL || filterType === 'EXT_ALL' || filterType === 'PASS_COMBINED' ? undefined : filterType,
-          sensitive,
-          q,
-          fulltext,
-          ingress: filterType === 'EXT_ALL' ? 'ext' : ingress === INGRESS_ALL ? undefined : (ingress as 'proxy' | 'ext'),
+          ...filterParams,
           slim: true,
         }, signal)
         tail = resp.tail ?? tail
@@ -246,12 +295,19 @@ export default function LogsPage() {
       // 内存封顶：长时悬挂的 Logs 页无限累积会持续涨内存，且与服务端导出上限（2000）对齐。
       // 只截断展示窗口，不丢轮询游标（cursor 单独存），也不会因此重复拉取历史。
       if (list.length > MAX_LOG_LIST) list = list.slice(list.length - MAX_LOG_LIST)
-      return { list, tail, cursor }
+      // 反向翻页游标必须原样带回去：轮询每 3s 重写一次缓存，漏带等于把用户刚
+      // 翻出来的历史位置每次重置回顶部。
+      return { list, tail, cursor, olderCursor: prev?.olderCursor, hasOlder: prev?.hasOlder,
+               timeAnchor: prev?.timeAnchor }
     },
     // 本页单独配置：不走全局 30s 缓存，挂载即发
     staleTime: 0,
     refetchOnMount: 'always',
-    refetchInterval: hidden ? false : 3000,
+    // 历史模式下暂停实时轮询：用户在往回翻历史时，轮询会持续往尾部追加新事件，
+    // 把刚翻出来的旧页从展示窗口里挤出去（旧页会被 2000 条上限截掉）。
+    // 「往回看」与「盯实时」两个诉求本身互斥，暂停是诚实的选择，
+    // UI 上有明确的「回到实时」按钮，不是静默停更。
+    refetchInterval: hidden || historyMode ? false : 3000,
     refetchIntervalInBackground: false,
   })
 
@@ -261,6 +317,14 @@ export default function LogsPage() {
   // 导出 / 清空进行中（长耗时操作，需要即时反馈）
   const [exporting, setExporting] = useState(false)
   const [clearing, setClearing] = useState(false)
+
+  // —— 日志写入模式（§D1）——
+  // 模式必须作为「当前生效的事实」展示：最小模式下库里本来就没存正文，
+  // 用户不看到这个状态就会以为“详情弹窗空白”是 bug。
+  // 存整个 state（不只存模式名）：限时排障的**剩余时间**也在里面。
+  const [modeInfo, setModeInfo] = useState<LogModeState | null>(null)
+  const modeState: LogMode | null = modeInfo?.effective ?? null
+  const [modeBusy, setModeBusy] = useState(false)
 
   // 审计信号合并（POISON 过滤项 = SCAN_WARN + 审计信号）
   // queryKey 与审计页分开：两处 queryFn 不同，共用 key 会被 TanStack 按 key 去重
@@ -331,6 +395,169 @@ export default function LogsPage() {
     queryClient.invalidateQueries({ queryKey: ['logs'] })
   }, [queryClient, logsKey])
 
+  // 写入模式（§D1）：进页拉一次，不在 3s 轮询里带（模式是慢变量，
+  // 且它由本页自己改，改完当场刷新）。
+  const refreshMode = useCallback(() => {
+    getLogMode()
+      .then((s) => setModeInfo(s ?? null))
+      .catch(() => setModeInfo(null))
+  }, [])
+  useEffect(() => { refreshMode() }, [refreshMode])
+
+  // 限时排障的剩余倒计时：`trace_until` 由后端给出，前端只负责显示。
+  // 归零后**重新向后端问一次**而不是自己改状态：窗口结束可能是到点了，
+  // 也可能是用户在别处手动关的，前端猜一个都不如问一句准。
+  const [traceLeft, setTraceLeft] = useState<number | null>(null)
+  useEffect(() => {
+    const until = modeInfo?.effective === 'trace' ? Number(modeInfo.trace_until || 0) : 0
+    if (!until) {
+      setTraceLeft(null)
+      return
+    }
+    let timer: number | undefined
+    const tick = () => {
+      const left = Math.max(0, Math.floor(until - Date.now() / 1000))
+      setTraceLeft(left)
+      if (left <= 0) {
+        if (timer !== undefined) clearInterval(timer)
+        refreshMode()
+      }
+    }
+    tick()
+    timer = window.setInterval(tick, 1000)
+    return () => { if (timer !== undefined) clearInterval(timer) }
+  }, [modeInfo, refreshMode])
+
+  const changeMode = async (next: 'summary' | 'detailed') => {
+    if (modeBusy) return
+    setModeBusy(true)
+    try {
+      const s = await setLogMode(next)
+      setModeInfo(s ?? null)
+      toast(t(next === 'summary' ? 'logs.modeSummaryOn' : 'logs.modeDetailedOn'))
+      refresh()
+    } catch (e) {
+      toast(tf('logs.modeFail', { e: String(e) }), 'error')
+    } finally {
+      setModeBusy(false)
+    }
+  }
+
+  const toggleTrace = async () => {
+    if (modeBusy) return
+    setModeBusy(true)
+    try {
+      const was = modeState === 'trace'
+      const s = was ? await stopLogTrace() : await startLogTrace(15)
+      setModeInfo(s ?? null)
+      toast(t(was ? 'logs.traceOff' : 'logs.traceOn'))
+    } catch (e) {
+      toast(tf('logs.modeFail', { e: String(e) }), 'error')
+    } finally {
+      setModeBusy(false)
+    }
+  }
+
+  const backToLive = useCallback(() => {
+    // 时间锚点下必须**丢弃列表缓存**：那时 cache 里是一段不连续的历史切片，
+    // 而 `cursor` 还是实时值。直接 invalidate 会让 queryFn 拿「历史列表 + 从 cursor
+    // 增量拉取」拼在一起 —— 列表里同时躺着锚点前后的两批数据（实测会重现）。
+    // `loadOlder` 路径不需要这么做：它的列表是连续的，从 cursor 继续是对的。
+    if (timeAnchor) queryClient.setQueryData<LogsCache>(logsKey, undefined)
+    setHistoryMode(false)
+    setTimeAnchor(null)
+    setBeforeTsInput('')
+    setHasOlder(false)
+    // 回到实时就重新拉一遍，不依赖暂停期间漏掉的轮询
+    queryClient.invalidateQueries({ queryKey: ['logs'] })
+  }, [queryClient, timeAnchor, logsKey])
+
+  const loadOlder = useCallback(async () => {
+    if (olderLoading) return
+    const prev = queryClient.getQueryData<LogsCache>(logsKey)
+    const prevList = prev?.list ?? []
+    const oldest = prev?.olderCursor ?? prevList[0]?.seq
+    if (!oldest) return
+    setOlderLoading(true)
+    setHistoryMode(true)
+    try {
+      // 同 applyTimeAnchor：先取消在途轮询，否则它的写回会盖掉刚翻出来的旧页
+      // （轮询是向后累积，旧页会被写回到集的尾部或直接被截掉）。
+      await queryClient.cancelQueries({ queryKey: logsKey, exact: true })
+      const resp = await getLogs({
+        before_seq: oldest,
+        limit: 200,
+        ...filterParams,
+        slim: true,
+      })
+      const seen = new Set(prevList.map((e) => e.seq))
+      const older = resp.events.filter((e) => !seen.has(e.seq))
+      // 展示窗口上限与服务端导出上限对齐；满了就停在当前窗口并告知，
+      // 不静默裁掉一端又假装列表完整。
+      let list = [...older, ...prevList]
+      const capped = list.length > MAX_LOG_LIST
+      if (capped) list = list.slice(0, MAX_LOG_LIST)
+      queryClient.setQueryData<LogsCache>(logsKey, {
+        list,
+        tail: prev?.tail ?? [],
+        cursor: prev?.cursor ?? 0,
+        olderCursor: resp.before_cursor ?? oldest,
+        hasOlder: Boolean(resp.has_older) && !capped,
+        // 时间锚点下继续往前翻时，锚点本身**不能丢**：横幅要一直显示“正在查看
+        // X 之前的记录”，丢了就摊平成普通历史模式（用户会以为再往前的翻页失效了）。
+        timeAnchor: prev?.timeAnchor,
+      })
+      setHasOlder(Boolean(resp.has_older) && !capped)
+      if (resp.events.length === 0) toast(t('logs.olderNone'))
+    } catch (e) {
+      toast(tf('logs.olderFail', { e: String(e) }), 'error')
+    } finally {
+      setOlderLoading(false)
+    }
+  }, [olderLoading, queryClient, logsKey, filterParams, t, tf])
+
+  /**
+   * 按时间区间回看（§D3.1 的时间游标）：只在 `ts < anchor` 的记录里取最新一页。
+   * 与「加载更早」共用同一条历史通道，区别只是钡点：一个按 seq 往前翻，
+   * 一个直接跳到某个时间点之前。清空钡点（传 null）即回到实时。
+   */
+  const applyTimeAnchor = useCallback(async (ts: number | null) => {
+    if (ts === null) {
+      backToLive()
+      return
+    }
+    if (olderLoading) return
+    setOlderLoading(true)
+    setHistoryMode(true)
+    setTimeAnchor(ts)
+    try {
+      // 先取消在途的实时轮询：本函数用 `setQueryData` 直写缓存，而在途的 queryFn
+      // 完成后 React Query 会自己写回同一 key —— 两个写入顺序不定，
+      // 输给轮询时用户会看到「钡点设了但列表还是实时的」（实测会重现）。
+      // `cancelQueries` 会把已发出的请求 abort（queryFn 已把 signal 传给 getLogs）。
+      await queryClient.cancelQueries({ queryKey: logsKey, exact: true })
+      const resp = await getLogs({ before_ts: ts, limit: 200, ...filterParams, slim: true })
+      // 服务端返回的是一页（≤200），永远不会碰到 MAX_LOG_LIST，不写无效的截断分支。
+      queryClient.setQueryData<LogsCache>(logsKey, {
+        list: resp.events,
+        tail: resp.tail ?? [],
+        // 时间锚点下不参与实时轮询（historyMode 已暂停），cursor 保留原值即可；
+        // 回到实时时 backToLive 会把整份缓存丢掉重拉。
+        cursor: queryClient.getQueryData<LogsCache>(logsKey)?.cursor ?? 0,
+        olderCursor: resp.before_cursor ?? undefined,
+        hasOlder: Boolean(resp.has_older),
+        timeAnchor: ts,
+      })
+      setHasOlder(Boolean(resp.has_older))
+      if (resp.events.length === 0) toast(t('logs.timeAnchorEmpty'))
+      else toast(t('logs.timeAnchorApplied'))
+    } catch (e) {
+      toast(tf('logs.olderFail', { e: String(e) }), 'error')
+    } finally {
+      setOlderLoading(false)
+    }
+  }, [olderLoading, queryClient, logsKey, filterParams, backToLive, t, tf])
+
   const doExport = async () => {
     if (exporting) return
     setExporting(true)
@@ -340,7 +567,17 @@ export default function LogsPage() {
         sensitive,
         q,
         fulltext,
+        // 入口筛选必须传：不传就会“列表只看扩展、导出却是全量”，两边条数对不上
+        ingress: filterType === 'EXT_ALL' ? 'ext' : ingress === INGRESS_ALL ? undefined : (ingress as 'proxy' | 'ext'),
       })
+      // 截断状态从**响应头**读：文件是下载走的，body 里的 truncated 用户看不到。
+      // 不告知的后果实测过：用户导出一天日志，只拿到上限条数却以为拿到了全部。
+      const exportedN = resp.headers.get('X-Maskit-Exported') || ''
+      const matchedN = resp.headers.get('X-Maskit-Matched') || ''
+      const wasTruncated = resp.headers.get('X-Maskit-Truncated') === '1'
+      const doneMsg = wasTruncated
+        ? tf('logs.exportedTruncated', { n: exportedN, total: matchedN })
+        : t('logs.exported')
       const blob = await resp.blob()
       const filename = `maskit-events-${dayjs().format('YYYY-MM-DD-HHmmss')}.json`
       if (isTauri()) {
@@ -350,7 +587,7 @@ export default function LogsPage() {
         const path = await save({ defaultPath: filename, filters: [{ name: 'JSON', extensions: ['json'] }] })
         if (path) {
           await writeFile(path, buf)
-          toast(t('logs.exported'))
+          toast(doneMsg)
         }
       } else {
         const url = URL.createObjectURL(blob)
@@ -361,7 +598,7 @@ export default function LogsPage() {
         a.click()
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
-        toast(t('logs.exported'))
+        toast(doneMsg)
       }
     } catch (e) {
       toast(tf('logs.exportFail', { e: String(e) }), 'error')
@@ -438,6 +675,17 @@ export default function LogsPage() {
     // 兜底还原：模型把花括号剥了，靠宽松正则捞回来的。是成功，所以用中性色不报警，
     // 但要看得见——它是「模型正在改写输出格式」的前兆信号。
     const degraded = (row.degraded ?? 0) > 0
+    // 批次 2：处置结论/完整度的紧凑呈现（与详情弹窗同一口径，见 inspection.py）。
+    // 只收「一眼需要看出来的三种」：检测不完整（可能漏码）、明确直通（未脱敏）、
+    // 已阻断。正常脱敏/扫描未命中不额外加噪声。
+    const stateChip =
+      row.completeness === 'partial' || row.completeness === 'failed'
+        ? { text: t('logs.stateIncomplete'), cls: 'text-amber-600 dark:text-amber-400' }
+        : row.decision === 'passthrough'
+          ? { text: t('logs.statePassthrough'), cls: 'text-muted-foreground' }
+          : row.decision === 'blocked'
+            ? { text: t('logs.stateBlocked'), cls: 'text-red-600 dark:text-red-400' }
+            : null
     // 提取本条记录捕获的敏感词类型标签（如 PHONE, CONNSTR 等），让列表直观展现脱敏项类别
     const itemLabels = Array.from(
       new Set(
@@ -451,7 +699,7 @@ export default function LogsPage() {
       .filter(Boolean)
       .join(' | ')
 
-    if (masked || restored || unresolved || degraded) {
+    if (masked || restored || unresolved || degraded || stateChip) {
       return (
         // 拆成上下两行（计数 / 标签）是**为根治重叠**：此前挤在单行里，标签组一旦被压缩，
         // 内部 `whitespace-nowrap` 的子元素会溢出自身边界，与后面的「未还原 N」糊在一起
@@ -474,6 +722,9 @@ export default function LogsPage() {
               <span className="shrink-0 whitespace-nowrap text-muted-foreground" title={t('logs.degradedHint')}>
                 {t('logs.colDegraded')} {row.degraded}
               </span>
+            )}
+            {stateChip && (
+              <span className={`shrink-0 whitespace-nowrap ${stateChip.cls}`}>{stateChip.text}</span>
             )}
           </span>
           {/* 第二行：命中标签。超出仅显示前两个 + 折叠计数 */}
@@ -582,6 +833,38 @@ export default function LogsPage() {
           </SelectContent>
         </Select>
 
+        {/* 时间锚点（§D3.1 时间游标）：只看这个时间点**之前**的记录。
+            用原生 datetime-local：它不引入新依赖，且浏览器自带时区处理——
+            自己拼时区串是这类功能最常见的一类错。 */}
+        <div className="flex items-center gap-1">
+          <Input
+            type="datetime-local"
+            className="h-8 w-[196px] text-xs"
+            value={beforeTsInput}
+            onChange={(e) => {
+              const v = e.target.value
+              setBeforeTsInput(v)
+              if (!v) {
+                // 清空输入框 = 取消时间锚点，回到实时
+                if (timeAnchor) applyTimeAnchor(null)
+                return
+              }
+              const ts = dayjs(v).unix()
+              // 无效日期（dayjs 不抛错，只会给 NaN）一律不提交，避免把 NaN 发给后端
+              if (!Number.isFinite(ts) || ts <= 0) return
+              applyTimeAnchor(ts)
+            }}
+            title={t('logs.timeAnchorTitle')}
+            data-testid="logs-time-anchor"
+          />
+          {timeAnchor && (
+            <Button size="sm" variant="ghost" className="h-8 px-2 text-xs"
+              onClick={() => applyTimeAnchor(null)} title={t('logs.timeAnchorClear')}>
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          )}
+        </div>
+
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -630,9 +913,50 @@ export default function LogsPage() {
           <span>{t('logs.hideNoise')}</span>
         </label>
 
+        {/* 日志写入模式（§D1）：把「当前生效的记录粒度」摆在筛选栏，
+            用户不必去设置页猜为什么详情弹窗是空的。 */}
+        <div className="flex items-center gap-1.5">
+          <Select
+            value={modeState === 'trace' ? 'detailed' : (modeState ?? 'detailed')}
+            onValueChange={(v) => changeMode(v as 'summary' | 'detailed')}
+            disabled={modeBusy || modeState === 'trace'}
+          >
+            <SelectTrigger className="h-8 w-[136px] text-xs" title={t('logs.modeTitle')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="summary">{t('logs.modeSummary')}</SelectItem>
+              <SelectItem value="detailed">{t('logs.modeDetailed')}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            variant={modeState === 'trace' ? 'default' : 'outline'}
+            className="h-8 px-2.5 text-xs"
+            onClick={toggleTrace}
+            disabled={modeBusy}
+            title={t('logs.traceTitle')}
+          >
+            {modeState === 'trace'
+              ? tf('logs.traceLeft', { t: traceLeft === null ? '—' : fmtCountdown(traceLeft) })
+              : t('logs.traceStart')}
+          </Button>
+        </div>
+
         <div className="ml-auto flex items-center gap-1.5">
           <Button size="sm" variant="ghost" className="h-8 px-2.5" onClick={refresh} title={t('logs.refresh')}>
             <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 px-2.5 text-xs"
+            onClick={loadOlder}
+            loading={olderLoading}
+            disabled={!events.length || olderLoading || (historyMode && !hasOlder)}
+            title={t('logs.olderTitle')}
+          >
+            {!olderLoading && <History className="mr-1 h-3.5 w-3.5" />} {t('logs.older')}
           </Button>
           <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" onClick={doExport} loading={exporting}>
             {!exporting && <Download className="mr-1 h-3.5 w-3.5" />} {t('logs.export')}
@@ -669,6 +993,19 @@ export default function LogsPage() {
           </Tooltip>
         </TooltipProvider>
       </div>
+
+      {historyMode && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-400">
+          <span>
+            {timeAnchor
+              ? tf('logs.historyBannerAt', { t: dayjs(timeAnchor * 1000).format('YYYY-MM-DD HH:mm') })
+              : t('logs.historyBanner')}
+          </span>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={backToLive}>
+            {t('logs.backToLive')}
+          </Button>
+        </div>
+      )}
 
       {/* 表格（虚拟滚动） */}
       <div
@@ -874,7 +1211,7 @@ export default function LogsPage() {
       </div>
 
       {/* 详情弹窗 */}
-      <EventDetailDialog open={detailOpen} onOpenChange={setDetailOpen} seq={detailSeq} />
+      <EventDetailDialog open={detailOpen} onOpenChange={setDetailOpen} seq={detailSeq} logMode={modeState ?? undefined} />
 
       {/* 审计行详情弹窗（原地查看，不再跳转审计中心） */}
       <AuditEventDetailDialog event={auditDetail} onOpenChange={(v) => !v && setAuditDetail(null)} />

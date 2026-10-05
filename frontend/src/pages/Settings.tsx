@@ -36,14 +36,14 @@ import {
   ChevronRight,
   Globe,
 } from 'lucide-react'
-import { getConfig, saveConfig, saveBuiltinRules, patchConfig, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, type ConfigBackup, type ConfigPatch, type SaveConfigResponse } from '@/api/settings'
+import { getConfig, saveConfig, saveBuiltinRules, patchConfig, testUpstream, openDataDir, restoreNetwork, getHealth, getConfigBackups, restoreConfigBackup, getPriceSyncStatus, syncPricesNow, getPriceList, getMappingStats, clearMappings, type ConfigBackup, type ConfigPatch, type SaveConfigResponse } from '@/api/settings'
 import { runAudit, cancelAudit, getAuditJob, getAuditReport } from '@/api/audit'
 import { getStatus } from '@/api/proxy'
 import { useMutation } from '@tanstack/react-query'
 import type { ShieldConfig, UpstreamConfig, TransportCapabilities } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { runSelfCheck, saveDiagnostics, type SelfCheckResult } from '@/api/diagnostics'
+import { runSelfCheck, type SelfCheckResult } from '@/api/diagnostics'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -69,6 +69,10 @@ import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/lib/toast'
 import { isTauri, shieldFetch } from '@/lib/shield-fetch'
 import { setAutostartTauri } from '@/lib/tauri'
+import { SkillBundleCard } from '@/components/settings/SkillBundleCard'
+import { LabCard } from '@/components/settings/LabCard'
+import { VerificationCard } from '@/components/settings/VerificationCard'
+import { DiagnosticPreviewButton } from '@/components/settings/DiagnosticPreviewButton'
 import { cn, copyText } from '@/lib/utils'
 import dayjs from 'dayjs'
 import { useI18n } from '@/lib/i18n'
@@ -189,6 +193,7 @@ const NER_SKIP_ITEMS: { key: string; labelKey: string }[] = [
   { key: 'runtime', labelKey: 'settings.sw.nerSkipRuntime' },
   { key: 'global_throttled', labelKey: 'settings.sw.nerSkipGlobalThrottled' },
   { key: 'sem_timeout', labelKey: 'settings.sw.nerSkipSemTimeout' },
+  { key: 'signed_blocks_skipped', labelKey: 'settings.sw.nerSkipSignedBlocks' },
 ]
 
 function detectClientType(u: UpstreamConfig): string {
@@ -764,6 +769,28 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   const [auditModel, setAuditModel] = useState('')
   const [auditProfile, setAuditProfile] = useState('general')
   const [confirmAudit, setConfirmAudit] = useState(false)
+  // 「清空内存映射」（§D3.3）：独立动作 + 独立确认弹窗。
+  // 不复用清日志的确认：两者后果完全不同（那个删历史，这个让**当前对话**
+  // 的历史占位符立即还原不了），合成一个弹窗只会让用户点错。
+  const [confirmClearMappings, setConfirmClearMappings] = useState(false)
+  const mappingStatsQuery = useQuery({
+    queryKey: ['mappingStats'],
+    queryFn: getMappingStats,
+    staleTime: 10_000,
+    // 与 Logs 页同口径：页面隐藏时不轮询（设置页可以开一整天，
+    // 而「现在有多少东西可清」只在用户真的要动手看时才需要新鲜）。
+    refetchInterval: hidden ? false : 30_000,
+    refetchIntervalInBackground: false,
+  })
+  const mappingStats = mappingStatsQuery.data
+  const clearMappingsMutation = useMutation({
+    mutationFn: clearMappings,
+    onSuccess: () => {
+      toast(t('settings.toast.mappingsCleared'))
+      mappingStatsQuery.refetch()
+    },
+    onError: (e) => toast(tf('settings.toast.mappingsClearFail', { e: String(e) }), 'error'),
+  })
   const { data: auditJob } = useQuery({
     queryKey: ['auditJob'],
     queryFn: getAuditJob,
@@ -1368,6 +1395,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </Card>
             )}
           </div>
+          {/* 占位符 Skill（行为契约）与本地试验台：都收在接入页——它们服务的对象
+              是“刚接上这些客户端的人”，与上面的客户端列表同一屏。试在前、包在后。 */}
+          <LabCard />
+          <VerificationCard upstreams={upstreams} />
+          <SkillBundleCard version={status?.version} />
         </TabsContent>
         )}
 
@@ -1963,6 +1995,25 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     {tf('settings.sw.nerUnavailable', { reason: status.ner.reason || '—' })}
                   </p>
                 )}
+                {/* §B3 严格模式：只在开启语义识别时才提供——“要求本次检测必须完整”
+                    对关掉语义识别的配置没有意义。开启后降级即在出网前阻断（503
+                    semantic_incomplete），不会自动取消，只能由用户关掉本开关。 */}
+                {!!(cfg as Record<string, unknown> | undefined)?.ner_enabled && (
+                  <SettingToggle
+                    label={t('settings.sw.nerRequireComplete')}
+                    desc={t('settings.sw.nerRequireCompleteDesc')}
+                    checked={!!(cfg as Record<string, unknown> | undefined)?.ner_require_complete}
+                    onChange={(v) => toggle('ner_require_complete', v)}
+                  />
+                )}
+                {/* 严格模式 + 长会话的风险提示（批次 8）：两者会互相放大 —— 会话越长，
+                    语义识别越容易超单请求预算，而严格模式一旦降级就在出网前阻断。
+                    实测数字（0.16 秒/千字，缓存未命中）写在文案里，用户才能自己换算。 */}
+                {!!(cfg as Record<string, unknown> | undefined)?.ner_require_complete && (
+                  <p className="text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+                    {t('settings.sw.nerRequireCompleteLongSession')}
+                  </p>
+                )}
                 {/* P0-a：单请求语义识别预算（秒）。实测客户端解包超时 180s，
                     而旧默认 60s 会让冷缓存那一轮（实测 58.5s）把请求直接推过超时线。 */}
                 {!!(cfg as Record<string, unknown> | undefined)?.ner_enabled && (
@@ -2001,6 +2052,20 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                           : t('settings.sw.nerBudgetHint')}
                       </span>
                     </div>
+                    {/* 治理器实际生效值（批次 8）：预算已改为按 **CPU 毫秒** 计、
+                        并发/线程/容量随**可用核数**（cgroup 配额 ∩ 亲和性）自适应。
+                        不显示的话，用户看到「预算 10 秒」却不知道引擎实际按几核、
+                        开几线程在跑——而「2 核机器 CPU 跑满」的排查第一步就是看这个。 */}
+                    {status?.ner?.governor?.budget_ms_per_s != null && (
+                      <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
+                        {tf('settings.sw.nerGovernorLine', {
+                          cores: String(status.ner.governor?.cpu_cores ?? '—'),
+                          conc: String(status.ner.governor?.concurrency ?? '—'),
+                          threads: String(status.ner.governor?.cpu_threads ?? '—'),
+                          budget: String(status.ner.governor?.budget_ms_per_s ?? '—'),
+                        })}
+                      </p>
+                    )}
                   </div>
                 )}
                 {/* 跳过原因计数（审计 M7）：`available` 为 true 只说明引擎能跑，
@@ -2448,6 +2513,32 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               <span className="text-[11px] text-muted-foreground">{t('settings.advanced.retentionHint')}</span>
             </CardContent>
           </Card>
+
+          {/* 内存映射（§D3.3）：清日志/清统计/清映射是三个独立动作，不合并成
+              「彻底清除」——那会让只想清对话日志的用户把趋势图一起抹掉。 */}
+          <Card className="border bg-card">
+            <CardHeader>
+              <CardTitle className="text-sm font-semibold">{t('settings.advanced.mappingTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.advanced.mappingDesc')}</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <Button size="sm" variant="outline" className="h-8 text-xs"
+                  onClick={() => setConfirmClearMappings(true)}>
+                  {t('settings.advanced.mappingClear')}
+                </Button>
+                <span className="text-[11px] text-muted-foreground">
+                  {mappingStats
+                    ? tf('settings.advanced.mappingStat', {
+                        sessions: String((mappingStats.panel?.sessions ?? 0) + (mappingStats.engine?.sessions ?? 0)),
+                        entries: String((mappingStats.panel?.recent_entries ?? 0) + (mappingStats.engine?.recent_entries ?? 0)),
+                        stale: mappingStats.engine_stale ? t('settings.advanced.mappingStale') : '',
+                      })
+                    : t('settings.advanced.mappingStatLoading')}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
         )}
 
@@ -2566,14 +2657,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       {t('settings.selfcheck.copy')}
                     </Button>
                   )}
-                  <Button size="sm" variant="ghost" className="h-8" onClick={async () => {
-                    try {
-                      const r = await saveDiagnostics()
-                      toast(r.ok ? t('settings.selfcheck.exported') : String(r.error || ''), r.ok ? 'success' : 'error')
-                    } catch (e) { toast(String(e), 'error') }
-                  }}>
-                    {t('settings.selfcheck.export')}
-                  </Button>
+                  <DiagnosticPreviewButton />
                   <span className="text-[11px] text-muted-foreground">{t('settings.selfcheck.hint')}</span>
                 </div>
                 {selfCheck && (
@@ -2796,6 +2880,29 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
       {/* 编辑弹窗 */}
       {/* 主动审计确认弹窗：消耗真实 token，需二次确认 */}
+      <Dialog open={confirmClearMappings} onOpenChange={setConfirmClearMappings}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('settings.confirm.mappingTitle')}</DialogTitle>
+            <DialogDescription>{t('settings.confirm.mappingDesc')}</DialogDescription>
+          </DialogHeader>
+          {/* 后果必须写在弹窗里，不能只放在卡片说明里：用户点「确认」时
+              看的就是这个弹窗。 */}
+          <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+            <li>{t('settings.confirm.mappingEffect1')}</li>
+            <li>{t('settings.confirm.mappingEffect2')}</li>
+            <li>{t('settings.confirm.mappingEffect3')}</li>
+          </ul>
+          <DialogFooter>
+            <Button size="sm" variant="outline" onClick={() => setConfirmClearMappings(false)}>{t('common.cancel')}</Button>
+            <Button size="sm" variant="destructive" onClick={() => {
+              setConfirmClearMappings(false)
+              clearMappingsMutation.mutate()
+            }}>{t('settings.advanced.mappingClear')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={confirmAudit} onOpenChange={setConfirmAudit}>
         <DialogContent className="max-w-md">
           <DialogHeader>

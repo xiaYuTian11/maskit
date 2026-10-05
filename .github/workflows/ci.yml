@@ -183,3 +183,8 @@ jobs:
       # 打包脚本坏掉＝用户下载不到扩展。这里只验证能打出来，产物由 release.yml 上传。
       - name: Browser extension package builds
         run: python scripts/pack-extension.py --check
+
+      # 占位符 Skill 包（行为契约）同理：打包/渲染坏掉=用户装不上契约。
+      # 与 verify-all.py 的 GATES 成对，check-workflows.py 双向比对。
+      - name: Placeholder skill package builds
+        run: python scripts/pack-skill.py --check

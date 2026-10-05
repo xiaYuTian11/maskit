@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "engine"))
 sys.path.insert(0, str(ROOT))
 
 import panel
+import event_store
 import transparent as tr
 
 ALLOWED_SOURCES = {"upstream", "engine", "fallback"}
@@ -489,6 +490,9 @@ class EmittedFieldRegistrationTests(unittest.TestCase):
         "first_diff_byte": "首个差异字节：仅诊断",
         "content_type": "内容类型：仅诊断（导出有 path/type 已够）",
         "success": "成功态布尔：仅展示（状态由 type/status 表达）",
+        # 统一口径里唯一不外传的一项：标记是用户粘进来的**短效凭据**。
+        # `onboarding.scrub(diagnostic=True)` 为诊断包剔的就是它，导出走同一口径。
+        "verification": "接入验证证据（含入口标记与弱关联元数据）：标记不得外传（§E）",
     }
 
     def _emitted_fields(self):
@@ -547,10 +551,33 @@ class EmittedFieldRegistrationTests(unittest.TestCase):
         悄悄把"新字段"也算成已登记 —— 名字相同但语义已变）。"""
         emitted = self._emitted_fields()
         export, diag = self._whitelists()
-        stale = sorted(set(self.NOT_EXPORTED) - emitted)
+        # 腐烂判据把「**能入库**的字段」也算作“确实存在”：统一口径那批是用
+        # `**inspection.report(...)` 字典展开发射的，AST 扫不到它们的键（见下一条测试），
+        # 只认 emitted 会把声明得好好的条目误判成腐烂。
+        alive = emitted | set(event_store._SUMMARY_KEEP_FIELDS)
+        stale = sorted(set(self.NOT_EXPORTED) - alive)
         self.assertEqual(stale, [], "NOT_EXPORTED 里这些字段已经不再被发射了：%s" % stale)
         overlap = sorted(set(self.NOT_EXPORTED) & (export | diag))
         self.assertEqual(overlap, [], "这几项既声明不外传、又在白名单里（自相矛盾）：%s" % overlap)
+
+    def test_every_storable_field_is_exported_or_explicitly_excluded(self):
+        """**能入库**的字段必须在导出/诊断白名单里，或在 NOT_EXPORTED 里声明。
+
+        为什么不能只看上面那条守卫扫出的 `_emit` 字段：统一口径那批
+        （`decision`/`completeness`/`reason_codes`/`signed_blocks_skipped`…）是通过
+        `**inspection.report_for_mask(...)` **字典展开**发射的，AST 看不见它们的键 ——
+        那条守卫对它们**完全无效**，而它们恰恰是“这条到底算不算扫干净了”的唯一
+        机器可读结论。2026-10-04 实测：这批字段能入库、详情页看得见，**导出里一个都没有**
+        （拿导出找人复盘，只能看到现象“命中 0 条”，看不到结论“直通未脱敏/检测不完整”）。
+        以 `event_store._SUMMARY_KEEP_FIELDS`（能入库的全集）作源，盲区就补上了：
+        新增一个能入库的字段，要么进白名单，要么在这里写下不外传的理由。
+        """
+        storable = set(event_store._SUMMARY_KEEP_FIELDS)
+        export, diag = self._whitelists()
+        unregistered = sorted(storable - export - diag - set(self.NOT_EXPORTED))
+        self.assertEqual(unregistered, [],
+                         "这些字段能入库，却既不在导出/诊断白名单、也没声明不外传：%s"
+                         "（导出是出事时拿给人看的那份，漏了就是静默少一列）" % unregistered)
 
 
 class AuditTunablePersistenceTests(unittest.TestCase):

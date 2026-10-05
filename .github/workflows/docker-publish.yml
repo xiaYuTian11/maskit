@@ -56,3 +56,52 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # 推完镜像后把 amd64 那份拉回来真跑一遍：/healthz 存活 + /api/skill/bundle 必须是
+  # 真 zip。容器部署的“下载 Skill 包”曾恒 500（只有用户点了才知道），此前只有
+  # Dockerfile 断言 + 测试树静态钉住，这里补上运行时证据；失败时打容器日志。
+  container-smoke:
+    name: Container smoke (healthz + skill bundle)
+    needs: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Smoke test the published image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]'):${{ inputs.tag }}"
+          # 仅验 amd64（runner 原生）；arm64 由构建矩阵自身保证，QEMU 运行冒烟太慢。
+          docker pull --platform linux/amd64 "$IMAGE"
+          cid=$(docker run -d -e MASKIT_PANEL_TOKEN=smoke-token-0123456789abcdef \
+            -p 127.0.0.1:5801:5801 "$IMAGE")
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          ready=""
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:5801/healthz >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo 'container never became healthy' >&2
+            docker logs "$cid" >&2 || true
+            exit 1
+          fi
+          code=$(curl -sS -o /tmp/bundle.zip -w '%{http_code}' \
+            -H 'X-Shield-Token: smoke-token-0123456789abcdef' \
+            http://127.0.0.1:5801/api/skill/bundle)
+          if [ "$code" != "200" ]; then
+            echo "skill bundle endpoint returned $code" >&2
+            head -c 400 /tmp/bundle.zip >&2 || true
+            exit 1
+          fi
+          head -c 2 /tmp/bundle.zip | grep -q 'PK'
+          python3 -c "import zipfile,sys; zipfile.ZipFile('/tmp/bundle.zip').testzip(); print('zip integrity OK')"
+          docker rm -f "$cid" >/dev/null
+          trap - EXIT
+          echo "container smoke OK: /healthz 200, /api/skill/bundle 200 (valid zip)"

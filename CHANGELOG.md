@@ -2,15 +2,99 @@
 
 本文件记录对用户可见的变更；格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
-## [Unreleased]
+## [0.8.0] - 2026-10-05
 
 ### 修复
+- Linux：托盘支持左键直接唤醒主窗口，右键保留菜单，避免每次打开窗口都要多选一次。
+- 日志：已完成交付后的客户端关连接不再记成「取消」（CANCEL），并给取消事件补齐归因字段（已下发字节/回调次数、脱敏耗时、上游与模型），列表不再被无信息量的取消行刷屏、真中断也不再与收尾断开长得一样。
+- 引擎：思考强度排查提示只在上游**参数类错误**（400/422）时给出，Cloudflare 524 / 502 这类上游超时不再被误报成「reasoning_effort 取值不被支持」。
+- 仓库安全：演示样例与「填样例」文本里的号码/邮箱/凭据改为运行时拼接，源码里不再出现真实形态的值（历史事故：工具调用里的占位符字面量被本机网关还原成真实值后落盘）；新增守卫测试。
+- 引擎：已完成的请求收到客户端断开时，证据里的阶段不再被改回「响应流进行中」——已完成这一事实不再被抹掉。
+- 引擎：签名思考块（Anthropic `thinking`/`redacted_thinking`）整块只读，不再被改写而破坏上游签名校验导致会话永久 400；豁免数量随事件上报（`signed_blocks_skipped`）。
+- 引擎：响应侧不再还原思考轨迹（SSE 增量 / 快照 / 整包回退同口径），客户端存回的历史占位符与签名保持逐字节一致；其它无签名约束的推理通道照常还原。
 - 发版：更新元数据补齐 `linux-<arch>-deb` 条目并对 `.deb` 单独签名，deb 安装的 Linux 客户端不再报 `invalid updater binary format`。
+- 引擎：语义识别的 CPU 预算改按**实际 CPU 开销**结算（旧口径按墙钟计费，同样的预算实测实吃近两倍 CPU），并关掉 ONNX 线程池在每次推理后约 1 秒的空转——2 核机器上「CPU 被吃满」的两个真实来源。
+- 引擎：长会话不再因语义识别预算被最老的历史吃光而漏检**最新一条**（新增「最新消息优先」预取）。
+- 引擎：容器里的线程与并发**全部**改用实际可用核数（cgroup 配额 ∩ 亲和性）——脱敏池与辅助池此前仍按宿主核数开，`--cpus=2` 的容器在 16 核宿主上会疊 8 个线程；同时修正语义识别预算默认容量的换算（旧换算在多核机器上把允许量翻了一倍）。
+- 打包：引擎产物补齐 `inspection.py` / `protocol_contracts.py` 明文模块——它们此前只在 PYZ 里、产物里没有文件，而发版流水线的「包内容断言」正要求它们存在（发版会直接红）；同时补上一条守门测试，把「workflow 断言的包内容」与「spec 的构建输入」钉在一起。
+- 容器：Docker 镜像补拷 `agent-bundle/`，容器部署下「下载占位符 Skill 包」不再恒 500（本地与安装包都正常，只有容器里没有可发的包）。
+- 日志：导出补齐**统一口径结论**（处置结论 / 完整度 / 原因码 / 签名块豁免数）与审计结论。这批字段是用字典展开发射的，既有的字段登记守卫看不见它们，于是能入库、详情页看得见、**导出里一个都没有** —— 拿导出找人复盘就只能看到现象（命中 0 条），看不到结论（直通未脱敏 / 检测不完整）。
+
+### 新增
+- 接入：新增首条真实请求标记验证与显式弱关联，配置或运行状态变化后旧证据失效；诊断包可先预览，再下载或保存同一份内容。
+- Onboarding: verify a real request with a marker or explicit weak correlation, invalidate stale evidence, and preview the exact diagnostics snapshot before downloading or saving.
+- 面板：日志页支持按**时间区间回看**（「只看某时间点之前的记录」），与「加载更早」共用历史通道，回到实时一键恢复。
+- 面板：限时排障按钮显示**剩余倒计时**，不再只区分「排障中」这个状态。
+- 面板：新增独立的**「清空内存映射」**动作（设置 → 高级），与「清空日志」「清空审计」「清空数字统计」互不影响；要清掉本地内存里那套「占位符 ↔ 原文」对照，以前只能重启代理，现在可以单独触发。
+- 面板：接入页新增**本地试验台**——不填密钥、不出网，就地看这段文本会被脱敏成什么、能不能原样还原，命中明细含标签/原值长度/出现次数与「唯一实体数 vs 出现次数」的区别。
+- 面板：接入页新增**占位符 Skill 包下载**与安装命令复制（包内容与 Release 资产同源），让编程助手原样使用占位符。
+- 引擎：协议不可改写状态改由契约表驱动（`engine/protocol_contracts.py`），补齐 Responses / Gemini / LiteLLM / OpenRouter / Anthropic 检索结果五个同类载体，避免用户自定义词把签名与密文打烂而导致上游 400；工具参数里的同名键照常扫描。
+- 引擎：事件与扩展桥接统一上报「处置结论 + 检测完整度 + 原因码」，列表与详情可区分已脱敏 / 扫描未命中 / 直通未脱敏 / 已阻断 / 检测不完整，不再一律显示「0 命中」。
+- 引擎：新增「语义检测必须完整」开关（`ner_require_complete`，默认关）；开启后本轮语义识别没跑完即在出网前 503 阻断，不冒充「已扫干净」。
+- 面板：日志页新增**写入粒度**切换（最小记录 / 本地详细）与 15 分钟限时排障；最小模式在**写入侧**就不落对话正文与原文（数据库、引擎 stdout、内存日志、诊断包与导出同口径），词榜只保留类别分布。
+- 面板：日志页可**往回翻历史**（反向游标），历史模式下暂停实时刷新并可随时回到实时；导出严格对齐当前筛选，并明确告知导出条数与匹配总数（截断不再静默）。
+- 面板：新增独立的「清空数字统计」动作，与「清空日志」「清空审计记录」彼此独立，清日志不再需要担心趋势图跟着归零。
+- 配置：单条请求体上限可配置（`config.max_request_body_mb`，默认 32MiB、范围 1~256MiB），面板与引擎两进程同源；带大附件的合法请求不再只能放弃（会同步抬高内存与单条跳敏耗时的预算）。
+- 引擎：新增叶子结果缓存——多轮长会话每轮重发整段历史时，未变化的正文不再重复扫描（实测续跑 14ms → 1ms。键是进程密钥摘要，值为脱敏后文本与占位符清单，**被脱敏的值不在其中**，且逐条核对该占位符指向的仍是当初那个原文）。
+- 引擎：语义识别缓存容量可配（`MASKIT_NER_CACHE_MAX` / `MASKIT_NER_CACHE_CHARS`，默认 4096→32768 条），并在启动阶段预热模型，不再把加载耗时压在第一个用户请求上。
+- 日志：失败事件新增结构化归因字段（责任方：引擎 / 上游 / 客户端 / DNS / 出口代理，以及异常类型），导出与诊断包同步带上。
+- 面板：设置页显示语义识别的实际生效值（可用核数 / 并发 / ONNX 线程 / 每秒预算），排查「CPU 跑满」不必再去翻日志。
+- 面板：开启「语义检测必须完整」时提示长会话风险（历史越长越容易超预算而被阻断）。
+
+### 优化
+- 引擎：`before_ts` 时间游标与 `before_seq` 同源筛选，非法时间参数按「不限时间」处理而不是报错。
+- 性能基线：`scripts/bench_mask.py` 补齐 NER 冷/热缓存、长上下文与 1/4/8 并发三组可重跑测量，并修掉三处会给出误导数字的样本设计（并发扫描未固定总量、长文本用重复模板、分段窗口跨档命中缓存）。
+- 引擎：响应侧「不还原」的块类型与请求侧同源（同一张契约表导出），签名型推理块（OpenRouter `reasoning_details`）在整包与 SSE 两条还原路径上口径一致。
+- 引擎：体积闸 413 错误体补 `hint`/`blocking` 与统一口径（代理与扩展两条链路同口径），超限不再无法归因；同时修正 `_MAX_REQUEST_BODY` 上“脱敏跑在 event loop 上”的过时注释。
+- 日志：保留策略改为由面板后台任务驱动，不再只在用户打开日志页时才触发清理（磁盘增长与有没有人看页面无关）。
+- 引擎：语义识别结果缓存改为**进程密钥摘要**作键、只存位置与类别，命中时从当前文本即时切出——缓存不再延长原文在内存里的停留窗口（冷热命中行为不变，换模型/检测版本也不会错误复用）。
+- 性能基线：`bench_mask.py` 新增「多轮长会话」组，并修掉两处会被缓存命中的样本（固定文本、复用会话 id 会把「缓存命中」测成「脱敏性能」）。
 
 ---
 
 ### Fixed
+- Linux: left-clicking the tray now opens the main window directly, while right-clicking keeps the menu.
+- Logs: a client closing the connection after the response was fully delivered is no longer recorded as a cancellation (CANCEL), and cancel events now carry attribution fields (delivered bytes / stream callback count, masking duration, upstream and model) — genuine aborts no longer look identical to post-completion closes.
+- Engine: the thinking-level hint is now attached only to parameter-type upstream errors (400/422); gateway timeouts such as Cloudflare 524 / 502 are no longer misreported as an unsupported `reasoning_effort` value.
+- Repo hygiene: sample and "fill sample" texts now build phone/email/key values at runtime, so the source no longer contains real-shaped values (past incident: a placeholder literal written through a tool call was restored to its real value on disk by the local gateway); guarded by a new test.
+- Engine: when a completed request sees the client disconnect, the recorded transport phase is no longer rewritten to "stream in progress" — the completion fact is preserved.
+- Engine: signed thinking blocks (Anthropic `thinking`/`redacted_thinking`) are now treated as read-only, so masking no longer invalidates the upstream signature and permanently breaks the conversation with HTTP 400; the exempted block count is reported as `signed_blocks_skipped`.
+- Engine: reasoning traces are no longer restored on the response side (SSE deltas, snapshots and whole-body fallback now agree), keeping the client-side history byte-identical to what the signature covers; reasoning channels without a signature keep being restored.
 - Release: the update manifest now ships signed `linux-<arch>-deb` entries, so Linux clients installed from `.deb` no longer fail with `invalid updater binary format`.
+- Engine: the semantic-recognition CPU budget is now settled by **actual CPU cost** (the old accounting charged wall-clock time, which let the same budget consume twice the CPU), and the ONNX thread pool no longer spins for about a second after every inference — the two real sources behind “CPU pegged” on 2-core machines.
+- Engine: long conversations no longer skip the **newest** message because the oldest history ate the semantic-recognition budget (new newest-first prefetch).
+- Engine: threads and concurrency now **all** derive from the actually available cores (cgroup quota ∩ affinity) — the masking and aux pools still sized from the host core count, so a `--cpus=2` container on a 16-core host stacked 8 threads; also fixed the NER budget's default capacity conversion (the old one doubled the allowance on many-core machines).
+- Packaging: the engine artifact now ships the `inspection.py` / `protocol_contracts.py` plaintext modules — they used to live only in the PYZ with no file in the artifact, while the release pipeline's package-content assertion requires them (the release would have failed outright); a new guard test ties the workflow's asserted contents to the spec's build inputs.
+- Docker: the image now copies `agent-bundle/`, so “download the placeholder skill package” no longer returns 500 in container deployments (source and packaged installs were fine; only containers had no bundle to serve).
+- Logs: exports now include the **unified verdict** (decision / completeness / reason codes / signed-block exemptions) and the audit verdict. Those fields are emitted through a dict spread, so the existing field-registration guard could not see them: they were stored and visible in the detail dialog but **completely absent from exports** — an exported log showed only the symptom (0 hits), never the conclusion (passthrough unmasked / detection incomplete).
+
+### Added
+- Panel: logs can be filtered by **time range** ("only records before this moment"), sharing the same history path as "load older", with one click back to live.
+- Panel: the time-limited trace button now shows a **remaining countdown** instead of just an "active" state.
+- Panel: a separate **"clear memory mappings"** action (Settings → Advanced), independent of clearing logs, audit records or numeric stats; dropping the in-memory placeholder ↔ original mapping no longer requires restarting the proxy.
+- Panel: the clients page gained a **local lab** — no API key, nothing sent upstream: see what a text gets masked into, whether it restores back, and per-hit details (label, original length, occurrences, and the difference between unique entities and occurrences).
+- Panel: the clients page can now **download the placeholder skill package** and copy the install command (same artifact as the Release asset), so coding assistants use placeholders verbatim.
+- Engine: non-rewritable protocol state is now driven by a contract table (`engine/protocol_contracts.py`), covering five more carriers (Responses, Gemini, LiteLLM, OpenRouter and Anthropic search results) so a user-added word can no longer corrupt signatures or encrypted blobs into upstream 400s; same-named keys inside tool arguments keep being scanned.
+- Engine: events and the browser bridge now report a unified `decision` / `completeness` / `reason_codes`, so the list and the detail dialog can tell masked / scanned-clean / passthrough / blocked / incomplete apart instead of showing “0 hits” for all of them.
+- Engine: new “require complete semantic detection” switch (`ner_require_complete`, off by default). When on, a round whose semantic detection did not finish is blocked with 503 before leaving the machine instead of pretending it was scanned.
+- Panel: the logs page gained a **write-detail switch** (minimal / detailed) plus a 15-minute time-boxed trace; minimal mode stores no conversation body or plaintext **at the write side** (database, engine stdout, in-memory log, diagnostics bundle and export share one projection), and the word leaderboard keeps label distribution only.
+- Panel: the logs page can now **page back into history** (reverse cursor); history mode pauses live refresh and can return to live anytime, and export now matches the current filters exactly and reports exported vs matched totals (truncation is no longer silent).
+- Panel: a separate **clear numeric stats** action, independent from clearing logs and clearing audit records — clearing logs no longer risks wiping the trend charts.
+- Config: the single-request body limit is now configurable (`config.max_request_body_mb`, default 32 MiB, range 1–256 MiB), consistent across the panel and the engine, so legitimate requests with large attachments are no longer dead ends (it raises the memory and per-request masking-time budgets accordingly).
+- Engine: a new per-leaf result cache — when a client resends the whole history every turn, unchanged text is no longer re-scanned (measured: 14 ms → 1 ms on continuation turns). The key is a process-key digest; the value is the masked text plus the placeholder list, and **no masked value is stored**; every entry also re-verifies that its placeholder still points at the original it was created for.
+- Engine: the semantic-recognition cache capacity is configurable (`MASKIT_NER_CACHE_MAX` / `MASKIT_NER_CACHE_CHARS`, default 4096 → 32768 entries) and the model is now warmed up at startup instead of during the first user request.
+- Logs: failure events now carry structured attribution fields (owner: engine / upstream / client / DNS / egress proxy, plus the exception type), included in exports and the diagnostics bundle.
+- Panel: the settings page now shows the effective semantic-recognition values (available cores / concurrency / ONNX threads / per-second budget), so “why is my CPU pegged” no longer requires digging through logs.
+- Panel: enabling “require complete semantic detection” now warns about the long-conversation risk (the longer the history, the more likely it exceeds the budget and gets blocked).
+
+### Changed
+- Engine: the `before_ts` time cursor shares the same filters as `before_seq`; a malformed time value now means "no time limit" instead of an error.
+- Benchmarks: `scripts/bench_mask.py` gains reproducible NER cold/warm, long-context and 1/4/8-concurrency groups, and fixes three sample designs that produced misleading numbers (concurrency sweep without a fixed total, repetitive long documents, and cross-tier segment cache hits).
+- Benchmarks: `bench_mask.py` gains a **multi-turn long-conversation** group and fixes two samples that were served from cache (fixed text and a reused session id turned “cache hit” into “masking performance”).
+- Engine: the response-side "do not restore" block types now come from the same contract table as the request side, so signed reasoning blocks (OpenRouter `reasoning_details`) behave identically on the whole-body and SSE restore paths.
+- Engine: the 413 size-gate response now carries `hint`/`blocking` and the unified report (same shape on the proxy and extension paths), so oversized requests are attributable; also fixed the stale `_MAX_REQUEST_BODY` comment claiming masking still runs on the event loop.
+- Logs: retention is now driven by a background task in the panel instead of only triggering when the logs page happens to be open (disk growth does not depend on anyone watching it).
+- Engine: the semantic-recognition result cache is now keyed by a **process-key digest** and stores only positions and categories, rebuilding the text from the current input on a hit — the cache no longer extends how long plaintext stays in memory (hit/miss behaviour is unchanged, and a model or detection-version change can never reuse stale results).
 
 ## [0.7.0] - 2026-10-02
 

@@ -281,7 +281,7 @@ fi
 # 只查「产物存在 + 体积」是不够的：bundle.resources 一旦不生效，包照样生成、体积
 # 照样上百 MB，用户侧表现是启动即「引擎缺失」（src-tauri/src/lib.rs 那句报错），
 # 而这一步之前完全静默。所以逐个产物把内容列出来，按路径断言引擎与模型在包里。
-REQUIRED_ENTRIES=("resources/engine/MaskitEngine" "resources/engine/_internal/transparent.py")
+REQUIRED_ENTRIES=("resources/engine/MaskitEngine" "resources/engine/_internal/transparent.py" "resources/engine/_internal/inspection.py" "resources/engine/_internal/protocol_contracts.py" "resources/engine/_internal/onboarding.py" "resources/engine/_internal/skill_bundle/SKILL.md")
 if [ "$NER_READY" = true ]; then
   REQUIRED_ENTRIES+=("resources/engine/_internal/models/ner_mini_zh/model_quantized.onnx")
 fi

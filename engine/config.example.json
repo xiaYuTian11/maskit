@@ -51,6 +51,7 @@
   ],
   "debug": false,
   "ner_enabled": false,
+  "ner_require_complete": false,
   "ner_req_budget_s": 10,
   "diagnostic_unmatched": false,
   "session_ttl": 600,
@@ -116,6 +117,8 @@
   "price_sync_interval_days": 7,
   "update_check_url": "",
   "log_retention_days": 7,
+  "log_mode": "summary",
+  "max_request_body_mb": 32,
   "autostart": true,
   "start_minimized": false,
   "auto_start_proxy": true,
@@ -123,7 +126,6 @@
   "meta": {
     "poison_scan_default_on": true,
     "stream_exclude_opencode_cleared": true,
-    "stop_mode_error_default": true,
     "stream_auto_migrated": true,
     "stop_mode_passthrough_default_v2": true
   },

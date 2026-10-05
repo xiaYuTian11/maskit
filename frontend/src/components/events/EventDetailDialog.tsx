@@ -17,7 +17,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { EventTypeIcon, getEventTypeMeta } from '@/components/events/EventTypeIcon'
 import { CheckCircle2 } from 'lucide-react'
-import type { ShieldEvent } from '@/types/api'
+import type { ShieldEvent, LogMode } from '@/types/api'
 import dayjs from 'dayjs'
 import { cn, copyText } from '@/lib/utils'
 import { useI18n } from '@/lib/i18n'
@@ -70,6 +70,40 @@ const NER_SKIP_LABELS: Record<string, string> = {
   // 每个键在两个界面上都有落点，否则用户看到的又是静默降级。
   global_throttled: 'settings.sw.nerSkipGlobalThrottled',
   sem_timeout: 'settings.sw.nerSkipSemTimeout',
+  // 批次 2（统一检测口径）：`reason_codes` 里可能出现的非 NER 原因码。
+  // 与 `inspection.REASON_CODES` 同源；新增码必须同时在这里与 i18n 里落地，
+  // 否则用户在详情里看到的是裸键名（等价于“看不懂的降级”）。
+  signed_blocks_skipped: 'reason.signedBlocksSkipped',
+  unresolved_tokens: 'reason.unresolvedTokens',
+  semantic_incomplete: 'reason.semanticIncomplete',
+  request_too_large: 'reason.requestTooLarge',
+  engine_busy: 'reason.engineBusy',
+  engine_timeout: 'reason.engineTimeout',
+  pipeline_error: 'reason.pipelineError',
+  audit_truncated: 'reason.auditTruncated',
+  command_blocked: 'reason.commandBlocked',
+  response_too_large: 'reason.responseTooLarge',
+  not_target: 'reason.notTarget',
+  host_not_configured: 'reason.hostNotConfigured',
+  path_not_configured: 'reason.pathNotConfigured',
+  no_reverse_route: 'reason.noReverseRoute',
+}
+
+/** 处置结论 → i18n 键（批次 2 统一口径，见引擎 `inspection.DECISION_*`）。 */
+const DECISION_LABELS: Record<string, string> = {
+  masked: 'detail.decisionMasked',
+  scanned_clean: 'detail.decisionScannedClean',
+  blocked: 'detail.decisionBlocked',
+  passthrough: 'detail.decisionPassthrough',
+}
+
+/** 完整度 → i18n 键（`complete` 只表示“所配置的检测已执行完”，不保证现实无漏检）。 */
+const COMPLETENESS_LABELS: Record<string, string> = {
+  complete: 'detail.completenessComplete',
+  partial: 'detail.completenessPartial',
+  failed: 'detail.completenessFailed',
+  not_applicable: 'detail.completenessNotApplicable',
+  unknown: 'detail.completenessUnknown',
 }
 
 /**
@@ -135,10 +169,13 @@ export function EventDetailDialog({
   open,
   onOpenChange,
   seq,
+  logMode,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   seq: number | null
+  /** 当前生效的日志写入模式：summary 下正文本来就没落盘，要明确告知 */
+  logMode?: LogMode
 }) {
   const { t, tf } = useI18n()
   // Translate only known enums. New backend codes stay visible verbatim rather
@@ -160,6 +197,16 @@ export function EventDetailDialog({
   })
 
   const event: ShieldEvent | undefined = data?.ok ? data.event : undefined
+
+  // 本次检测的可读原因码（批次 2）：`reason_codes` 与 `ner_skip_reasons` 合并展示，
+  // 两处的键空间相同（NER 降级 + 协议契约豁免 + 阻断原因），同一个标签表渲染。
+  const reasonCodes = useMemo(
+    () =>
+      Object.entries({ ...(event?.reason_codes ?? {}), ...(event?.ner_skip_reasons ?? {}) })
+        .map(([k, n]) => [k, Number(n || 0)] as [string, number])
+        .filter(([, n]) => n > 0),
+    [event],
+  )
 
   // 可高亮的原文：凭据类只有 preview + sha256，没有明文可匹配
   const originals = useMemo(
@@ -240,6 +287,19 @@ export function EventDetailDialog({
 
         {event && (
           <div className="space-y-5">
+            <section aria-label={t('p6.journey.title')} className="rounded-lg border p-3 text-xs">
+              <h3 className="mb-2 font-medium">{t('p6.journey.title')}</h3>
+              <ol className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  [t('p6.journey.ingress'), t(event.ingress === 'ext' ? 'p6.verify.ext' : 'p6.verify.proxy')],
+                  [t('p6.journey.inspect'), event.decision ? t(DECISION_LABELS[event.decision] ?? event.decision) : t('p6.journey.missing')],
+                  [t('p6.journey.forward'), typeof event.upstream_ms === 'number' ? formatDuration(event.upstream_ms) : t('p6.journey.missing')],
+                  [t('p6.journey.restore'), typeof event.restored === 'number' ? String(event.restored) : t('p6.journey.missing')],
+                ].map(([label, value], index) => <li key={label}>
+                  <p className="text-muted-foreground">{index + 1}. {label}</p><p className="mt-1 break-words">{value}</p>
+                </li>)}
+              </ol>
+            </section>
             {/* 基本信息 */}
             <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
               <MetaItem
@@ -399,6 +459,38 @@ export function EventDetailDialog({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
                 {event.msg && <div className="whitespace-pre-wrap">{event.msg}</div>}
                 {event.reason && <div className="mt-1 text-muted-foreground">{transportLabel('reason', event.reason)}</div>}
+              </div>
+            )}
+
+            {/* 本次检测结论（批次 2 统一口径）：把「扫了没命中 / 已脱敏 / 主动阻断 / 明确直通」
+                四种状态分开显示——它们此前在列表里都表现为「0 命中」。完整度只表示
+                「所配置的检测执行到什么程度」，不保证现实中没有漏检；原因码如实列出。 */}
+            {(event.decision || event.completeness) && (
+              <div className="rounded-lg border bg-muted/30 p-3 text-xs leading-relaxed">
+                <div className="flex flex-wrap items-center gap-2">
+                  {event.decision && (
+                    <Badge
+                      variant={event.decision === 'blocked' ? 'destructive' : 'secondary'}
+                      className="text-[11px]"
+                    >
+                      {t(DECISION_LABELS[event.decision] || event.decision)}
+                    </Badge>
+                  )}
+                  {event.completeness && (
+                    <Badge variant="outline" className="text-[11px] font-normal">
+                      {t(COMPLETENESS_LABELS[event.completeness] || event.completeness)}
+                    </Badge>
+                  )}
+                </div>
+                {reasonCodes.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {reasonCodes.map(([k, n]) => (
+                      <Badge key={k} variant="outline" className="text-[11px] font-normal">
+                        {t(NER_SKIP_LABELS[k] || k)} × {n}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -639,6 +731,15 @@ export function EventDetailDialog({
                 )}
               </div>
             )}
+
+            {/* 最小记录模式下正文根本没落盘：必须**明确写「未记录」**，
+                而不是留一片空白让用户猜是脱敏失败还是 UI 坏了（§D1/§E）。 */}
+            {logMode === 'summary' && !event.dialog_req && !event.dialog && !event.req_preview &&
+              !(event as { resp_preview?: string }).resp_preview && (
+                <p className="rounded-lg border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground">
+                  {t('detail.notRecorded')}
+                </p>
+              )}
           </div>
         )}
       </DialogContent>
