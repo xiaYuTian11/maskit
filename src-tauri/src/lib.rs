@@ -2127,10 +2127,14 @@ mod panel_alive_tests {
             return;
         }
         // Change proxy variables only in a child, never in the parallel test runner.
+        // ⚠ Windows runner 上子进程 exe 启动可能被 Defender 实时扫描拖到 4s 以上，
+        // 而 server 线程超时后会带着 listener 一起退出（端口关闭）→ 子进程探活必败
+        //（2026-10-05 CI 实测 flaky）。窗口放宽到 30s：成功路径收到请求即返回不受影响，
+        // 仅失败路径父进程 join 时需等满窗口。
         let (listener, port) = hold_port();
         listener.set_nonblocking(true).unwrap();
         let server = std::thread::spawn(move || {
-            let end = Instant::now() + Duration::from_secs(4);
+            let end = Instant::now() + Duration::from_secs(30);
             while Instant::now() < end {
                 if let Ok((mut stream, _)) = listener.accept() {
                     stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
@@ -2149,6 +2153,7 @@ mod panel_alive_tests {
             child.env(key, "http://127.0.0.1:0");
         }
         let output = child.output().unwrap();
+        // 成功路径 server 线程已 return，join 立即完成；仅失败路径最多等满窗口。
         server.join().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     }

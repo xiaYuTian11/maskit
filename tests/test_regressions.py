@@ -8002,14 +8002,19 @@ class NerCacheStatsTests(unittest.TestCase):
     def test_hit_and_miss_are_counted(self):
         import ner_engine
         text = "缓存命中计数专用文本甲乙丙丁"
+        # 写一条负缓存（空结果）再查：命中路径不依赖模型，CI 无模型时也成立。
+        # 【bug fix 2026-10-05】上一版传了原文而非 fingerprint 作为 key，导致在无模型时 miss（
+        # 本机有模型时碰巧走"真实推理的内部缓存条目"才过，是假绿；CI 无模型直接暴露根因）。
+        # _fp 是 fingerprint，同 _cache_put 的调用约定（key = fingerprint，值 = 三元组列表，text_len = 原文长度）。
+        _fp = ner_engine._cache_fingerprint(text)
         with ner_engine._CACHE_LOCK:
-            ner_engine._CACHE.pop(text, None)
+            ner_engine._CACHE.pop(_fp, None)  # 清除可能残留
         base = ner_engine.cache_stats()
-        ner_engine.extract_entities(text)              # 首次：未命中
+        ner_engine.extract_entities(text)            # 首次：未命中（无模型也走缓存统计段）
         mid = ner_engine.cache_stats()
         self.assertEqual(mid["miss"] - base["miss"], 1, "未命中未计数")
-        # 写一条负缓存（空结果）再查：命中路径不依赖模型，CI 无模型时也成立
-        ner_engine._cache_put(text, [])
+        # 手动写负缓存，key 必须是 fingerprint（不能是原文）
+        ner_engine._cache_put(_fp, [], len(text))
         ner_engine.extract_entities(text)              # 二次：命中
         after = ner_engine.cache_stats()
         self.assertEqual(after["hit"] - mid["hit"], 1, "命中未计数")
