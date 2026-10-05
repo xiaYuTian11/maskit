@@ -5,6 +5,7 @@
 ## [0.8.0] - 2026-10-05
 
 ### 修复
+- Docker：容器改以 uid 1001（仍非 root）运行，NAS 挂载宿主目录（属主多在 1000 段）不再报 sqlite 打不开；前端构建镜像升 Node 24（PR #33 by @chung1912）。
 - Linux：托盘支持左键直接唤醒主窗口，右键保留菜单，避免每次打开窗口都要多选一次。
 - 日志：已完成交付后的客户端关连接不再记成「取消」（CANCEL），并给取消事件补齐归因字段（已下发字节/回调次数、脱敏耗时、上游与模型），列表不再被无信息量的取消行刷屏、真中断也不再与收尾断开长得一样。
 - 引擎：思考强度排查提示只在上游**参数类错误**（400/422）时给出，Cloudflare 524 / 502 这类上游超时不再被误报成「reasoning_effort 取值不被支持」。
@@ -53,6 +54,7 @@
 ---
 
 ### Fixed
+- Docker: the container now runs as uid 1001 (still non-root), so NAS bind-mounts owned by 1000-range users no longer fail with "unable to open database file"; frontend build stage upgraded to Node 24 (PR #33 by @chung1912).
 - Linux: left-clicking the tray now opens the main window directly, while right-clicking keeps the menu.
 - Logs: a client closing the connection after the response was fully delivered is no longer recorded as a cancellation (CANCEL), and cancel events now carry attribution fields (delivered bytes / stream callback count, masking duration, upstream and model) — genuine aborts no longer look identical to post-completion closes.
 - Engine: the thinking-level hint is now attached only to parameter-type upstream errors (400/422); gateway timeouts such as Cloudflare 524 / 502 are no longer misreported as an unsupported `reasoning_effort` value.
