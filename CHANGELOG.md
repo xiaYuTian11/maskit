@@ -2,6 +2,14 @@
 
 本文件记录对用户可见的变更；格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [Unreleased]
+
+### 优化
+- 日志：「隐藏噪声」默认开启（实测取消记录与脱敏记录约 1:1，列表一半被取消行占据），并记住开关选择——刷新或重开客户端后仍生效；开关说明改为列出实际隐藏的五类事件（透传/跳过/绕过/取消/DNS 错误）。
+
+### Changed
+- Logs: hide noise events by default (cancelled rows were ~1:1 with mask rows) and remember the toggle across sessions; the tooltip now names the five hidden event types.
+
 ## [0.8.0] - 2026-10-05
 
 ### 修复

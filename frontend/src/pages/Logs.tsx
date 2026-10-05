@@ -133,6 +133,41 @@ const LOG_GRID_COLS =
 /** 表格最小宽度：上面这些列 + gap + 左右内边距能完整放下的下限；低于它由外层横向滚动接管。 */
 const LOG_MIN_W = 'min-w-[940px]'
 
+/** 「隐藏噪声」偏好的存储键（localStorage）：跨会话保留，重开客户端后仍生效。
+ *  命名沿用 AppLayout 的 `maskit_sidebar_collapsed`（maskit_ + 模块 + 字段），
+ *  不再自创 `maskit.logs.xxx` 这种点号风格。 */
+const HIDE_NOISE_STORAGE_KEY = 'maskit_logs_hide_noise'
+
+/**
+ * 噪声默认隐藏。实测（2026-10-05 本机事件库）CANCEL 与 MASK 已接近 1:1，
+ * 默认展示会让列表一半是客户端断开行；需要看全量时关掉开关即可（选择被记住）。
+ */
+const HIDE_NOISE_DEFAULT = true
+
+/**
+ * 读「隐藏噪声」偏好。localStorage 不可用（隐私模式 / 受限 webview）时退回默认值 ——
+ * 偏好读不到不该让日志页报错，也不该让筛选行为变得不可预期。
+ */
+function readHideNoisePreference(): boolean {
+  try {
+    const raw = localStorage.getItem(HIDE_NOISE_STORAGE_KEY)
+    if (raw === '0') return false
+    if (raw === '1') return true
+  } catch {
+    /* 读失败按默认值处理 */
+  }
+  return HIDE_NOISE_DEFAULT
+}
+
+/** 写「隐藏噪声」偏好；写失败静默（与 shield-fetch 的 sessionStorage 同口径）。 */
+function writeHideNoisePreference(value: boolean): void {
+  try {
+    localStorage.setItem(HIDE_NOISE_STORAGE_KEY, value ? '1' : '0')
+  } catch {
+    /* 隐私模式等场景忽略 */
+  }
+}
+
 interface LogsCache {
   list: ShieldEvent[]
   tail: string[]
@@ -171,7 +206,8 @@ export default function LogsPage() {
   const [confirmClear, setConfirmClear] = useState(false)
   const [tailOpen, setTailOpen] = useState(false)
   const [tailData, setTailData] = useState<string[]>([])
-  const [hideNoise, setHideNoise] = useState(false)
+  // 懒初始化读本地偏好：默认开启，用户关掉后下次进来仍是关掉的（见 readHideNoisePreference）
+  const [hideNoise, setHideNoise] = useState<boolean>(readHideNoisePreference)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -908,8 +944,13 @@ export default function LogsPage() {
           <Switch checked={sensitive} onCheckedChange={(v) => { setSensitive(v); setPage(1) }} className="scale-75" />
           <span>{t('logs.sensitiveOnly')}</span>
         </label>
+        {/* 切开关会改变列表行数：重置页码，避免停留在越界的空页（与全文搜索/仅敏感同口径） */}
         <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground" title={t('logs.hideNoiseTitle')}>
-          <Switch checked={hideNoise} onCheckedChange={setHideNoise} className="scale-75" />
+          <Switch
+            checked={hideNoise}
+            onCheckedChange={(v) => { setHideNoise(v); setPage(1); writeHideNoisePreference(v) }}
+            className="scale-75"
+          />
           <span>{t('logs.hideNoise')}</span>
         </label>
 
