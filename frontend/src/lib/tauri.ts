@@ -23,6 +23,28 @@ export async function getEngineState(): Promise<EngineState> {
   return await invoke<EngineState>('engine_state')
 }
 
+/** 客户端（壳）版本；非 Tauri 环境（浏览器 / Docker WebUI）返回空串。
+ *
+ * 用途只有一个：**面板不可达时的版本兜底**。引擎版本（/api/status.version）是
+ * 唯一真相来源，但面板连不上时它必然取不到，而“报障先问对方是什么版本”恰恰
+ * 最需要这个数字（502 这类故障现场连侧栏版本徽标都是空的）。
+ *
+ * 壳版本与引擎版本由 `scripts/check-version.py` 钉住同源（tauri.conf.json /
+ * panel.py / Cargo.toml / package.json 四处必须一致），因此可作兜底；但本地
+ * dev 部署只替换引擎目录时两者可能不同，调用方**必须标注来源**，不得冒充引擎版本。
+ * 单次进程生命周期内版本不变，取一次即缓存。 */
+let shellVersionPromise: Promise<string> | null = null
+
+export function getShellVersion(): Promise<string> {
+  if (!isTauri()) return Promise.resolve('')
+  if (!shellVersionPromise) {
+    shellVersionPromise = import('@tauri-apps/api/app')
+      .then((m) => m.getVersion())
+      .catch(() => '')
+  }
+  return shellVersionPromise
+}
+
 export async function restartEngine(): Promise<{ ok: boolean; error?: string }> {
   return await invoke('restart_engine')
 }

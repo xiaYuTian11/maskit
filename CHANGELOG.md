@@ -6,9 +6,11 @@
 
 ### 优化
 - 日志：「隐藏噪声」默认开启（实测取消记录与脱敏记录约 1:1，列表一半被取消行占据），并记住开关选择——刷新或重开客户端后仍生效；开关说明改为列出实际隐藏的五类事件（透传/跳过/绕过/取消/DNS 错误）。
+- 版本号：面板连不上时侧栏与「关于」卡回退显示客户端版本并标注来源（此前 502 这类故障截图上根本没有版本号，报障无从判断），面板启动日志首行也带上版本。
 
 ### Changed
 - Logs: hide noise events by default (cancelled rows were ~1:1 with mask rows) and remember the toggle across sessions; the tooltip now names the five hidden event types.
+- Version: when the panel is unreachable, the sidebar and About card fall back to the client version with an explicit source note (such failure screenshots previously carried no version at all); the panel startup log line now prints it too.
 
 ## [0.8.0] - 2026-10-05
 

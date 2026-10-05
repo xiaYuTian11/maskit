@@ -18,7 +18,7 @@ import { toast } from '@/lib/toast'
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
 import { cn } from '@/lib/utils'
-import { checkUpdate, installUpdate, onUpdateProgress, type UpdateCheck } from '@/lib/tauri'
+import { checkUpdate, getShellVersion, installUpdate, onUpdateProgress, type UpdateCheck } from '@/lib/tauri'
 import { Logo } from '@/components/brand/Logo'
 import dayjs from 'dayjs'
 
@@ -28,6 +28,14 @@ function fmtMB(n: number): string {
 
 export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updateSource, onSaveUpdateSource }: { version?: string; dataRoot?: string; running?: boolean; autoInstall?: boolean; updateSource?: string; onSaveUpdateSource?: (v: string) => void }) {
   const { t, tf } = useI18n()
+  // 引擎版本（面板 /api/status）取不到时兜底显示客户端（壳）版本，并标出来源——
+  // 否则用户报障发来的截图里只有一个数字，无法区分它是引擎还是壳。
+  const [shellVersion, setShellVersion] = useState('')
+  useEffect(() => {
+    getShellVersion().then(setShellVersion)
+  }, [])
+  const shownVersion = version || shellVersion
+  const versionFromShell = !version && !!shellVersion
   const [checking, setChecking] = useState(false)
   const [result, setResult] = useState<UpdateCheck | null>(null)
   const [installing, setInstalling] = useState(false)
@@ -111,7 +119,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
       <CardHeader className="flex-row items-center gap-3 space-y-0">
         <Logo className="h-10 w-10 shrink-0" />
         <div className="min-w-0">
-          <CardTitle className="flex items-center gap-2 text-base">Data Maskit <Badge variant="outline" className="font-mono text-xs">v{version || '—'}</Badge></CardTitle>
+          <CardTitle className="flex items-center gap-2 text-base">Data Maskit <Badge variant="outline" className="font-mono text-xs" title={versionFromShell ? t('common.versionFromShell') : undefined}>v{shownVersion || '—'}</Badge></CardTitle>
           <p className="mt-0.5 text-[11px] text-muted-foreground">{t('about.subtitle')}</p>
           {dataRoot && <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{dataRoot}</p>}
         </div>
@@ -125,8 +133,11 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
       <CardContent className="space-y-3">
         <div className="flex items-center justify-between text-xs">
           <span className="text-muted-foreground">{t('about.currentVersion')}</span>
-          <code className="font-mono text-foreground">v{version || '—'}</code>
+          <code className="font-mono text-foreground">{`v${shownVersion || '—'}`}</code>
         </div>
+        {versionFromShell && (
+          <p className="text-[11px] text-muted-foreground">{t('common.versionFromShell')}</p>
+        )}
 
         {installing ? (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">

@@ -127,6 +127,8 @@ const zh: Record<string, string> = {
   'common.config': '配置',
   'common.running': '运行中',
   'common.stopped': '已停止',
+  // 面板不可达时 UI 无引擎版本可拿，兜底显示客户端（壳）版本时必须标出来源
+  'common.versionFromShell': '引擎未就绪，显示客户端版本',
   // 控制台（Dashboard）
   'dash.masking': '脱敏运行',
   'dash.standby': '待机',
@@ -1574,6 +1576,7 @@ const en: Record<string, string> = {
   'common.config': 'Settings',
   'common.running': 'Running',
   'common.stopped': 'Stopped',
+  'common.versionFromShell': 'Engine not ready — showing the client version',
   'dash.masking': 'Masking Active',
   'dash.standby': 'Standby',
   'dash.uptime': 'Uptime',

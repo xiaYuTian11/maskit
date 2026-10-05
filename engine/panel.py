@@ -9437,7 +9437,9 @@ def start_panel_server(open_browser_on_start=True):
         install_console_close_handler()
     if open_browser_on_start:
         threading.Thread(target=open_browser, daemon=True).start()
-    print(f"[panel] http://{PANEL_HOST}:{PANEL_PORT}")
+    # 首行带版本号：面板连不上时 UI 拿不到版本（版本徽标取自 /api/status），
+    # 而“报障时先确认对方是哪个版本”只能靠这行日志。
+    print(f"[panel] Data Maskit v{__version__}  http://{PANEL_HOST}:{PANEL_PORT}")
     if REMOTE_MODE:
         # 远程模式下用户只能从这里拿到 token（随机时打印明文；固定时只提示来源）
         if _env_token:

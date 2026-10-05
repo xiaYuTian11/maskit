@@ -48,7 +48,7 @@ function GithubIcon({ className }: { className?: string }) {
 }
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
-import { checkUpdate, updateTrayProxyStatus } from '@/lib/tauri'
+import { checkUpdate, getShellVersion, updateTrayProxyStatus } from '@/lib/tauri'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { getStoredWallpaperConfig } from '@/lib/wallpaper'
 
@@ -125,6 +125,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [proxyBusy, setProxyBusy] = useState(false)
   const [originBlocked, setOriginBlocked] = useState(false)
   const [rescuingOrigin, setRescuingOrigin] = useState(false)
+
+  // 客户端（壳）版本兜底：/api/status 拿不到时（面板不可达）引擎版本必然为空，
+  // 而报障恰恰最需要版本号。来源由 title 标注，不冒充引擎版本。
+  const [shellVersion, setShellVersion] = useState('')
+  useEffect(() => {
+    getShellVersion().then(setShellVersion)
+  }, [])
 
   useEffect(() => {
     const onOriginRejected = () => setOriginBlocked(true)
@@ -323,9 +330,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-bold leading-tight">Data Maskit</span>
-                {status?.version && (
-                  <span className="rounded border bg-muted/60 px-1 py-0 font-mono text-[10px] text-muted-foreground">
-                    v{status.version}
+                {(status?.version || shellVersion) && (
+                  <span
+                    className="rounded border bg-muted/60 px-1 py-0 font-mono text-[10px] text-muted-foreground"
+                    title={status?.version ? undefined : t('common.versionFromShell')}
+                  >
+                    v{status?.version || shellVersion}
                   </span>
                 )}
               </div>
