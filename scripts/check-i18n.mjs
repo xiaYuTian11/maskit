@@ -4,7 +4,9 @@
  *
  * 规则：
  *  1. zh / en 两组 key 必须完全一致——缺一侧就会在对应语言下显示裸 key；
- *  2. 源码里 t('x') / tf('x') / tt('x') / ttf('x') / labelKey: 'x' 引用的 key 必须存在于字典。
+ *  2. 源码里 t('x') / tf('x') / tt('x') / ttf('x')，以及配置表里以 xxxKey: 'x'
+ *     形态登记的字典键（labelKey / titleKey / descKey / reasonKey / impactKey …），
+ *     引用的 key 必须存在于字典。
  *
  * 用法：node scripts/check-i18n.mjs   （在仓库任意目录执行均可；退出码 0 通过 / 1 失败）
  */
@@ -41,7 +43,9 @@ const used = new Set()
 for (const f of walk(SRC)) {
   const s = readFileSync(f, 'utf-8')
   for (const m of s.matchAll(/\b(?:t|tf|tt|ttf)\(\s*'([^']+)'/g)) used.add(m[1])
-  for (const m of s.matchAll(/labelKey:\s*'([^']+)'/g)) used.add(m[1])
+  // 只认 labelKey 一种写法的话，新加的 titleKey / descKey 之类字段会整体逃过检查，
+  // 而漏掉的 key 在 UI 上是「直接显示 help.page.logs.title」这种裸键。
+  for (const m of s.matchAll(/\b[A-Za-z][A-Za-z0-9]*Key:\s*'([^']+)'/g)) used.add(m[1])
 }
 // 动态拼接的前缀（如 t('nav.' + key)）不在静态检查范围内
 used.delete('nav.')

@@ -38,6 +38,8 @@ import { Logo } from '@/components/brand/Logo'
 import { cn } from '@/lib/utils'
 import { toast } from '@/lib/toast'
 import { shieldFetch } from '@/lib/shield-fetch'
+import { HelpCenter } from '@/components/help/HelpCenter'
+import { OnboardingWizard, ONBOARDING_STORAGE_KEY } from '@/components/onboarding/OnboardingWizard'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -125,6 +127,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [proxyBusy, setProxyBusy] = useState(false)
   const [originBlocked, setOriginBlocked] = useState(false)
   const [rescuingOrigin, setRescuingOrigin] = useState(false)
+  // 首次引导的显式开关：undefined = 交给组件按「是否首次运行」自己决定，true = 用户手动要求重看
+  const [onboardingOpen, setOnboardingOpen] = useState<boolean | undefined>(undefined)
 
   // 客户端（壳）版本兜底：/api/status 拿不到时（面板不可达）引擎版本必然为空，
   // 而报障恰恰最需要版本号。来源由 title 标注，不冒充引擎版本。
@@ -480,6 +484,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 </span>
               </Button>
             )}
+            <HelpCenter
+              onRestartTour={() => {
+                try { localStorage.removeItem(ONBOARDING_STORAGE_KEY) } catch {}
+                setOnboardingOpen(true)
+              }}
+            />
             <Button
               size="sm"
               variant="ghost"
@@ -589,6 +599,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </main>
       </div>
+      <OnboardingWizard
+        open={onboardingOpen}
+        onOpenChange={setOnboardingOpen}
+        firstRun={status ? (status.upstreams?.length ?? 0) === 0 : undefined}
+      />
     </div>
   )
 }

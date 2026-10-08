@@ -4,13 +4,23 @@
 
 ## [Unreleased]
 
+### 新增
+- 面板：顶栏新增常驻「帮助」入口（页面导览、快速上手、常见问题、教程跳转）与三步首次引导；引导仅在尚未配置任何客户端时自动弹出，老用户升级不会被打断。
+- 文档：新增 `docs/SETTINGS.md`，按页面与开关逐项解释配置口径。
+
+### Added
+- Panel: the top bar gains a permanent Help entry (page guide, quick start, FAQ, tutorial links) and a three-step first-run guide that auto-opens only while no client is configured, so upgrades never interrupt existing users.
+- Docs: added `docs/SETTINGS.md`, explaining each page and switch.
+
 ### 优化
 - 日志：「隐藏噪声」默认开启（实测取消记录与脱敏记录约 1:1，列表一半被取消行占据），并记住开关选择——刷新或重开客户端后仍生效；开关说明改为列出实际隐藏的五类事件（透传/跳过/绕过/取消/DNS 错误）。
 - 版本号：面板连不上时侧栏与「关于」卡回退显示客户端版本并标注来源（此前 502 这类故障截图上根本没有版本号，报障无从判断），面板启动日志首行也带上版本。
+- 设置：上游连接策略的「连接复用 / 空闲期限 / 建连预算 / TLS 预算」四项补上悬停说明，明确它们是建连与握手预算，不是模型请求或 SSE 流的时长。
 
 ### Changed
 - Logs: hide noise events by default (cancelled rows were ~1:1 with mask rows) and remember the toggle across sessions; the tooltip now names the five hidden event types.
 - Version: when the panel is unreachable, the sidebar and About card fall back to the client version with an explicit source note (such failure screenshots previously carried no version at all); the panel startup log line now prints it too.
+- Settings: the four upstream connection-policy fields now explain on hover that they budget connection setup and the TLS handshake, not model requests or SSE streams.
 
 ## [0.8.0] - 2026-10-05
 

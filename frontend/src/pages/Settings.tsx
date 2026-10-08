@@ -426,7 +426,12 @@ function UpstreamForm({
               <p className="text-muted-foreground">{t('connection.policyHint')}</p>
               {!deadlinesAvailable && <p role="status" className="text-muted-foreground">{t('connection.unavailable')}</p>}
               {http2 && <p className="text-muted-foreground">{t('connection.h1Only')}</p>}
-              <Label htmlFor="connection-reuse">{t('connection.reuse')}</Label>
+              <TooltipProvider delayDuration={200}>
+                <Label htmlFor="connection-reuse" className="flex items-center gap-1">
+                  {t('connection.reuse')}
+                  <Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.reuseTooltip')}</TooltipContent></Tooltip>
+                </Label>
+              </TooltipProvider>
               <Select value={policy.reuse} disabled={!reuseAvailable} onValueChange={(v) => setPolicy({ reuse: v as 'default' | 'never' })}>
                 <SelectTrigger id="connection-reuse" className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -435,12 +440,24 @@ function UpstreamForm({
                 </SelectContent>
               </Select>
               <div className="grid grid-cols-3 gap-2">
-                <div><Label htmlFor="connection-idle">{t('connection.idleTtl')}</Label>
-                  <Input id="connection-idle" className="mt-1 h-8 text-xs" type="number" min="0.001" step="any" disabled={!reuseAvailable} value={policy.idle_ttl_s ?? ''} placeholder={t('connection.unchanged')} onChange={(e) => setPolicy({ idle_ttl_s: e.target.value === '' ? null : Number(e.target.value) })} /></div>
-                <div><Label htmlFor="connection-connect">{t('connection.connectBudget')}</Label>
-                  <Input id="connection-connect" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.connect_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ connect_timeout_s: Number(e.target.value) })} /></div>
-                <div><Label htmlFor="connection-tls">{t('connection.tlsBudget')}</Label>
-                  <Input id="connection-tls" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.tls_handshake_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ tls_handshake_timeout_s: Number(e.target.value) })} /></div>
+                <div>
+                  <TooltipProvider delayDuration={200}>
+                    <Label htmlFor="connection-idle" className="flex items-center gap-1">{t('connection.idleTtl')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.idleTtlTooltip')}</TooltipContent></Tooltip></Label>
+                  </TooltipProvider>
+                  <Input id="connection-idle" className="mt-1 h-8 text-xs" type="number" min="0.001" step="any" disabled={!reuseAvailable} value={policy.idle_ttl_s ?? ''} placeholder={t('connection.unchanged')} onChange={(e) => setPolicy({ idle_ttl_s: e.target.value === '' ? null : Number(e.target.value) })} />
+                </div>
+                <div>
+                  <TooltipProvider delayDuration={200}>
+                    <Label htmlFor="connection-connect" className="flex items-center gap-1">{t('connection.connectBudget')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.connectBudgetTooltip')}</TooltipContent></Tooltip></Label>
+                  </TooltipProvider>
+                  <Input id="connection-connect" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.connect_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ connect_timeout_s: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <TooltipProvider delayDuration={200}>
+                    <Label htmlFor="connection-tls" className="flex items-center gap-1">{t('connection.tlsBudget')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.tlsBudgetTooltip')}</TooltipContent></Tooltip></Label>
+                  </TooltipProvider>
+                  <Input id="connection-tls" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.tls_handshake_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ tls_handshake_timeout_s: Number(e.target.value) })} />
+                </div>
               </div>
               {form.connection_policy && <Button size="sm" variant="outline" onClick={() => set('connection_policy', null)}>{t('connection.reset')}</Button>}
             </div>
