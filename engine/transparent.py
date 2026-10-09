@@ -35,6 +35,7 @@ import uuid
 from pathlib import Path
 from mitmproxy import http, ctx, exceptions
 from connection_policy import ConnectionGovernance, validate_connection_policy
+import upstream_retry as _upstream_retry
 from body_buffer import decode_body
 import inspection
 import onboarding
@@ -7144,7 +7145,8 @@ def _write_runtime_metrics(force=False):
             "audit": audit_runtime_stats(),
             "engine_deadline_s": _ENGINE_DEADLINE_S,
             "connect": dict(_CONNECT_STALL, stall_after_s=_CONNECT_STALL_S,
-                            actuating=_CONNECT_KILL, kills=dict(_CONNECT_KILL_TOTAL)),
+                            actuating=_CONNECT_KILL, kills=dict(_CONNECT_KILL_TOTAL),
+                            retry=_upstream_retry.stats()),
             "transport": dict(_CONNECTION_STATS),
             "heartbeat": dict(_HEARTBEAT),
         }
@@ -10575,6 +10577,7 @@ def load(l):
     _maybe_reload(force=True)
     _warmup_recent_from_db()
     _prune_debug_logs()
+    _upstream_retry.patch()
     # 重启即关闭限时排障（§D1：trace 不跨重启）。面板启动时也会清一次，
     # 两处都清是为了覆盖「只重启引擎」与「只重启面板」两种启法。
     try:
