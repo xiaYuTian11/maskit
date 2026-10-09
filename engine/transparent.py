@@ -68,6 +68,8 @@ _CONNECTION_STATS = {}
 _HEARTBEAT = {}
 _HEARTBEAT_TASK = None
 _METRICS_POOL = None
+_CONNECT_STALL = {}
+_CONNECT_KILL_TOTAL = {"killed": 0, "ambiguous": 0, "no_conn": 0, "no_task": 0}
 _MASK_CANCEL_BY_CLIENT = {}
 _MASK_WORK_CONTEXT = threading.local()
 
@@ -307,12 +309,71 @@ def configure(updated):
         raise exceptions.OptionsError("Maskit requires stream_large_bodies to remain unset")
 
 
+def _hop_task_candidates(tasks, address, peername):
+    """The mitmproxy task(s) establishing exactly this hop.
+
+    mitmproxy names them ``server connection handler <address>`` and tags the task with
+    the owning client peername (`utils/asyncio_utils.set_task_debug_info`), so this
+    resolves the hop from outside without holding any mitmproxy object. Anything but
+    exactly one hit is left alone: a *second* handshake to the same address from the
+    same client connection is a fact we do not have, and guessing would kill a healthy
+    request. A rename upstream degrades to "no match" = today's behaviour, not to a
+    wrong cancel.
+    """
+    want = f"server connection handler {address}"
+    return [task for task in tasks
+            if task.get_name() == want and getattr(task, "client", None) == peername
+            and not task.done()]
+
+
+def _act_handshake_kills(stalled):
+    """Bound a pre-send handshake by cancelling exactly the task that owns that hop.
+
+    mitmproxy's `open_connection` catches the resulting CancelledError, records
+    `connection.error`, fires `server_connect_error` and completes the command with the
+    error, so the flow dies through mitmproxy's own path and the client gets a clean 502
+    instead of a 127 s silence. We never fabricate a response here: nothing was sent
+    upstream, so nothing unscanned or un-restored is being passed on.
+
+    `stalled` is per hop (see `ConnectionGovernance.stalled_before_send`), which is also
+    how the flows sharing a pending connection die: together, via mitmproxy, once.
+    """
+    counters = {"killed": 0, "ambiguous": 0, "no_conn": 0, "no_task": 0}
+    if not _CONNECT_KILL or not stalled:
+        return counters
+    tasks = list(asyncio.all_tasks())
+    for conn_id, _phase, address, peer in stalled:
+        if not address or not peer:
+            counters["no_conn"] += 1
+            continue
+        if not _CONNECTIONS.claim_handshake_kill(conn_id):
+            continue
+        hits = _hop_task_candidates(tasks, address, peer)
+        if len(hits) > 1:
+            counters["ambiguous"] += 1
+        elif not hits:
+            counters["no_task"] += 1
+        else:
+            hits[0].cancel()
+            _CONNECTIONS.confirm_handshake_kill(conn_id)
+            counters["killed"] += 1
+    return counters
+
+
 async def _heartbeat_loop():
-    global _CONNECTION_STATS, _HEARTBEAT
+    global _CONNECTION_STATS, _HEARTBEAT, _CONNECT_STALL
     loop = asyncio.get_running_loop()
     expected = loop.time()
     while True:
         _CONNECTION_STATS = _CONNECTIONS.stats()
+        # 只能在事件循环上算：_flows/_connections 由循环独占，metrics 线程读它会竞态。
+        stalled = _CONNECTIONS.stalled_before_send(_CONNECT_STALL_S)
+        for key, value in _act_handshake_kills(stalled).items():
+            _CONNECT_KILL_TOTAL[key] += value
+        _CONNECT_STALL = {
+            "stalled": len(stalled),
+            "phases": sorted({phase for _conn, phase, _addr, _peer in stalled}),
+        }
         _HEARTBEAT = {"generated_at": int(time.time()),
                       "loop_lag_ms": round(max(0, loop.time() - expected) * 1000, 2)}
         # Only one queued write; never use the DNS/default executor or block the loop.
@@ -767,6 +828,21 @@ def _env_float(name, default):
         return float(raw)
     except ValueError:
         return float(default)
+
+
+def _connect_budget(value):
+    """握手预算的口径：`0`（或负数）= 关闸只观测，正数夹到 5 s 下限。
+
+    下限的存在是因为这条预算会真的落刀：设成 1 s 会把「健康但慢」的握手（家里实测
+    最坏一次成功 13.1 s）一起掐掉，等于自己造故障。
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = 20.0
+    if seconds != seconds:  # NaN
+        seconds = 20.0
+    return 0.0 if seconds <= 0 else max(5.0, seconds)
 
 
 # 环境变量兜底（容器场景无法开面板时用）；config.json 里的值优先于它们。
@@ -6868,6 +6944,21 @@ _MASK_TIMEOUTS = {"count": 0, "peak_wait_ms": 0.0}
 # （被最外层 fail-closed 兜成 503 mask_pipeline_failed）—— 都是"整个网关不可用"的配置事故，
 # 由环境变量误写触发，所以在这里夹住（其余旋钮如 NER 预算同样有下限）。
 _ENGINE_DEADLINE_S = max(5.0, float(_env_float("MASKIT_ENGINE_DEADLINE_S", 120.0)))
+# 上游建连 / TLS 握手的**预算**（秒）。mitmproxy 12.2.3 在 `proxy/server.py:212` 直接
+# `await asyncio.open_connection(...)`，既没有 timeout 也没有 wait_for，所以一条被丢包的
+# 握手会一路走到内核 SYN 重传梯（实测 ≈127 s），而客户端在 180 s 整放弃 —— 用户看到的是
+# 一句无信息量的 `Request timed out.`。addon 侧也拦不住它：`flow.kill()` 与写
+# `flow.response` 都不改变客户端等待（黑洞实测 45s/50s 均拿到 0 字节）。
+# 有效的执行点是取消「正在建立这一跳的那个 task」：mitmproxy 自己的
+# `open_connection` 捕获 CancelledError 后会落 `server_connect_error` → 给客户端一个
+# 干净的 502（实测：8 次连续熔断后客户端连接仍可用、`max_conns` 信号量不泄漏）。
+# 20 s 的取值来自实测分布：健康握手 0.5–1.8 s，家里最坏一次**成功**握手 13.1 s，
+# 留 1.5x 余量；卡过 20 s 的那一跳剩下的是 4/8/16/32/64 s 的重传梯，掐掉让客户端
+# 立刻重试，比让它赌 127 s 好。熔断只在「请求尚未写出」时发生（判据见
+# `ConnectionGovernance.stalled_before_send`），推理模型首包几分钟的请求完全豁免。
+_CONNECT_STALL_S = _connect_budget(_env_float("MASKIT_CONNECT_STALL_S", 20.0))
+# 关掉它（`MASKIT_CONNECT_KILL=0`）= 退回纯观测：仍然统计、仍然归因，只是不落刀。
+_CONNECT_KILL = _env_int("MASKIT_CONNECT_KILL", 1) != 0 and _CONNECT_STALL_S > 0
 
 
 def set_mask_workers(n):
@@ -7052,6 +7143,8 @@ def _write_runtime_metrics(force=False):
             "aux_pool": aux_pool_stats(),
             "audit": audit_runtime_stats(),
             "engine_deadline_s": _ENGINE_DEADLINE_S,
+            "connect": dict(_CONNECT_STALL, stall_after_s=_CONNECT_STALL_S,
+                            actuating=_CONNECT_KILL, kills=dict(_CONNECT_KILL_TOTAL)),
             "transport": dict(_CONNECTION_STATS),
             "heartbeat": dict(_HEARTBEAT),
         }

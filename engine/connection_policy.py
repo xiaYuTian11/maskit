@@ -108,6 +108,7 @@ class ConnectionGovernance:
                 "connect_ms": None, "tls_start": None, "tls_ms": None,
                 "selected": 0, "active": set(), "idle_since": None,
                 "observed_connect": False, "activity_incomplete": False,
+                "killed": False, "kill_tries": 0, "address": None, "peer": None,
             }
         self._connections.move_to_end(key)
         return self._connections[key]
@@ -197,14 +198,46 @@ class ConnectionGovernance:
     def server_connect(self, data):
         state = self._hook(data.server, "connecting")
         state.update(start=self._clock(), observed_connect=True)
+        # mitmproxy names the task that owns this hop after exactly these two values
+        # (`server connection handler <address>`, tagged with the client peername), and
+        # `data.server` *is* that command's connection. Capturing them here is what lets
+        # the handshake gate find its hop without reading `flow.server_conn` — in regular
+        # mode that attribute does not name the connection being established (measured:
+        # address/identity mismatch, so the gate fell through to "do not kill").
+        server = getattr(data, "server", None)
+        client = getattr(data, "client", None)
+        address = getattr(server, "address", None)
+        peer = getattr(client, "peername", None)
+        state["address"] = tuple(address) if address else None
+        state["peer"] = tuple(peer) if peer else None
 
     def server_connected(self, data):
         state = self._hook(data.server, "tcp_connected")
         if state["start"] is not None:
             state["connect_ms"] = max(0, self._clock() - state["start"]) * 1000
 
+    def _failure(self, conn, phase, reason):
+        """Record why a hop died — unless we are the reason.
+
+        Cancelling a stalled handshake makes mitmproxy fire `server_connect_error` /
+        `tls_failed_server` right afterwards. Those are the *aftereffect* of our cancel;
+        keeping `handshake_timeout` is what makes the gate visible in the event log
+        exactly when it worked, instead of reading as the upstream's own failure.
+
+        The verdict has to be read before writing: `_hook()` clears `reason` as part of
+        the phase transition, so a killed hop would otherwise arrive here as "no reason
+        yet" and lose the attribution precisely in the case the gate exists to record.
+        The stuck phase is frozen for the same reason — a hop cut during TLS must not
+        be relabelled as "connecting".
+        """
+        state = self._state(conn)
+        if state["killed"]:
+            return state
+        state.update(phase=phase, reason=reason)
+        return state
+
     def server_connect_error(self, data):
-        self._hook(data.server, "connecting", "connect_failed")
+        self._failure(data.server, "connecting", "connect_failed")
 
     def server_disconnected(self, data):
         state = self._state(data.server)
@@ -222,7 +255,7 @@ class ConnectionGovernance:
             state["tls_ms"] = max(0, self._clock() - state["tls_start"]) * 1000
 
     def tls_failed_server(self, data):
-        self._hook(data.conn, "tls_handshake", "tls_failed")
+        self._failure(data.conn, "tls_handshake", "tls_failed")
 
     def responseheaders(self, flow):
         record = self._flows.get(flow)
@@ -311,6 +344,65 @@ class ConnectionGovernance:
     def error(self, flow):
         self._finish(flow, True)
 
+    # Phases that prove the request never reached the upstream. Once a connection
+    # is selected the remaining wait belongs to the model, and a reasoning request
+    # may legitimately stay unanswered for minutes, so it is never eligible here.
+    PRE_SEND_PHASES = frozenset({"unknown", "connecting", "tcp_connected", "tls_handshake"})
+    # A hop we already killed, or one whose matcher could not resolve, is not
+    # re-claimed forever: bounded tries keep a persistently ambiguous registry from
+    # spinning on the same flow every heartbeat while defaulting to "do not kill".
+    MAX_KILL_TRIES = 3
+
+    def stalled_before_send(self, deadline_s):
+        """Return ``[(conn_id, phase, address, client_peername)]`` for overruns.
+
+        One entry per **hop**, not per flow: mitmproxy shares a pending connection
+        between every request waiting on it, so there is exactly one task to cancel and
+        the flows on it all die together through mitmproxy's own error path.
+
+        The clock starts at ``server_connect`` and only a connection that actually
+        began establishing qualifies: time spent waiting for masking or for a
+        connection slot is local work, not a stalled handshake, and killing it
+        would punish a busy gateway instead of a dead path. ``selected`` is set
+        only once the connection is usable, so a flow still unselected is by
+        definition pre-request — that is what makes a short budget safe for
+        reasoning models whose first byte may take minutes.
+        """
+        if not deadline_s or deadline_s <= 0:
+            return []
+        now = self._clock()
+        stalled = {}
+        for record in self._flows.values():
+            if record["selected"]:
+                continue
+            state = self._connections.get(record["conn"])
+            if not state or state["start"] is None or state["killed"]:
+                continue
+            if now - state["start"] < deadline_s:
+                continue
+            if state["phase"] in self.PRE_SEND_PHASES:
+                stalled[record["conn"]] = (record["conn"], state["phase"],
+                                           state["address"], state["peer"])
+        return list(stalled.values())
+
+    def claim_handshake_kill(self, conn_id):
+        """Claim one actuation attempt for this hop; False if it is not ours to take."""
+        state = self._connections.get(conn_id)
+        if state is None or state["killed"] or state["kill_tries"] >= self.MAX_KILL_TRIES:
+            return False
+        state["kill_tries"] += 1
+        return True
+
+    def confirm_handshake_kill(self, conn_id):
+        """Mark the hop as killed, so its reason survives the later FIN."""
+        state = self._connections.get(conn_id)
+        if state is None:
+            return
+        state["killed"] = True
+        # `server_disconnected` only fills an empty reason (see that hook), so writing
+        # ours first is what keeps a killed handshake from being logged as an idle close.
+        state["reason"] = "handshake_timeout"
+
     def snapshot(self, flow) -> dict:
         record = self._flows.get(flow)
         if record is None:
@@ -345,8 +437,16 @@ class ConnectionGovernance:
             self._capabilities = MappingProxyType(transport_capabilities())
         now = self._clock()
         oldest = max((now - r["started"] for r in self._flows.values()), default=0)
+        # 窗口内口径（_connections 是 2048 上限的 LRU，evictions>0 时比率会被截断）：
+        # sends/handshakes 就是「每个上游握手服务几个请求」，它就是握手故障预算——
+        # 实测 1.03，即每次 API 调用都独立赌一次这条链路的丢包。
+        states = self._connections.values()
+        handshakes = sum(1 for s in states if s["observed_connect"])
+        sends = sum(s["selected"] for s in states)
+        kills = sum(1 for s in states if s["killed"])
         return {"connections": len(self._connections), "inflight": len(self._flows),
                 "finished": self._finished, "evictions": self._evictions,
+                "handshakes": handshakes, "sends": sends, "handshake_kills": kills,
                 "cancelled_after_complete": self._cancelled_after_complete,
                 "observation_errors": self.observation_errors, "timers": 0,
                 "oldest_request_age_s": max(0, oldest),
