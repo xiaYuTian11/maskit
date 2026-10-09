@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 修复
+- 日志：上游首包后彻底静默、被 mitmproxy 连接空闲看门狗（默认 600 秒）掐断的请求，此前写成「客户端断开」并把排查方向带向客户端；现改判为 `upstream_idle`（责任方上游）并给出连续静默秒数，`docs/SETTINGS.md` 同步说清三条互不相同的静默时间线。
+
+### Fixed
+- Logs: a request whose upstream fell silent after the first byte and was killed by mitmproxy's inactivity watchdog (600s by default) used to be written as a client disconnect, pointing triage at the wrong side; it is now attributed as `upstream_idle` (owner: upstream) with the idle seconds, and `docs/SETTINGS.md` spells out the three distinct silence timelines.
+
 ### 新增
 - 引擎：C1 上游传输接管（可选开关 `upstreams[].takeover`，默认关闭）。开启后旁路 mitmproxy 上游连接，由进程级 httpx keep-alive 连接池跨客户端共享上游连接，把每天数万次 TCP 握手降到数百次，丢包暴露从「每请求赌一次」降回「每批次赌一次」。TLS 证书校验默认严格（verify=True）、32 MiB 上限守卫平移、客户端凭据头原样透传（仅剥内部路由头）、有/无出口代理双池按上游分流均覆盖；`takeover=false` 时走原逻辑，零影响。
 - 面板：客户端编辑页新增「接管上游连接」开关；此前 `takeover` 只能手改 config.json，且面板任何一次保存都会把它静默抹掉。

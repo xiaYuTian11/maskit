@@ -124,6 +124,22 @@ class LogModeProjectionTests(unittest.TestCase):
         row = event_store.fetch_event_by_id(seq)
         self.assertEqual(row["items"], [{"label": "PHONE"}])
 
+    def test_summary_keeps_upstream_idle_evidence(self):
+        """`upstream_idle_s` 在最小模式下也必须留得住。
+
+        这条归因的全部用途是「看日志知道该查上游还是客户端」，而新装默认就是
+        summary。白名单漏登记时字段会在**写库前**被丢掉，弹窗/导出/诊断包一起变成
+        「结论有了、证据没了」，而导出侧守卫照样绿（它检查的是外传名单，不是落盘）。
+        """
+        event_store.set_log_mode("summary")
+        seq = event_store.append_event(_mask_record(
+            type="CANCEL", reason="upstream_idle", failure_owner="upstream",
+            upstream_idle_s=601.3))
+        row = event_store.fetch_event_by_id(seq)
+        self.assertEqual(row["upstream_idle_s"], 601.3)
+        self.assertEqual(row["reason"], "upstream_idle")
+        self.assertEqual(row["failure_owner"], "upstream")
+
     def test_summary_words_keep_label_distribution_without_words(self):
         """词榜在最小模式下只保留类别分布：word 固定 "?"，明文词绝不落盘。"""
         event_store.set_log_mode("summary")

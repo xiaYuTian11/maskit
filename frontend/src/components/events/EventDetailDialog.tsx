@@ -459,6 +459,13 @@ export function EventDetailDialog({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
                 {event.msg && <div className="whitespace-pre-wrap">{event.msg}</div>}
                 {event.reason && <div className="mt-1 text-muted-foreground">{transportLabel('reason', event.reason)}</div>}
+                {/* 连续静默秒数是上面那句结论的证据：没有它，用户无法核对
+                    「600 秒看门狗到点」这条判据有没有被误触发。 */}
+                {typeof event.upstream_idle_s === 'number' && (
+                  <div className="mt-1 text-muted-foreground">
+                    {tf('detail.upstreamIdle', { s: String(Math.round(event.upstream_idle_s)) })}
+                  </div>
+                )}
               </div>
             )}
 

@@ -539,6 +539,9 @@ _SUMMARY_KEEP_FIELDS = frozenset({
     # （引擎/上游/客户端/DNS/出口代理），后者让同一类断开能聚合计数。
     # 两者都是短枚举字符串，不含正文。
     "failure_owner", "error_type",
+    # 上游连续静默秒数：`reason=upstream_idle` 的证据（纯数字时长，不含正文与远端标识）。
+    # 没它的话 summary 模式下这条归因只剩一个标签，用户无法核对判据。
+    "upstream_idle_s",
     "upstream_may_have_executed", "engine_busy", "engine_queue_bytes", "engine_queue_depth",
     # 还原结果计数
     "restored_unique", "unresolved", "degraded", "success", "usage",

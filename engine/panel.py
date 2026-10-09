@@ -6529,6 +6529,10 @@ _EXPORT_KEEP_FIELDS = {
     # 不带责任方就没法回答“该查引擎、上游还是客户端”。
     "failure_owner",       # engine / upstream / client / dns / proxy
     "error_type",          # 异常类名（ConnectionResetError / ReadTimeout …）
+    # 上游连续静默秒数：`reason=upstream_idle` 的**证据**。只带这个结论字段而不带它，
+    # 拿日志复盘时就无法自证「是上游没吐字节」而不是「客户端先挂断」——那正是这次
+    # 改判要回答的问题。值是本地打点的时长差，不含正文、凭据与远端标识。
+    "upstream_idle_s",
     # ---- 统一口径（批次 2）：处置结论与完整度 ----
     # 这几项是“这一条到底算不算扫干净了”的唯一机器可读结论，导出缺了它们，
     # 拿日志找人复盘时就只能看现象（命中 0 条）而看不到结论（直通未脱敏 / 检测不完整）。
@@ -9080,7 +9084,9 @@ def _diagnostics_payload(error_limit=60):
                 "ner_global_throttled", "ner_sem_wait_ms",
                 # 失败归因（批次 8 / P0-5）：诊断包里的 recent_errors 正是用户
                 # “发过来问为什么失败”的那一段，没有责任方就只能靠肉眼猜。
-                "failure_owner", "error_type")
+                # `upstream_idle_s` 是 `reason=upstream_idle` 的证据本身：只带结论
+                # 不带连续静默秒数，接包的人无法核对这条判据有没有被误触发。
+                "failure_owner", "error_type", "upstream_idle_s")
         rows = []
         for e in fetch_events(since=0, limit=600, max_limit=EXPORT_MAX):
             if e.get("type") not in bad and int(e.get("http_status") or 0) < 400:

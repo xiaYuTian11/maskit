@@ -248,6 +248,7 @@ class FrontendFieldRegistrationTests(unittest.TestCase):
         "stream_degraded_reason",
         "queue_wait_ms",
         "aux_wait_ms",
+        "upstream_idle_s",
         "engine_busy",
         "ner_global_throttled",
         "degraded",

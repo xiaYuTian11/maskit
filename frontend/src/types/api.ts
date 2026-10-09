@@ -276,6 +276,11 @@ export interface ShieldEvent {
   queue_wait_ms?: number
   /** 响应侧等待脱敏线程池的时长（毫秒）：只在本条等超过阈值（默认 2s）时才带 */
   aux_wait_ms?: number
+  /**
+   * 上游连续静默的秒数：`reason=upstream_idle` 的证据。
+   * 只有「被本机连接空闲看门狗断开」这个结论而没有秒数时，用户分不清它和一次普通取消。
+   */
+  upstream_idle_s?: number
   mask_ms?: number
   first_byte_ms?: number
   upstream_ms?: number

@@ -198,6 +198,60 @@ _DNS_FAILURE_HINTS = ("getaddrinfo", "name or service not known",
                       "nodename nor servname", "temporary failure in name resolution")
 _FAILURE_OWNERS = frozenset({"client", "dns", "proxy", "engine", "upstream"})
 
+# 上游静默在本机只有一个兜底：mitmproxy 的连接空闲看门狗 `tcp_timeout`
+# （12.2.3 默认 600 s，mitmproxy/options.py 的 add_option）。它 `on_timeout` 里
+# 取消的是**客户端**读任务（proxy/server.py:344-354），随后 mitmproxy 把这条
+# 连接上的失败写成 `Client disconnected.` —— 也就是说「上游首包后彻底没声」和
+# 「客户端主动挂断」在现场证据上一模一样，`_CLIENT_FAILURE_HINTS` 会把责任判给
+# client。2026-10-09 实测：当天 6 例 605~676 s 的 client_disconnected 只收到
+# 1~9 个数据块（最少 569 字节），全是这一类；另有 4 例 646~1066 s 是
+# 195~876 块的真·长生成，那种是客户端先放弃，判 client 没错。
+# 数字向库要而不写死：mitmproxy 升版改了默认值也不会对不上。
+try:  # pragma: no cover - 取决于 mitmproxy 是否可导入（单测环境可导入）
+    from mitmproxy.options import Options as _MxOptions
+    _UPSTREAM_INACTIVITY_BOUND_S = float(_MxOptions().tcp_timeout)
+except Exception:
+    _UPSTREAM_INACTIVITY_BOUND_S = 600.0
+# 看门狗到点即杀，实测误差在秒级；15 s 余量只为不把「我们自己打点的滞后」当成
+# 没到点。落进这个窗口的断开，无论谁先动的手，「上游已连续静默约 tcp_timeout
+# 秒」都是真话，而这句话对排查更有用（该查上游/链路，不是催客户端别急）。
+_UPSTREAM_IDLE_MARGIN_S = 15.0
+
+
+def _upstream_idle_seconds(flow, phase):
+    """响应流已开、上游连续静默了多久（秒）。前提不成立时返回 None。
+
+    阶段由调用方给（`_record_client_cancel` 的 `phase` 形参），不从 transport 快照
+    里再取一次：快照取不到时会退化成 `{"phase": "unknown"}`，拿它当判据等于让这条
+    归因在诊断链路自己出问题时静默失效。
+    前提：① `phase == "response_stream"`（响应头已到、流正在走）；② 有可比锚点
+    ——最后一次收到上游字节的时刻；一个字节都没收到时退回「请求即将出网」的时刻
+    （`shield_mask_done_at`），那种情况静默时长即上游首包超时。
+    """
+    if phase != "response_stream":
+        return None
+    md = getattr(flow, "metadata", None) or {}
+    anchor = md.get("shield_last_byte_at")
+    if anchor is None:
+        anchor = md.get("shield_mask_done_at")
+    if anchor is None:
+        return None
+    try:
+        return time.time() - float(anchor)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upstream_idle_killed(flow, phase):
+    """这次失败是否落在「上游静默到点、被连接空闲看门狗掐掉」的窗口里。
+
+    判据只写这一处：`_flow_failure_owner` 与 `_record_client_cancel` 都要用，
+    各写一遍必然漂移（同 `_response_concluded` 的理由）。
+    """
+    idle = _upstream_idle_seconds(flow, phase)
+    return (idle is not None
+            and idle >= _UPSTREAM_INACTIVITY_BOUND_S - _UPSTREAM_IDLE_MARGIN_S)
+
 
 def _flow_failure_owner(flow, raw):
     """判一次失败的**责任方**（见上方 `_FAILURE_OWNERS`）。只取已有事实，不猜。
@@ -207,6 +261,11 @@ def _flow_failure_owner(flow, raw):
     """
     low = (raw or "").lower()
     if any(h in low for h in _CLIENT_FAILURE_HINTS):
+        # 「客户端断开」有两种：真客户端，和上游静默到 `tcp_timeout` 被看门狗掐掉
+        # ——后者是 mitmproxy 取消了客户端读任务，文案才长成这样。
+        transport = (getattr(flow, "metadata", None) or {}).get("transport") or {}
+        if _upstream_idle_killed(flow, transport.get("phase")):
+            return "upstream"
         return "client"
     if any(h in low for h in _DNS_FAILURE_HINTS):
         return "dns"
@@ -262,14 +321,25 @@ def _record_client_cancel(flow, phase):
     detail, _raw = _flow_error_detail(flow)
     up_name = flow.metadata.get("shield_upstream") or (session or {}).get("upstream_name") or ""
     model = flow.metadata.get("shield_model") or (session or {}).get("model") or ""
+    reason = getattr(flow, "_shield_cancel_reason", "client_disconnected")
+    idle_s = _upstream_idle_seconds(flow, phase)
+    # CANCEL 的归因默认恒为 client（事件本身就是客户端断开）；`error_type` 仍然带上，
+    # 好把「SDK 超时」与「协议错」分开统计。唯一例外：上游静默到 `tcp_timeout` 被
+    # mitmproxy 的看门狗掐掉时，它取消的是客户端读任务、文案也是 `Client
+    # disconnected.`，此时判 client 等于把方向带偏（该查上游/链路，不是催客户端）。
+    # 只改 `client_disconnected` 这一种签名：`client_cancelled` 是我们真的看到了
+    # 客户端取消，不跟着翻案。
+    idle_killed = reason == "client_disconnected" and _upstream_idle_killed(flow, phase)
+    if idle_killed:
+        reason = "upstream_idle"
     _emit("CANCEL", sid=sid,
           host=getattr(req, "host", ""), method=getattr(req, "method", ""),
           path=str(getattr(req, "path", "")).split("?", 1)[0],
-          reason=getattr(flow, "_shield_cancel_reason", "client_disconnected"),
+          reason=reason,
           failure_phase=phase, transport=_transport_snapshot(flow),
-          # CANCEL 的归因恒为 client（事件本身就是客户端断开）；`error_type` 仍然带上，
-          # 好把「SDK 超时」与「协议错」分开统计。
-          failure_owner="client", error_type=_flow_error_type(flow),
+          failure_owner="upstream" if idle_killed else "client",
+          upstream_idle_s=(round(idle_s, 1) if idle_s is not None else None),
+          error_type=_flow_error_type(flow),
           msg="flow_error:" + detail, upstream=up_name, model=model, **source)
 
 
@@ -9792,6 +9862,10 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
             _touch(sid)  # 长生成期间刷新会话 TTL，防止 _sweep 误删活动中的流式会话
             # 首字节计时：第一次收到非空数据块即记（含流式接管路径）
             if data:
+                # 「最后一次看到上游字节」的时刻：上游静默多久只能靠它算，
+                # 用于区分真客户端断开与看门狗掐掉静默上游（见
+                # `_upstream_idle_seconds`）。
+                flow.metadata["shield_last_byte_at"] = time.time()
                 s_cur = _session_get(sid)
                 if s_cur is not None:
                     if s_cur.get("resp_ts") is None:
