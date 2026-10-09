@@ -81,7 +81,8 @@
         "/v1/completions"
       ],
       "use_proxy": false,
-      "extra_headers": {}
+      "extra_headers": {},
+      "takeover": false
     },
     {
       "name": "anthropic",
@@ -92,7 +93,8 @@
         "/v1/messages"
       ],
       "use_proxy": false,
-      "extra_headers": {}
+      "extra_headers": {},
+      "takeover": false
     }
   ],
   "filter_enabled": true,

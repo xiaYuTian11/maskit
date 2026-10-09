@@ -401,7 +401,7 @@ def running():
 def _c1_any_takeover_enabled():
     """检查是否有上游开启了 takeover。"""
     try:
-        for up in (_runtime_config or {}).get("upstreams", []):
+        for up in UPSTREAMS:
             if up.get("takeover"):
                 return True
     except Exception:
@@ -425,7 +425,7 @@ async def _c1_ensure_started():
         from upstream_sidecar import UpstreamSidecar
     except ImportError:
         return
-    _C1_SIDECAR = UpstreamSidecar(_runtime_config or {})
+    _C1_SIDECAR = UpstreamSidecar(_read_settings() or {})
     _C1_SIDECAR_TASK = asyncio.get_running_loop().create_task(_C1_SIDECAR.start())
     await _C1_SIDECAR_TASK
     _log("[C1] sidecar started on port %d (httpx cross-client keep-alive pool)" % _C1_SIDECAR.port)
