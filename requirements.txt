@@ -6,3 +6,5 @@ Brotli==1.2.0
 zstandard>=0.25,<0.26
 onnxruntime>=1.20,<2.0
 tokenizers>=0.20,<1.0
+# C1 上游传输接管：跨客户端共享的 httpx keep-alive 连接池
+httpx>=0.28,<1.0
