@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 修复
+- 引擎：卡住的上游建连 / TLS 握手改为有预算（默认 20 秒，`MASKIT_CONNECT_STALL_S`），超预算时取消正在建立这一跳的任务并立即回 502，客户端不再空等约 127 秒的内核重传；事件归因为 `handshake_timeout`（上游、可重试）。这只治「死等多久」，链路丢包本身仍需系统层处理。
+
+### Fixed
+- Engine: a stalled upstream connect / TLS handshake is now budgeted (20s by default, `MASKIT_CONNECT_STALL_S`); over budget the task establishing that hop is cancelled and the client gets a clean 502 instead of waiting out the ~127s kernel retransmit ladder, attributed as `handshake_timeout` (upstream, retryable). This bounds the dead wait and makes it retryable — the packet loss itself is a link-layer problem.
+
 ### 新增
 - 面板：顶栏新增常驻「帮助」入口（页面导览、快速上手、常见问题、教程跳转）与三步首次引导；引导仅在尚未配置任何客户端时自动弹出，老用户升级不会被打断。
 - 文档：新增 `docs/SETTINGS.md`，按页面与开关逐项解释配置口径。

@@ -84,7 +84,9 @@ class SilentTLS(socketserver.BaseRequestHandler):
             record = self.request.recv(16384)
             if record and record[0] == 22:
                 self.server.hello.set()
-                self.server.stop.wait(8)
+                # hold 必须明显长于握手预算：否则这一跳是被桩自己关掉的，
+                # 熔断就没机会成为那条流的死因，归因断言会退化成「碰巧先谁后谁」。
+                self.server.stop.wait(self.server.hold)
         except OSError:
             pass
 
@@ -137,6 +139,7 @@ def main():
     silent.daemon_threads = True
     silent.hello = threading.Event()
     silent.stop = threading.Event()
+    silent.hold = 30
     for srv in (upstream, silent):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     ports = [free_port(), free_port()]
@@ -168,7 +171,10 @@ def main():
             env = {k: v for k, v in os.environ.items()
                    if not k.upper().endswith("_PROXY")
                    and not k.startswith(("LLM_SHIELD_", "MASKIT_"))}
-            env.update(LLM_SHIELD_DATA_DIR=temp, PYTHONIOENCODING="utf-8")
+            # 预算夹到下限 5 s：熔断在 5–7 s（心跳 2 s 一拍）之间落地，
+            # 而静默桩会守到 30 s，所以「这一跳是我们掐的」在时间上是唯一解。
+            env.update(LLM_SHIELD_DATA_DIR=temp, PYTHONIOENCODING="utf-8",
+                       MASKIT_CONNECT_STALL_S="5")
             for var, subdir in (("HOME", "home"), ("XDG_DATA_HOME", "xdg-data"),
                                 ("XDG_CONFIG_HOME", "xdg-config"), ("XDG_CACHE_HOME", "xdg-cache")):
                 directory = data / subdir
@@ -257,6 +263,35 @@ def main():
                            for e in rows if e.get("type") in ("ERR", "CANCEL")), "TLS failure phase missing"
                 assert upstream.accepts == 2 and len(upstream.requests) == 5
                 print("PASS: persisted evidence distinguishes actual reuse and TLS failure")
+
+                # 握手熔断：这一次客户端不再等到自己超时，引擎在预算内掐掉这一跳，
+                # 客户端拿到干净的 5xx —— 归因必须落在上游，不是客户端也不是引擎。
+                kill_conn = http.client.HTTPConnection("127.0.0.1", ports[1], timeout=25)
+                started = time.monotonic()
+                try:
+                    kill_status, _ = chat(kill_conn)
+                finally:
+                    kill_conn.close()
+                bounded_in = time.monotonic() - started
+                assert 500 <= kill_status < 600, f"stalled handshake returned {kill_status}"
+                assert bounded_in < 12, f"handshake budget not enforced ({bounded_in:.1f}s)"
+                print(f"PASS: stalled pre-send handshake bounded in {bounded_in:.1f}s -> {kill_status}")
+
+                until = time.monotonic() + 8
+                killed = []
+                while time.monotonic() < until:
+                    killed = [e for e in events(data)
+                              if (e.get("transport") or {}).get("reason") == "handshake_timeout"]
+                    if killed:
+                        break
+                    time.sleep(.1)
+                assert killed, "handshake kill left no attributable evidence"
+                owners = sorted({e.get("failure_owner") for e in killed})
+                assert owners == ["upstream"], f"handshake kill attributed to {owners}"
+                assert all((e.get("transport") or {}).get("phase") == "tls_handshake"
+                           for e in killed), "kill evidence lost the pre-send phase"
+                print("PASS: the kill is attributable to upstream with the pre-send phase kept")
+
                 client.close()
                 client = None
                 observed_at = time.time()
@@ -275,6 +310,18 @@ def main():
                     time.sleep(.1)
                 assert idle, "idle heartbeat did not refresh or resources did not return"
                 assert metrics.get("transport", {}).get("observation_installed") is True
+                connect = metrics.get("connect", {})
+                # unmatched/ambiguous 必须为 0：那才是「task 名 + 客户端 peername」这套
+                # 匹配在真实 mitmproxy 里真的认得出这一跳，而不是只在单测的假 task 里成立。
+                assert connect.get("actuating") is True, connect
+                assert connect.get("stall_after_s") == 5.0, connect
+                assert connect.get("stalled") == 0, connect
+                assert connect.get("kills", {}).get("killed", 0) >= 1, connect
+                assert connect.get("kills", {}).get("no_conn") == 0, connect
+                assert connect.get("kills", {}).get("no_task") == 0, connect
+                assert connect.get("kills", {}).get("ambiguous") == 0, connect
+                assert metrics.get("transport", {}).get("handshake_kills", 0) >= 1, metrics
+                print("PASS: metrics report the gate, its budget and the hop it killed")
                 if options.ner:
                     assert metrics.get("ner", {}).get("initialized") is True, "local NER model did not initialize"
                     assert any(e.get("ner_windows", 0) > 0 for e in rows), "NER smoke did not run an inference window"
