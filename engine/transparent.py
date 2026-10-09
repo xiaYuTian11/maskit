@@ -461,6 +461,9 @@ def _c1_apply_takeover(flow, up):
         flow.request.headers["Host"] = "127.0.0.1:%d" % port
         flow.request.headers["X-Maskit-Upstream"] = up["target"]
         flow.request.headers["X-Maskit-Upstream-Name"] = up.get("name", "")
+        # 告诉 sidecar 是否走出口代理（sidecar 自己管，避免 mitmproxy 把本地连接也代理了）
+        if up.get("use_proxy"):
+            flow.request.headers["X-Maskit-Use-Proxy"] = "true"
         return True
     except Exception:
         return False
@@ -3053,6 +3056,9 @@ def _apply_egress_proxy(flow, upstream):
     仅 reverse 模式生效；explicit 模式另有 `--mode upstream:` 机制，不在此处理。
     """
     if not EGRESS_PROXY or not isinstance(upstream, dict) or not upstream.get("use_proxy"):
+        return
+    # takeover 模式：出口代理由 sidecar 处理，mitmproxy 只需直连本地 sidecar
+    if upstream.get("takeover") and _C1_SIDECAR is not None and _C1_SIDECAR.is_running:
         return
     try:
         flow.server_conn.via = EGRESS_PROXY

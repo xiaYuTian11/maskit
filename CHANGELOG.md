@@ -5,11 +5,13 @@
 ## [Unreleased]
 
 ### 新增
-- 引擎：C1 上游传输接管（可选开关 `upstreams[].takeover`，默认关闭）。开启后旁路 mitmproxy 上游连接，由进程级 httpx keep-alive 连接池跨客户端共享上游连接，把每天数万次 TCP 握手降到数百次，丢包暴露从「每请求赌一次」降回「每批次赌一次」。TLS 证书校验默认严格（verify=True）、32 MiB 上限守卫平移、凭据类头过滤、内部头剥离均覆盖；`takeover=false` 时走原逻辑，零影响。
+- 引擎：C1 上游传输接管（可选开关 `upstreams[].takeover`，默认关闭）。开启后旁路 mitmproxy 上游连接，由进程级 httpx keep-alive 连接池跨客户端共享上游连接，把每天数万次 TCP 握手降到数百次，丢包暴露从「每请求赌一次」降回「每批次赌一次」。TLS 证书校验默认严格（verify=True）、32 MiB 上限守卫平移、客户端凭据头原样透传（仅剥内部路由头）、有/无出口代理双池按上游分流均覆盖；`takeover=false` 时走原逻辑，零影响。
+- 面板：客户端编辑页新增「接管上游连接」开关；此前 `takeover` 只能手改 config.json，且面板任何一次保存都会把它静默抹掉。
 - 引擎：metrics 暴露 `c1_sidecar` 状态字段（enabled/port/stats/pool），便于面板观测连接池效果。
 
 ### Added
-- Engine: C1 upstream takeover (opt-in via `upstreams[].takeover`, off by default). When enabled, bypasses mitmproxy's upstream connection and routes through a process-level httpx keep-alive pool shared across all clients — daily TCP handshakes drop from tens of thousands to hundreds, packet-loss exposure shifts from "per-request gamble" back to "per-batch gamble". TLS verification defaults to strict (verify=True), the 32 MiB body guard carries over, credential headers are filtered, and internal headers are stripped. With `takeover=false`, the original path is used with zero impact.
+- Engine: C1 upstream takeover (opt-in via `upstreams[].takeover`, off by default). When enabled, bypasses mitmproxy's upstream connection and routes through a process-level httpx keep-alive pool shared across all clients — daily TCP handshakes drop from tens of thousands to hundreds, packet-loss exposure shifts from "per-request gamble" back to "per-batch gamble". TLS verification stays strict (verify=True), the 32 MiB body guard carries over, client credential headers pass through untouched (only internal routing headers are stripped), and proxied/direct upstreams get their own pool. With `takeover=false`, the original path is used with zero impact.
+- Panel: the client editor gains a "take over upstream connection" switch; previously `takeover` could only be set by editing config.json by hand, and every panel save silently wiped it.
 - Engine: metrics now expose a `c1_sidecar` status field (enabled/port/stats/pool) for pool-effect observability.
 
 ## [0.8.1] - 2026-10-09

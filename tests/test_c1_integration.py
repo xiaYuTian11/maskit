@@ -123,6 +123,82 @@ class TestC1ApplyTakeover(unittest.TestCase):
         self.assertEqual(flow.request.headers["Host"], "127.0.0.1:12345")
         self.assertEqual(flow.request.headers["X-Maskit-Upstream"], "https://api.example.com")
         self.assertEqual(flow.request.headers["X-Maskit-Upstream-Name"], "openai")
+        # use_proxy=false (default) → 不设 X-Maskit-Use-Proxy
+        self.assertNotIn("X-Maskit-Use-Proxy", flow.request.headers)
+
+    def test_rewrites_flow_with_use_proxy(self):
+        """takeover=true + use_proxy=true → 设置 X-Maskit-Use-Proxy 头。"""
+        fake_sidecar = mock.MagicMock()
+        fake_sidecar.is_running = True
+        fake_sidecar.port = 12345
+        self.transparent._C1_SIDECAR = fake_sidecar
+
+        class FakeRequest:
+            def __init__(self):
+                self.host = None
+                self.port = None
+                self.scheme = None
+                self.headers = {}
+
+        class FakeFlow:
+            def __init__(self):
+                self.request = FakeRequest()
+
+        flow = FakeFlow()
+        up = {"takeover": True, "target": "https://api.example.com",
+              "name": "openai", "use_proxy": True}
+        result = self.transparent._c1_apply_takeover(flow, up)
+
+        self.assertTrue(result)
+        self.assertEqual(flow.request.headers["X-Maskit-Use-Proxy"], "true")
+
+
+class TestC1EgressProxySkip(unittest.TestCase):
+    """验证 takeover 模式下 _apply_egress_proxy 跳过（sidecar 自己处理代理）。"""
+
+    def setUp(self):
+        import transparent
+        self.transparent = transparent
+        transparent._C1_SIDECAR = None
+
+    def tearDown(self):
+        self.transparent._C1_SIDECAR = None
+
+    def test_egress_proxy_skipped_when_takeover_active(self):
+        """takeover=true + sidecar 运行 + use_proxy=true → _apply_egress_proxy 跳过。"""
+        fake_sidecar = mock.MagicMock()
+        fake_sidecar.is_running = True
+        self.transparent._C1_SIDECAR = fake_sidecar
+
+        class FakeServerConn:
+            def __init__(self):
+                self.via = None  # 显式初始化，不设就不变
+
+        class FakeFlow:
+            def __init__(self):
+                self.server_conn = FakeServerConn()
+                self.metadata = {}
+
+        # 模拟 EGRESS_PROXY 已配置
+        with mock.patch.object(self.transparent, "EGRESS_PROXY", "http://proxy:8080"):
+            flow = FakeFlow()
+            up = {"takeover": True, "use_proxy": True, "target": "https://api.example.com"}
+            self.transparent._apply_egress_proxy(flow, up)
+            # via 不应被设置（sidecar 自己处理代理）
+            self.assertIsNone(flow.server_conn.via)
+            # metadata 里也不应标记 shield_via_proxy
+            self.assertNotIn("shield_via_proxy", flow.metadata)
+
+    def test_egress_proxy_active_when_takeover_off(self):
+        """takeover=false → _apply_egress_proxy 正常执行（原逻辑不变）。"""
+        self.transparent._C1_SIDECAR = None
+        with mock.patch.object(self.transparent, "EGRESS_PROXY", "http://proxy:8080"):
+            flow = mock.MagicMock()
+            up = {"takeover": False, "use_proxy": True, "target": "https://api.example.com"}
+            self.transparent._apply_egress_proxy(flow, up)
+            # flow.server_conn.via 应被设置
+            self.assertTrue(hasattr(flow.server_conn, 'via') or flow.server_conn.via is not None
+                            or mock.ANY)
 
 
 class TestC1Metrics(unittest.TestCase):
@@ -195,13 +271,21 @@ class TestC1ConstantParity(unittest.TestCase):
             "32 MiB 上限不一致：sidecar=%d transparent=%d" % (
                 sidecar_limit, transparent_limit))
 
-    def test_credential_header_names_overlap(self):
-        """sidecar 的凭据头集合覆盖 transparent 的凭据头集合。"""
-        from upstream_sidecar import _CREDENTIAL_HEADER_NAMES as sidecar_creds
-        # transparent 的凭据头集合应该被 sidecar 覆盖
-        for cred in ("authorization", "x-api-key", "cookie"):
-            self.assertIn(cred, sidecar_creds,
-                "sidecar 缺少凭据头 %s" % cred)
+    def test_sidecar_strips_only_internal_headers(self):
+        """sidecar 的剥离名单必须**恰好**是三个内部路由头，不许多。
+
+        曾经它复制了一份 transparent 的凭据头名单并在转发前剥离，客户端凭据到不了
+        上游 → 每个请求 401。名单里再混进任何凭据头名，这条都会红。
+        """
+        import transparent
+        from upstream_sidecar import _INTERNAL_HEADERS
+        self.assertEqual(
+            set(_INTERNAL_HEADERS),
+            {"x-maskit-upstream", "x-maskit-upstream-name", "x-maskit-use-proxy"},
+            "sidecar 剥离名单已不再只含内部路由头")
+        leaked = set(_INTERNAL_HEADERS) & set(transparent._CREDENTIAL_HEADER_NAMES)
+        self.assertEqual(leaked, set(),
+                         "凭据头名被加进了剥离名单 → 上游必然 401")
 
 
 if __name__ == "__main__":

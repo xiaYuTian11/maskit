@@ -4157,6 +4157,10 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
                     extra_headers[kk] = vv
             upstream = {"name": name, "base_path": base_path, "port": port, "target": target,
                         "paths": paths_u, "use_proxy": bool(u.get("use_proxy")),
+                        # takeover 由 transparent._c1_apply_takeover 消费。不在这里显式保留
+                        # 就等于「开关存不住」：手改 config.json 生效，但任何一次面板保存
+                        # 都会把它抹掉且不留痕迹。
+                        "takeover": bool(u.get("takeover")),
                         "extra_headers": extra_headers}
             if "connection_policy" in u and u["connection_policy"] is not None:
                 try:
@@ -5075,6 +5079,10 @@ def _apply_config_patch(cfg, key, op, path, value, match=None):
                 # omission, including rename; explicit null intentionally resets it.
                 if key == "upstreams" and not path and "connection_policy" not in value and "connection_policy" in item:
                     value = dict(value, connection_policy=item["connection_policy"])
+                # takeover 同理：陈旧表单/其它客户端整份覆盖时，不能顺手把 C1 关掉——
+                # 那会让「已经开着接管的上游」在一次无关编辑后静默退回 mitmproxy 直连。
+                if key == "upstreams" and not path and "takeover" not in value and "takeover" in item:
+                    value = dict(value, takeover=item["takeover"])
                 node[i] = value
                 break
         else:
@@ -5264,6 +5272,7 @@ def api_status():
             "base_path": u.get("base_path") or "",
             "paths": [str(p).split("?", 1)[0].split("#", 1)[0] for p in (u.get("paths") or [])],
             "use_proxy": bool(u.get("use_proxy")),
+            "takeover": bool(u.get("takeover")),
         }
         status_upstreams.append(status_u)
         upstream_ports.append({
@@ -9015,7 +9024,8 @@ def _diagnostics_payload(error_limit=60):
     out["upstreams"] = [
         {"name": u.get("name"), "port": u.get("port"),
          "target": _safe_target(u.get("target")),
-         "base_path": u.get("base_path"), "use_proxy": bool(u.get("use_proxy"))}
+         "base_path": u.get("base_path"), "use_proxy": bool(u.get("use_proxy")),
+         "takeover": bool(u.get("takeover"))}
         for u in (cfg.get("upstreams") or [])
     ]
 

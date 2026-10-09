@@ -13,8 +13,9 @@ sidecar 剥离该头，用 httpx 池转发。
 红线：
 - TLS 证书校验默认 ``verify=True``，异常**必须**冒泡到 fail-closed 503/502。
 - 32 MiB 请求体上限在 sidecar 路径仍守，超限 413。
-- 凭据类头（``Authorization`` / ``X-API-Key`` 等）禁止通过 extra_headers 注入。
-- ``X-Maskit-Upstream`` 内部头在转发前剥离，不泄露到真实上游。
+- 客户端凭据头（``Authorization`` / ``x-api-key`` / ``Cookie`` 等）**必须透传**到上游——它们是客户端身份凭据，剥离会导致 401。sidecar 没有凭据过滤权，唯一该剥的是下面的内部路由头。
+- ``extra_headers`` 由 ``transparent._apply_extra_headers`` 在 flow 上注入（凭据类头在该函数已被拦下），到 sidecar 只是普通请求头，原样透传。
+- ``X-Maskit-Upstream`` / ``X-Maskit-Upstream-Name`` / ``X-Maskit-Use-Proxy`` 内部头在转发前剥离，不泄露到真实上游。
 """
 from __future__ import annotations
 
@@ -32,15 +33,8 @@ logger = logging.getLogger("maskit.c1")
 # ─── 内部头 ────────────────────────────────────────────────────────────────
 _UPSTREAM_HEADER = "x-maskit-upstream"
 _UPSTREAM_NAME_HEADER = "x-maskit-upstream-name"
-_INTERNAL_HEADERS = frozenset({_UPSTREAM_HEADER, _UPSTREAM_NAME_HEADER})
-
-# ─── 凭据类头禁令（与 transparent._CREDENTIAL_HEADER_NAMES 同源）────────────
-_CREDENTIAL_HEADER_NAMES = frozenset({
-    "authorization", "proxy-authorization", "cookie",
-    "x-api-key", "api-key", "apikey",
-    "x-goog-api-key", "x-auth-token", "x-access-token",
-    "x-token", "x-session-token", "private-token",
-})
+_USE_PROXY_HEADER = "x-maskit-use-proxy"
+_INTERNAL_HEADERS = frozenset({_UPSTREAM_HEADER, _UPSTREAM_NAME_HEADER, _USE_PROXY_HEADER})
 
 # ─── 超时 ──────────────────────────────────────────────────────────────────
 _CONNECT_TIMEOUT_S = 10.0
@@ -59,6 +53,12 @@ _MAX_REQUEST_BODY = 32 * 1024 * 1024
 # ─── 重试 ───────────────────────────────────────────────────────────────────
 _MAX_RETRIES = 1
 
+# ─── 关停 ───────────────────────────────────────────────────────────────────
+# Server.wait_closed() 在 Python 3.12+ 会等到所有 handler 退出。调用方
+# （mitmproxy）的 keep-alive 连接不会自己断，所以关停必须有上界：先主动断开
+# 活动连接，再有界等待。没有这个预算时 stop() 会永久挂住，连接池永不释放。
+_SHUTDOWN_GRACE_S = 5.0
+
 
 class UpstreamSidecar:
     """C1 sidecar: 进程级 httpx 池 + asyncio HTTP/1.1 转发器。
@@ -69,7 +69,8 @@ class UpstreamSidecar:
 
     def __init__(self, config: dict[str, Any] | None = None):
         self._config = config or {}
-        self._client: httpx.AsyncClient | None = None
+        self._client: httpx.AsyncClient | None = None        # 无代理客户端（默认）
+        self._client_proxy: httpx.AsyncClient | None = None   # 有代理客户端
         self._server: asyncio.base_events.Server | None = None
         self._port: int = 0
         self._stats: dict[str, int] = {
@@ -79,7 +80,8 @@ class UpstreamSidecar:
             "tls_verify_off": 0,
             "body_too_large": 0,
         }
-        self._extra_headers: dict[str, str] = {}
+        # 活动中的 mitmproxy→sidecar 连接，关停时由 sidecar 主动断开
+        self._live_writers: set[asyncio.StreamWriter] = set()
 
     @property
     def port(self) -> int:
@@ -105,6 +107,7 @@ class UpstreamSidecar:
             "port": self._port,
             "stats": dict(self._stats),
             "pool": pool_info,
+            "has_egress_proxy": self._client_proxy is not None,
         }
 
     # ─── 生命周期 ──────────────────────────────────────────────────────────
@@ -115,7 +118,7 @@ class UpstreamSidecar:
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = True
 
-        # 代理配置平移
+        # 代理配置
         proxy: str | None = None
         egress = self._config.get("egress_proxy") or {}
         if egress.get("enabled") and egress.get("url"):
@@ -125,6 +128,7 @@ class UpstreamSidecar:
         tls_verify = True
         # per-upstream 的 tls_verify 暂不在此层处理（由路由层决定是否启用 takeover）
 
+        # 无代理客户端（所有上游默认走这个）
         self._client = httpx.AsyncClient(
             verify=ssl_ctx if tls_verify else False,
             timeout=httpx.Timeout(
@@ -140,38 +144,66 @@ class UpstreamSidecar:
             ),
             http2=False,
             trust_env=False,
-            proxy=proxy,
         )
+
+        # 有代理客户端（仅 use_proxy=true 的上游走这个）
+        if proxy:
+            self._client_proxy = httpx.AsyncClient(
+                verify=ssl_ctx if tls_verify else False,
+                timeout=httpx.Timeout(
+                    connect=_CONNECT_TIMEOUT_S,
+                    read=_READ_TIMEOUT_S,
+                    write=_WRITE_TIMEOUT_S,
+                    pool=_POOL_TIMEOUT_S,
+                ),
+                limits=httpx.Limits(
+                    max_connections=_MAX_CONNECTIONS,
+                    max_keepalive_connections=_MAX_KEEPALIVE_CONNECTIONS,
+                    keepalive_expiry=_KEEPALIVE_EXPIRY_S,
+                ),
+                http2=False,
+                trust_env=False,
+                proxy=proxy,
+            )
 
         self._server = await asyncio.start_server(
             self._handle_client, host, port,
         )
         self._port = self._server.sockets[0].getsockname()[1]
-        logger.info("C1 sidecar started on %s:%d (httpx pool: max=%d keepalive=%d)",
-                     host, self._port, _MAX_CONNECTIONS, _MAX_KEEPALIVE_CONNECTIONS)
+        logger.info("C1 sidecar started on %s:%d (httpx pool: max=%d keepalive=%d, proxy=%s)",
+                     host, self._port, _MAX_CONNECTIONS, _MAX_KEEPALIVE_CONNECTIONS,
+                     "yes" if self._client_proxy else "no")
         return self._port
 
     async def stop(self) -> None:
-        """关闭 sidecar + 释放 httpx 池连接。"""
+        """关闭 sidecar + 释放 httpx 池连接。可重复调用（幂等）。"""
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
+            # 先主动断开调用方连接，否则 wait_closed() 等的是永远不会自己走的
+            # keep-alive handler（实测：mitmproxy 侧连接未关时 stop() 永久不返回）。
+            pending = len(self._live_writers)
+            for writer in list(self._live_writers):
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            self._live_writers.clear()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(),
+                                       timeout=_SHUTDOWN_GRACE_S)
+            except asyncio.TimeoutError:
+                logger.warning("C1 sidecar wait_closed exceeded %.1fs "
+                               "(%d live connection(s) force-closed)",
+                               _SHUTDOWN_GRACE_S, pending)
             self._server = None
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        if self._client_proxy is not None:
+            await self._client_proxy.aclose()
+            self._client_proxy = None
         self._port = 0
         logger.info("C1 sidecar stopped")
-
-    def set_extra_headers(self, upstream_name: str, headers: dict[str, str]) -> None:
-        """注入 extra_headers（凭据类头会被过滤）。由路由层在每次请求前调用。"""
-        filtered: dict[str, str] = {}
-        for k, v in headers.items():
-            if k.lower() in _CREDENTIAL_HEADER_NAMES:
-                logger.warning("extra_headers rejected credential header: %s", k)
-                continue
-            filtered[k] = v
-        self._extra_headers = filtered
 
     # ─── 核心转发 ──────────────────────────────────────────────────────────
 
@@ -181,9 +213,10 @@ class UpstreamSidecar:
         """处理一个 mitmproxy → sidecar 的 HTTP/1.1 连接（支持 keep-alive 多请求）。"""
         conn = h11.Connection(our_role=h11.SERVER)
         peer = writer.get_extra_info("peername")
-        client = self._client
-        if client is None:
+        default_client = self._client
+        if default_client is None:
             return
+        self._live_writers.add(writer)
 
         try:
             while True:
@@ -196,9 +229,10 @@ class UpstreamSidecar:
                 path = request.target.decode() if isinstance(request.target, bytes) else request.target
                 raw_headers = request.headers
 
-                # 提取真实上游 URL
+                # 提取真实上游 URL + 透传客户端请求头
                 upstream_url = None
                 upstream_name = None
+                use_proxy = False
                 fwd_headers: list[tuple[str, str]] = []
                 for k, v in raw_headers:
                     kn = k.decode().lower() if isinstance(k, bytes) else k.lower()
@@ -207,18 +241,14 @@ class UpstreamSidecar:
                         upstream_url = vv
                     elif kn == _UPSTREAM_NAME_HEADER:
                         upstream_name = vv
-                    elif kn in _INTERNAL_HEADERS or kn in _CREDENTIAL_HEADER_NAMES:
-                        continue  # 剥离内部头 + 凭据类头
+                    elif kn == _USE_PROXY_HEADER:
+                        use_proxy = vv.lower() in ("true", "1", "yes")
+                    elif kn in _INTERNAL_HEADERS:
+                        continue  # 只剥离内部头，不碰凭据头（客户端凭据必须透传）
                     elif kn in ("content-length", "transfer-encoding", "connection", "host"):
                         continue  # httpx 自己管理
                     else:
                         fwd_headers.append((kn, vv))
-
-                # 注入 extra_headers
-                if self._extra_headers:
-                    for k, v in self._extra_headers.items():
-                        if k.lower() not in _CREDENTIAL_HEADER_NAMES:
-                            fwd_headers.append((k.lower(), v))
 
                 if not upstream_url:
                     await self._send_error(conn, writer, 400,
@@ -237,12 +267,17 @@ class UpstreamSidecar:
                         if not self._cycle_done(conn): break
                         continue
 
-                # 3. 用 httpx 池转发（带重试）
+                # 3. 选择 httpx 客户端（有代理 / 无代理）
+                active_client = default_client
+                if use_proxy and self._client_proxy is not None:
+                    active_client = self._client_proxy
+
+                # 4. 用 httpx 池转发（带重试）
                 self._stats["requests"] += 1
                 url = upstream_url.rstrip("/") + path
                 t0 = time.monotonic()
                 resp = await self._forward_with_retry(
-                    client, method, url, fwd_headers, body,
+                    active_client, method, url, fwd_headers, body,
                 )
 
                 if resp is None:
@@ -276,6 +311,7 @@ class UpstreamSidecar:
         except Exception as e:
             logger.error("sidecar handler error: %s", e)
         finally:
+            self._live_writers.discard(writer)
             try:
                 writer.close()
                 await writer.wait_closed()

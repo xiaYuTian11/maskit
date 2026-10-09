@@ -503,6 +503,11 @@ function UpstreamForm({
                 </div>
               )
             )}
+            <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
+              <Switch checked={!!form.takeover} onCheckedChange={(v) => set('takeover', v)} />
+              {t('settings.upstream.takeover')}
+            </label>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.upstream.takeoverHint')}</p>
           </div>
         </div>
         <DialogFooter>
@@ -2966,7 +2971,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         <UpstreamForm
           http2={cfg?.http2 === true}
           transportCapabilities={cfg?._meta?.transport_capabilities}
-          initial={editing ?? { name: '', port: nextPort, target: '', use_proxy: false, paths: ['/v1'], base_path: '' }}
+          initial={editing ?? { name: '', port: nextPort, target: '', use_proxy: false, takeover: false, paths: ['/v1'], base_path: '' }}
           onSave={onSaveUpstream}
           onClose={() => { setEditing(null); setAdding(false) }}
           captureMode={cfg?.capture_mode ?? 'reverse'}

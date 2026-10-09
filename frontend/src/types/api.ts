@@ -55,6 +55,7 @@ export interface UpstreamConfig {
   api_key_header?: string
   extra_headers?: Record<string, string>
   use_proxy?: boolean
+  takeover?: boolean
   connection_policy?: ConnectionPolicy | null
 }
 

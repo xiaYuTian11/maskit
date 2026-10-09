@@ -1,8 +1,8 @@
 """C1 upstream sidecar 单元测试。
 
 用本地 mock HTTP server 做端到端验证，不依赖外部网络。
-覆盖：基本转发 / POST body / 流式响应 / 内部头剥离 / 凭据头过滤 /
-TLS fail-closed / 32 MiB 上限 / 连接池复用 / metrics。
+覆盖：基本转发 / POST body / 流式响应 / 内部头剥离 / 凭据头透传 /
+TLS fail-closed / 32 MiB 上限 / 连接池复用 / 出口代理双客户端 / metrics / 有界关停。
 """
 import asyncio
 import h11
@@ -17,18 +17,24 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
 from upstream_sidecar import (
     UpstreamSidecar,
     _MAX_REQUEST_BODY,
-    _CREDENTIAL_HEADER_NAMES,
+    _SHUTDOWN_GRACE_S,
     _UPSTREAM_HEADER,
 )
 
 
 class MockUpstream:
-    """本地 mock HTTP 上游服务器（h11 SERVER 模式）。"""
+    """本地 mock HTTP 上游服务器（h11 SERVER 模式）。
+
+    同时充当假出口代理：代理端会收到绝对形式（absolute-form）的请求行
+    ``GET http://target/get``，据此可判定流量确实经过了代理而非直连。
+    """
 
     def __init__(self):
         self._server = None
         self._port = 0
         self.received_headers = []  # 每次 request 收到的头
+        self.received_targets = []  # 每次 request 收到的请求行 target
+        self.connection_count = 0   # accepted 连接数（判定 keep-alive 是否真的复用）
 
     async def start(self):
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -44,6 +50,7 @@ class MockUpstream:
         return "http://127.0.0.1:%d" % self._port
 
     async def _handle(self, reader, writer):
+        self.connection_count += 1
         conn = h11.Connection(our_role=h11.SERVER)
         try:
             while True:
@@ -61,6 +68,7 @@ class MockUpstream:
                         hdrs = {k.decode().lower(): v.decode()
                                 for k, v in event.headers}
                         self.received_headers.append(hdrs)
+                        self.received_targets.append(path)
                         # 消费后续 body 事件
                     elif isinstance(event, h11.EndOfMessage):
                         # 生成响应
@@ -185,23 +193,6 @@ class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("x-maskit-upstream-name", last_headers)
         # 自定义头应该透传
         self.assertEqual(last_headers.get("x-custom"), "test-value")
-
-    async def test_credential_header_filtered(self):
-        """凭据类头被过滤，不通过 extra_headers 注入。"""
-        # 通过 set_extra_headers 注入凭据类头
-        self.sidecar.set_extra_headers("test", {
-            "Authorization": "Bearer should-not-appear",
-            "X-API-Key": "sk-secret",
-            "X-Custom-Header": "should-appear",
-        })
-        await self.test_client.get(
-            self._sidecar_url("/get"),
-            headers=self._upstream_headers(),
-        )
-        last_headers = self.mock.received_headers[-1]
-        self.assertNotIn("authorization", last_headers)
-        self.assertNotIn("x-api-key", last_headers)
-        self.assertEqual(last_headers.get("x-custom-header"), "should-appear")
 
     async def test_tls_fail_closed(self):
         """无效上游 → fail-closed 502（连接失败不放行）。"""
@@ -350,49 +341,29 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
         m = self.sidecar.metrics()
         self.assertIn("tls_verify_off", m["stats"])
 
-    # ─── 凭据头过滤穷尽测试 ───────────────────────────────────────────────
+    # ─── 凭据头穷尽透传测试 ─────────────────────────────────────────────────
 
-    async def test_all_credential_headers_filtered(self):
-        """所有 _CREDENTIAL_HEADER_NAMES 里的头都被过滤，不泄露到上游。"""
-        self.sidecar.set_extra_headers("test", {
-            "Authorization": "Bearer leak-test",
-            "Proxy-Authorization": "Basic leak-test",
-            "Cookie": "session=leak-test",
-            "X-API-Key": "sk-leak-test",
-            "API-Key": "leak-test",
-            "APIKEY": "leak-test",
-            "X-Goog-Api-Key": "leak-test",
-            "X-Auth-Token": "leak-test",
-            "X-Access-Token": "leak-test",
-            "X-Token": "leak-test",
-            "X-Session-Token": "leak-test",
-            "Private-Token": "leak-test",
-            "X-Custom-Safe": "should-appear",
-        })
-        await self.test_client.get(
-            self._sidecar_url("/get"),
-            headers=self._upstream_headers(),
-        )
-        last = self.mock.received_headers[-1]
-        for cred in _CREDENTIAL_HEADER_NAMES:
-            self.assertNotIn(cred, last,
-                "凭据头 %s 泄露到上游" % cred)
-        self.assertEqual(last.get("x-custom-safe"), "should-appear")
+    async def test_credential_headers_in_request_forwarded(self):
+        """transparent 认定的每一个凭据头名，都必须原样到达上游。
 
-    async def test_credential_headers_in_request_stripped(self):
-        """客户端请求里自带的凭据头也被剥离（不只 extra_headers）。"""
-        await self.test_client.get(
+        名单权威来源是 ``transparent._CREDENTIAL_HEADER_NAMES``（sidecar 自己那份
+        是无人调用的死代码，已删）。曾经 sidecar 在转发前剥离这些头，等于让上游对
+        每个请求回 401。这条测试把「sidecar 无凭据过滤权」钉住：
+        名单里任何一名被剥掉都会红。
+        """
+        import transparent
+        names = sorted(transparent._CREDENTIAL_HEADER_NAMES)
+        self.assertGreaterEqual(len(names), 10,
+                                "凭据头名单为空或取错来源，本测试已失去意义")
+        resp = await self.test_client.get(
             self._sidecar_url("/get"),
-            headers=self._upstream_headers({
-                "Authorization": "Bearer client-cred",
-                "X-API-Key": "sk-client-cred",
-                "Cookie": "session=client-cred",
-            }),
+            headers=self._upstream_headers({n: "client-cred-value" for n in names}),
         )
+        self.assertEqual(resp.status_code, 200)
         last = self.mock.received_headers[-1]
-        self.assertNotIn("authorization", last)
-        self.assertNotIn("x-api-key", last)
-        self.assertNotIn("cookie", last)
+        for name in names:
+            self.assertEqual(last.get(name), "client-cred-value",
+                             "凭据头 %s 被 sidecar 剥离 → 上游必然 401" % name)
 
     # ─── Hop-by-hop 头剥离 ─────────────────────────────────────────────────
 
@@ -515,6 +486,154 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
             headers=self._upstream_headers(),
         )
         self.assertEqual(resp.status_code, 200)
+
+
+class TestSidecarProxyClientSelection(unittest.IsolatedAsyncioTestCase):
+    """双客户端（直连池 / 出口代理池）的逐请求选择。
+
+    路由层只负责把 ``X-Maskit-Use-Proxy`` 设上；sidecar 侧挑对客户端、
+    没配代理时回落不炸、代理池自身复用连接，才是这条路径的风险面。
+    """
+
+    async def asyncSetUp(self):
+        self.upstream = MockUpstream()  # 假真实上游
+        await self.upstream.start()
+        self.proxy = MockUpstream()     # 假出口代理
+        await self.proxy.start()
+        self.test_client = httpx.AsyncClient(timeout=10.0, trust_env=False)
+        self._sidecars: list = []
+
+    async def asyncTearDown(self):
+        # 顺序有讲究：必须先关掉调用方连接，再 stop sidecar。
+        # 反过来会卡在 Server.wait_closed()——它还等着这条 keep-alive handler。
+        await self.test_client.aclose()
+        for sidecar in self._sidecars:
+            await sidecar.stop()
+        await self.upstream.stop()
+        await self.proxy.stop()
+
+    async def _start_sidecar(self, with_proxy: bool = True) -> UpstreamSidecar:
+        cfg: dict = {}
+        if with_proxy:
+            cfg = {"egress_proxy": {"enabled": True, "url": self.proxy.url}}
+        sidecar = UpstreamSidecar(cfg)
+        await sidecar.start()
+        self._sidecars.append(sidecar)
+        # 记录每次转发实际选中的客户端，再交给真实实现
+        self.chosen: list = []
+        original = sidecar._forward_with_retry
+
+        async def spy(client, method, url, headers, body):
+            self.chosen.append(client)
+            return await original(client, method, url, headers, body)
+
+        sidecar._forward_with_retry = spy
+        return sidecar
+
+    async def _get(self, sidecar, use_proxy: str | None = None):
+        hdrs = {"X-Maskit-Upstream": self.upstream.url}
+        if use_proxy is not None:
+            hdrs["X-Maskit-Use-Proxy"] = use_proxy
+        return await self.test_client.get(
+            "http://127.0.0.1:%d/get" % sidecar.port, headers=hdrs,
+        )
+
+    async def test_has_egress_proxy_metric_tracks_config(self):
+        """配了出口代理 → has_egress_proxy=True 且第二个客户端就绪；没配则相反。"""
+        with_proxy = await self._start_sidecar(with_proxy=True)
+        self.assertIsNotNone(with_proxy._client_proxy)
+        self.assertTrue(with_proxy.metrics()["has_egress_proxy"])
+
+        without = await self._start_sidecar(with_proxy=False)
+        self.assertIsNone(without._client_proxy)
+        self.assertFalse(without.metrics()["has_egress_proxy"])
+
+    async def test_default_client_without_header(self):
+        """不带 X-Maskit-Use-Proxy → 走直连池，流量不出现在代理端。"""
+        sidecar = await self._start_sidecar()
+        resp = await self._get(sidecar)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(self.chosen[0], sidecar._client)
+        self.assertEqual(self.proxy.received_headers, [])
+        self.assertEqual(self.upstream.received_targets, ["/get"])
+
+    async def test_proxy_client_with_header(self):
+        """带 X-Maskit-Use-Proxy: true → 走代理池，且请求行是绝对形式（真经代理）。"""
+        sidecar = await self._start_sidecar()
+        resp = await self._get(sidecar, "true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(self.chosen[0], sidecar._client_proxy)
+        self.assertEqual(self.upstream.received_headers, [])  # 没有直连
+        self.assertTrue(self.proxy.received_targets[-1].startswith("http://"),
+                        "代理端应收到 absolute-form 请求行，实际: %s"
+                        % self.proxy.received_targets[-1])
+
+    async def test_header_value_parsing(self):
+        """true / TRUE / 1 / yes 判为走代理；false / 0 / 空串判为直连。"""
+        sidecar = await self._start_sidecar()
+        for value, expect_proxy in (
+            ("true", True), ("TRUE", True), ("True", True), ("1", True), ("yes", True),
+            ("false", False), ("0", False), ("", False), ("no", False),
+        ):
+            await self._get(sidecar, value)
+            picked = self.chosen[-1] is sidecar._client_proxy
+            self.assertEqual(
+                picked, expect_proxy,
+                "X-Maskit-Use-Proxy=%r 选中的客户端不对" % value)
+
+    async def test_falls_back_to_direct_when_proxy_unset(self):
+        """上游开了 use_proxy 但全局没配出口代理 → 回落直连池，绝不报错。"""
+        sidecar = await self._start_sidecar(with_proxy=False)
+        resp = await self._get(sidecar, "true")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(self.chosen[0], sidecar._client)
+        self.assertEqual(self.proxy.received_headers, [])
+
+    async def test_use_proxy_header_not_leaked(self):
+        """内部头 X-Maskit-Use-Proxy 两条路径都要剥掉，不泄露给真实上游/代理。"""
+        sidecar = await self._start_sidecar()
+        await self._get(sidecar)
+        await self._get(sidecar, "true")
+        self.assertNotIn("x-maskit-use-proxy", self.upstream.received_headers[-1])
+        self.assertNotIn("x-maskit-use-proxy", self.proxy.received_headers[-1])
+
+    async def test_direct_and_proxy_pools_are_independent(self):
+        """同一 sidecar 内直连与代理交替请求：各自命中各自的上游，互不串道。"""
+        sidecar = await self._start_sidecar()
+        for use_proxy in (None, "true", None, "true"):
+            resp = await self._get(sidecar, use_proxy)
+            self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.upstream.received_targets), 2)
+        self.assertEqual(len(self.proxy.received_targets), 2)
+        self.assertEqual(self.chosen[0], self.chosen[2])  # 直连池同一个客户端
+        self.assertEqual(self.chosen[1], self.chosen[3])  # 代理池同一个客户端
+
+    async def test_proxy_client_reuses_keepalive_connection(self):
+        """代理池必须复用连接——这正是 C1 接管要解决的那个每请求握手。"""
+        sidecar = await self._start_sidecar()
+        for _ in range(3):
+            resp = await self._get(sidecar, "true")
+            self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.proxy.received_headers), 3)
+        self.assertEqual(self.proxy.connection_count, 1,
+                         "3 次代理请求建了 %d 条连接，keep-alive 未复用"
+                         % self.proxy.connection_count)
+
+    async def test_stop_is_bounded_even_with_live_caller_connection(self):
+        """调用方的 keep-alive 连接还挂着时，stop() 也必须在预算内收尾。
+
+        Python 3.12+ 的 Server.wait_closed() 要等所有 handler 退出，而 mitmproxy
+        这条连接不会自己断——实测表现是 stop() 永久不返回（本文件第一版测试就是
+        这样卡死在 tearDown 上）。现在由 sidecar 主动断开活动连接并带上
+        _SHUTDOWN_GRACE_S 预算，所以这里**故意不**提前关 test_client。
+        """
+        sidecar = await self._start_sidecar()
+        await self._get(sidecar, "true")
+        await asyncio.wait_for(sidecar.stop(), timeout=_SHUTDOWN_GRACE_S + 10)
+        self.assertFalse(sidecar.is_running)
+        # 两个客户端成对释放，否则退出时连接池泄漏
+        self.assertIsNone(sidecar._client)
+        self.assertIsNone(sidecar._client_proxy)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ POST /api/config 只在顶层做浅合并，凡是「值本身是容器」的字
 2) 非法请求必须原子拒绝，绝不能留下半改状态。
 """
 from concurrent.futures import ThreadPoolExecutor
+import re
 import sys
 import tempfile
 import threading
@@ -250,6 +251,119 @@ class DefaultConfigKeyParityTests(unittest.TestCase):
                          "归一化会产出、但 default_config() 未声明的键")
         self.assertEqual(sorted(defaults - normalized), [],
                          "default_config() 声明、但归一化会丢弃的键（永远存不住）")
+
+
+class UpstreamFieldParityGuardTests(unittest.TestCase):
+    """把上一条守卫没覆盖到的**嵌套层**补上：upstreams[] 里的开关，引擎读了就必须留得住。
+
+    为什么需要它：`takeover` 就是藏在这一层溜过去的——顶层 key 集比对看不见它，
+    而 save_config 每次都过 normalize_config，于是「手改 config.json 生效、
+    面板一保存就静默变回关闭」。仓库注释里管这叫「永远存不住」（历史 NER_AI 死键），
+    同一个坑换个深度又踩了一次。
+
+    这里不靠人记得「加字段要同步加白名单」，而是从**消费侧反查**：
+    凡 transparent/panel 当作 upstream 字段读出来的键，必须能穿过 normalize_config 存活。
+    """
+
+    _CONSUMERS = ("transparent.py", "panel.py")
+    # upstream 变量名在各处叫 up / u / upstream / matched_up；漏了名字只会漏判，
+    # 下面的 _assertScanWorks 会立刻把「扫描空转」暴露出来。
+    _READ_RE = re.compile(
+        r'\b(?:up|_up|u|upstream|matched_up|editing)\.get\(\s*[\'"]([a-z0-9_]+)[\'"]')
+    # 非布尔字段给合法形状；其余一律 True——断言的只是「键还在」
+    _SAMPLES = {
+        "base_path": "/parity",
+        "paths": ["/v1/chat/completions"],
+        "port": 18799,
+        "name": "parity",
+        "target": "https://parity.invalid",
+        "extra_headers": {"anthropic-beta": "parity"},
+        "connection_policy": {"idle_ttl_s": 60},
+    }
+    _BASE = {"name": "parity", "target": "https://parity.invalid", "port": 18799,
+             "paths": ["/v1/chat/completions"]}
+
+    def _consumed_fields(self):
+        root = Path(__file__).resolve().parents[1] / "engine"
+        found = set()
+        for name in self._CONSUMERS:
+            found.update(self._READ_RE.findall((root / name).read_text(encoding="utf-8")))
+        return found
+
+    def test_scan_sees_the_known_upstream_fields(self):
+        """扫描失效（正则改坏 / 文件改名）会让这条守卫静默空跑，必须先钉住。"""
+        consumed = self._consumed_fields()
+        for field in ("takeover", "use_proxy", "paths", "extra_headers"):
+            self.assertIn(field, consumed, "扫描不到 %s —— 守卫已失效" % field)
+
+    def test_every_consumed_upstream_field_survives_normalize(self):
+        dropped = []
+        for field in sorted(self._consumed_fields()):
+            raw = {"upstreams": [dict(self._BASE, **{
+                field: self._SAMPLES.get(field, True)})]}
+            ups = panel.normalize_config(raw, [], validate_controls=False)["upstreams"]
+            self.assertEqual(len(ups), 1,
+                             "字段 %s 让整条 upstream 被丢弃，无法判定该键是否存活" % field)
+            if field not in ups[0]:
+                dropped.append(field)
+        self.assertEqual(
+            dropped, [],
+            "这些键被引擎当作 upstream 字段读取，却会被 normalize_config 丢弃 → "
+            "该开关在用户眼里永远存不住：%s" % dropped)
+
+
+class UpstreamTakeoverPersistenceTests(unittest.TestCase):
+    """takeover 的具体行为约束：C1 接管开关必须能设、能存、能显式关。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(panel, "CONFIG_PATH", Path(tmp.name) / "config.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _base(self):
+        return {"name": "claude", "target": "https://api.anthropic.com", "port": 18703,
+                "paths": ["/v1/messages"]}
+
+    def test_normalize_keeps_takeover_true(self):
+        out = panel.normalize_config({"upstreams": [dict(self._base(), takeover=True)]})
+        self.assertIs(out["upstreams"][0]["takeover"], True)
+
+    def test_normalize_defaults_takeover_to_false(self):
+        out = panel.normalize_config({"upstreams": [self._base()]})
+        self.assertIs(out["upstreams"][0]["takeover"], False)
+
+    def test_save_and_reload_roundtrip_keeps_takeover(self):
+        """真正的用户路径：面板保存 → 重新读盘，开关不能已经在路上下车。"""
+        panel.save_config({"upstreams": [dict(self._base(), takeover=True)]})
+        self.assertIs(panel.load_config()["upstreams"][0]["takeover"], True)
+
+    def test_list_upsert_without_takeover_preserves_enabled(self):
+        """陈旧表单整份覆盖时不带 takeover → 不能顺手把已开启的接管关掉。"""
+        cfg = {"upstreams": [dict(self._base(), takeover=True)]}
+        stale_form = {"name": "claude", "target": "https://api.anthropic.com",
+                      "port": 18703, "paths": ["/v1/messages"], "use_proxy": False}
+        out = panel._apply_config_patch(cfg, "upstreams", "list_upsert", [], stale_form, None)
+        panel.save_config(out)
+        self.assertIs(panel.load_config()["upstreams"][0]["takeover"], True)
+
+    def test_list_upsert_with_explicit_false_disables(self):
+        """新 UI 显式提交 false 必须生效——否则这个关不掉，就成了单向开关。"""
+        cfg = {"upstreams": [dict(self._base(), takeover=True)]}
+        form = dict(self._base(), takeover=False)
+        out = panel._apply_config_patch(cfg, "upstreams", "list_upsert", [], form, None)
+        panel.save_config(out)
+        self.assertIs(panel.load_config()["upstreams"][0]["takeover"], False)
+
+    def test_rename_via_match_keeps_takeover(self):
+        """按 match 改名同样不能把接管丢掉（改名走的是同一条覆盖路径）。"""
+        cfg = {"upstreams": [dict(self._base(), name="claude", takeover=True)]}
+        renamed = {"name": "claude-2", "target": "https://api.anthropic.com",
+                   "port": 18703, "paths": ["/v1/messages"]}
+        out = panel._apply_config_patch(cfg, "upstreams", "list_upsert", [],
+                                       renamed, "claude")
+        self.assertIs(out["upstreams"][0]["takeover"], True)
 
 
 if __name__ == "__main__":
