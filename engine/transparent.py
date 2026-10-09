@@ -74,6 +74,11 @@ _CONNECT_KILL_TOTAL = {"killed": 0, "ambiguous": 0, "no_conn": 0, "no_task": 0}
 _MASK_CANCEL_BY_CLIENT = {}
 _MASK_WORK_CONTEXT = threading.local()
 
+# C1 上游传输接管：跨客户端共享的 httpx keep-alive 连接池。
+# sidecar 在 takeover=true 的上游首次出现时惰性启动，跑在 mitmproxy 事件循环上。
+_C1_SIDECAR = None
+_C1_SIDECAR_TASK = None
+
 
 class _ClientFlowCancelled(asyncio.CancelledError):
     """Client stream ended: return normally from the mitmproxy hook, not its task."""
@@ -393,8 +398,77 @@ def running():
     _HEARTBEAT_TASK = asyncio.get_running_loop().create_task(_heartbeat_loop())
 
 
+def _c1_any_takeover_enabled():
+    """检查是否有上游开启了 takeover。"""
+    try:
+        for up in (_runtime_config or {}).get("upstreams", []):
+            if up.get("takeover"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _c1_ensure_started():
+    """惰性启动 C1 sidecar（在 request hook 的 async 上下文里调用）。
+
+    sidecar 只在至少一个上游开启了 takeover 时才启动。
+    首次调用会 await 启动完成；后续调用是 no-op。
+    """
+    global _C1_SIDECAR, _C1_SIDECAR_TASK
+    if _C1_SIDECAR is not None or not _c1_any_takeover_enabled():
+        return
+    if _C1_SIDECAR_TASK is not None:
+        await _C1_SIDECAR_TASK  # 等待启动完成
+        return
+    try:
+        from upstream_sidecar import UpstreamSidecar
+    except ImportError:
+        return
+    _C1_SIDECAR = UpstreamSidecar(_runtime_config or {})
+    _C1_SIDECAR_TASK = asyncio.get_running_loop().create_task(_C1_SIDECAR.start())
+    await _C1_SIDECAR_TASK
+    _log("[C1] sidecar started on port %d (httpx cross-client keep-alive pool)" % _C1_SIDECAR.port)
+
+
+def _c1_stop():
+    """同步关闭 C1 sidecar（在 done() 里调用）。"""
+    global _C1_SIDECAR, _C1_SIDECAR_TASK
+    if _C1_SIDECAR_TASK is not None:
+        _C1_SIDECAR_TASK.cancel()
+        _C1_SIDECAR_TASK = None
+    if _C1_SIDECAR is not None:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_C1_SIDECAR.stop())
+        else:
+            asyncio.run(_C1_SIDECAR.stop())
+        _C1_SIDECAR = None
+
+
+def _c1_apply_takeover(flow, up):
+    """在 apply_reverse_routing 里调用：takeover=true 且 sidecar 就绪时改写到 sidecar。
+
+    返回 True 表示已改写（调用方跳过原逻辑），False 表示走原逻辑。
+    """
+    if not up.get("takeover") or _C1_SIDECAR is None or not _C1_SIDECAR.is_running:
+        return False
+    port = _C1_SIDECAR.port
+    try:
+        flow.request.host = "127.0.0.1"
+        flow.request.port = port
+        flow.request.scheme = "http"
+        flow.request.headers["Host"] = "127.0.0.1:%d" % port
+        flow.request.headers["X-Maskit-Upstream"] = up["target"]
+        flow.request.headers["X-Maskit-Upstream-Name"] = up.get("name", "")
+        return True
+    except Exception:
+        return False
+
+
 def done():
     global _HEARTBEAT_TASK, _METRICS_POOL
+    _c1_stop()
     if _HEARTBEAT_TASK is not None:
         _HEARTBEAT_TASK.cancel()
         _HEARTBEAT_TASK = None
@@ -2814,6 +2888,14 @@ def apply_reverse_routing(flow):
     port = _listener_port(flow)
     up = _match_upstream_by_port(port)
     if up:
+        # C1 接管：takeover=true 时改写到 sidecar，跳过原上游直连
+        if _c1_apply_takeover(flow, up):
+            final = _merge_path_and_query("", "", path)
+            try:
+                flow.request.path = final
+            except Exception:
+                pass
+            return up, final
         host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
         try:
             flow.request.host = host
@@ -2832,6 +2914,14 @@ def apply_reverse_routing(flow):
     up, stripped = _match_upstream(path)
     if not up:
         return None, path
+    # C1 接管（单端口模式）
+    if _c1_apply_takeover(flow, up):
+        final = _merge_path_and_query("", "", stripped)
+        try:
+            flow.request.path = final
+        except Exception:
+            pass
+        return up, final
     host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
     try:
         flow.request.host = host
@@ -7149,6 +7239,7 @@ def _write_runtime_metrics(force=False):
                             retry=_upstream_retry.stats()),
             "transport": dict(_CONNECTION_STATS),
             "heartbeat": dict(_HEARTBEAT),
+            "c1_sidecar": _C1_SIDECAR.metrics() if _C1_SIDECAR is not None else {"enabled": False},
         }
 
         # 敏感词表：**引擎里真正生效的词数**与**问题清单**（词 -> 原因）。
@@ -7921,6 +8012,7 @@ async def _request_impl(flow: http.HTTPFlow):
     matched_up = None
     if CAPTURE_MODE == "reverse":
         flow.metadata["shield_orig_path"] = orig_path
+        await _c1_ensure_started()  # C1 sidecar 惰性启动（takeover=true 时）
         matched_up, final_path = apply_reverse_routing(flow)
         if not matched_up:
             _emit_skip(orig_host, method, orig_path, "no_reverse_route", source=source)

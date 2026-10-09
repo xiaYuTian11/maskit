@@ -68,7 +68,8 @@
         "/v1/responses"
       ],
       "use_proxy": false,
-      "extra_headers": {}
+      "extra_headers": {},
+      "takeover": false
     },
     {
       "name": "deepseek",
