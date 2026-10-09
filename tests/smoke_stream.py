@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import pathlib
 from pathlib import Path
 from urllib.request import Request, urlopen
 
