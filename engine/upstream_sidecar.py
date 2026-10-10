@@ -586,7 +586,12 @@ class UpstreamSidecar:
                     continue
                 return None
             except (httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
-                # 这些可能发生在请求已发出之后 → 不重试
+                # 这两类可能发生在请求已发出之后 → 不重试（重试有重复计费风险）。
+                # 别把这里当成「连接池腐烂」的缺口：对端 FIN/RST 时 httpcore 在取用
+                # 连接前就能识别并另开一条，根本走不到这个分支（实测见
+                # tests/test_upstream_sidecar.py 的 TestSidecarStaleConnection，它把
+                # 该行为钉死了）。真走到这里的是「请求已发出、响应中途断」，交给调用方
+                # 重试才是正确归因。
                 logger.error("sidecar non-retryable error: %s", e)
                 return None
             except Exception as e:

@@ -99,6 +99,20 @@ class MockUpstream:
                             conn.start_next_cycle()
                         except Exception:
                             return
+                        # 断连模拟：响应已完整写出，但连接随即消失。用来锁住「池里的
+                        # 连接被上游/中间设备静默关掉后，复用不能把用户打成 502」。
+                        # /close-after → FIN；/rst-after → RST（SO_LINGER=0）。
+                        if path.startswith("/close-after"):
+                            writer.close()
+                            return
+                        if path.startswith("/rst-after"):
+                            import socket as _sock
+                            import struct as _struct
+                            sock = writer.get_extra_info("socket")
+                            sock.setsockopt(_sock.SOL_SOCKET, _sock.SO_LINGER,
+                                            _struct.pack("ii", 1, 0))
+                            writer.close()
+                            return
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
             pass
         finally:
@@ -926,6 +940,58 @@ class TestSidecarFramingAndLimits(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalize_origin("https://h:0"), None)
         self.assertEqual(normalize_origin("https://h:99999"), None)
         self.assertEqual(normalize_origin(None), None)
+
+
+class TestSidecarStaleConnection(unittest.IsolatedAsyncioTestCase):
+    """池里的连接被上游/中间设备静默关掉后，复用不能把用户请求打成 502。
+
+    这是「默认开启 takeover」最容易被问到的那类风险：进程级连接池持有的连接可能
+    早已被上游 / CDN / NAT 关掉，复用它会不会把用户请求变成 5xx。
+
+    实测（httpx 0.28 + httpcore）：对端发 FIN 或 RST 时，httpcore 在取用连接前就能
+    识别它不可用并另开一条，用户侧无感。本类把该行为钉住——httpx 升级若退化了它，
+    这里会红，而不是等线上出现 502 才发现。
+
+    不在覆盖范围：「黑洞连接」（既不回也不关）。那种情况请求可能已被上游处理，
+    重试会带来重复计费，最后以 ReadTimeout 暴露给调用方才是正确行为，不是缺陷。
+    """
+
+    async def asyncSetUp(self):
+        self.mock = MockUpstream()
+        await self.mock.start()
+        self.sidecar = UpstreamSidecar(config={
+            "upstreams": [{"name": "mock", "target": self.mock.url}]})
+        await self.sidecar.start()
+        self.test_client = httpx.AsyncClient(timeout=10.0, trust_env=False)
+
+    async def asyncTearDown(self):
+        await self.test_client.aclose()
+        await self.sidecar.stop()
+        await self.mock.stop()
+
+    def _url(self, path):
+        return "http://127.0.0.1:%d%s" % (self.sidecar.port, path)
+
+    def _hdrs(self):
+        return {"X-Maskit-Upstream": self.mock.url}
+
+    async def test_upstream_fin_after_response_is_absorbed(self):
+        """上游响应后立刻 FIN：连续请求必须全 200（自动换新连接，不出 502）。"""
+        for i in range(3):
+            resp = await self.test_client.get(self._url("/close-after"),
+                                              headers=self._hdrs())
+            self.assertEqual(resp.status_code, 200,
+                             "第 %d 次被池里的死连接打成 %d" % (i + 1, resp.status_code))
+        self.assertEqual(self.sidecar.metrics()["stats"]["errors"], 0)
+
+    async def test_upstream_rst_after_response_is_absorbed(self):
+        """上游响应后 RST（SO_LINGER=0）：同上，绝不能自愈失败。"""
+        for i in range(3):
+            resp = await self.test_client.get(self._url("/rst-after"),
+                                              headers=self._hdrs())
+            self.assertEqual(resp.status_code, 200,
+                             "第 %d 次被池里的死连接打成 %d" % (i + 1, resp.status_code))
+        self.assertEqual(self.sidecar.metrics()["stats"]["errors"], 0)
 
 
 if __name__ == "__main__":
