@@ -2,7 +2,7 @@
 
 本文件记录对用户可见的变更；格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
-## [Unreleased]
+## [0.9.0] - 2026-10-10
 
 ### 修复
 - 日志：上游首包后长时间静默、被 mitmproxy 空闲看门狗（默认 600 秒）掐断的请求，此前写成「客户端断开」，把排查方向带向客户端；现改判为 `upstream_idle`（责任方上游）并给出连续静默秒数。`docs/SETTINGS.md` 同步说清三条互不相同的静默时间线。
