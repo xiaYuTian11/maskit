@@ -2359,7 +2359,7 @@ const en: Record<string, string> = {
   'settings.upstream.egressNotConfiguredDesc': 'Requires enabling and configuring an HTTP proxy address (e.g. http://127.0.0.1:7890) in "Settings → Egress Proxy", otherwise requests will still be routed directly.',
   'settings.upstream.goToEgressSettings': 'Configure Egress Proxy',
   'settings.upstream.takeover': 'Take over the upstream connection (C1 pool)',
-  'settings.upstream.takeoverHint': 'When enabled, the engine holds this upstream\'s connection in a process-level pool and reuses it across clients, so there is no TCP+TLS handshake per request. Leaving it off keeps the original direct path.',
+  'settings.upstream.takeoverHint': 'When enabled, the engine holds this upstream\'s connection in a process-level pool and reuses it across clients, so there is no TCP+TLS handshake per request. Leaving it off keeps the original direct path. Only effective in reverse proxy mode.',
   'settings.upstream.cancel': 'Cancel',
   'settings.upstream.save': 'Save',
   'settings.backup.title': 'Config Backup & Rollback',

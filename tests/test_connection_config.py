@@ -329,5 +329,186 @@ class TransportI18nTests(unittest.TestCase):
         self.assertIn("return label === key ? value : label", source)
 
 
+class TakeoverBooleanPredicateTests(unittest.TestCase):
+    """接管/代理这两个开关都会改**转发路径**，布尔判据只能有一份实现。
+
+    `bool("false")` 是 True：手改 config.json 想关掉接管，裸 `bool()` 会把它读成开启，
+    而面板随后按「开启」存回去——用户视角是「我明明关了」。存配置的面板与读配置的
+    引擎若各写一份判据，两份可以各自漂移，所以这里钉**函数身份**而不是行为相似。
+    """
+
+    def cfg(self, takeover=True, use_proxy=True):
+        cfg = copy.deepcopy(panel.default_config())
+        cfg["upstreams"] = [{"name": "t", "port": 18701,
+                             "target": "https://x.example.test", "paths": ["/v1"],
+                             "takeover": takeover, "use_proxy": use_proxy}]
+        return cfg
+
+    def test_panel_and_engine_share_one_predicate(self):
+        import transparent
+        from shield_defaults import is_true
+        self.assertIs(panel.is_true, is_true)
+        self.assertIs(transparent.is_true, is_true,
+                      "引擎自己又写了一份布尔判据：存与读可能读出两种意思")
+
+    def test_hand_written_values_store_as_the_obvious_bool(self):
+        for raw, expected in (("false", False), ("0", False), ("off", False),
+                              ("no", False), ("", False), ("true", True), ("1", True),
+                              ("on", True), ("YES", True), (1, True), (0, False),
+                              (None, False), ([], False), ({}, False), (True, True),
+                              (False, False)):
+            got = panel.normalize_config(self.cfg(raw, raw))["upstreams"][0]
+            with self.subTest(raw=raw):
+                self.assertIs(got["takeover"], expected)
+                self.assertIs(got["use_proxy"], expected)
+                self.assertIsInstance(got["takeover"], bool,
+                                      "存盘的必须是真 bool，否则下一次读取又靠猜形状")
+
+    def test_engine_reads_the_same_answer(self):
+        """面板存成什么，引擎就得读出什么（同一条 `"false"` 走两遍）。"""
+        import transparent
+        cfg = self.cfg("false", "false")
+        stored = panel.normalize_config(cfg)["upstreams"][0]
+        self.assertFalse(stored["takeover"])
+        self.assertFalse(transparent.is_true(stored["takeover"]))
+
+
+class TakeoverPreflightTests(unittest.TestCase):
+    """「存了但永远不会生效」必须当场说，而不是留到指标里让人猜。
+
+    C1 接管成立的两条前提都写死在别处：`_c1_apply_takeover` 只被
+    `apply_reverse_routing` 调用（非 reverse 模式这个键被完全忽略），而 sidecar 的
+    目标白名单按 origin 建（规范化不出 origin 的上游会被自己拒转）。两种情况以前
+    都毫无提示：面板显示开关已开，runtime metrics 里 `caller_connections` 永远是 0。
+    """
+
+    def cfg(self, mode="reverse", takeover=True, target="https://x.example.test"):
+        cfg = copy.deepcopy(panel.default_config())
+        cfg["capture_mode"] = mode
+        cfg["upstreams"] = [{"name": "t", "port": 18701, "target": target,
+                             "paths": ["/v1"], "takeover": takeover}]
+        return cfg
+
+    def test_healthy_reverse_config_says_nothing(self):
+        self.assertEqual(panel._takeover_preflight_advice(self.cfg()), [],
+                         "正常配置不该被唠叨，否则警告会变成噪声")
+
+    def test_switch_off_is_silent_even_in_a_bad_setup(self):
+        bad = self.cfg(mode="explicit", takeover=False, target="https://a:b@x.test")
+        self.assertEqual(panel._takeover_preflight_advice(bad), [])
+
+    def test_non_reverse_mode_is_named(self):
+        advice = panel._takeover_preflight_advice(self.cfg(mode="explicit"))
+        self.assertEqual(len(advice), 1)
+        self.assertIn("explicit", advice[0])
+        self.assertIn("反向代理", advice[0])
+        self.assertIn("reverse mode", advice[0])
+
+    def test_local_mode_is_also_caught(self):
+        self.assertEqual(len(panel._takeover_preflight_advice(self.cfg(mode="local"))), 1)
+
+    def test_target_without_origin_is_refused_by_the_sidecar_allowlist(self):
+        advice = panel._takeover_preflight_advice(
+            self.cfg(takeover=True, target="https://user:secretpw@x.example.test"))
+        self.assertEqual(len(advice), 1)
+        self.assertIn("「t」", advice[0], "得说清是哪一条上游，用户才知道去改哪个")
+        # 凭据红线：target 里写了 userinfo 也不能回显出来（走 _safe_target 剥净）
+        self.assertNotIn("secretpw", advice[0])
+        self.assertNotIn("user:", advice[0])
+
+    def test_advice_uses_the_sidecars_own_normalizer(self):
+        """判据必须来自建白名单的那份实现，两边各写一份就会漂移。"""
+        import upstream_sidecar
+        self.assertIs(panel._takeover_origin_normalizer(), upstream_sidecar.normalize_origin)
+        for target in ("https://x.example.test", "http://127.0.0.1:18000/prefix",
+                       "https://x.test:8443?api-version=2024"):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    panel._takeover_preflight_advice(self.cfg(takeover=True, target=target)),
+                    [])
+
+    def test_string_false_never_triggers_advice(self):
+        """存储判据与预检判据同源：`"false"` 既存成 False，也不该被当成「开了接管」。"""
+        advice = panel._takeover_preflight_advice(
+            self.cfg(mode="explicit", takeover="false"))
+        self.assertEqual(advice, [])
+
+    def test_missing_sidecar_module_degrades_instead_of_breaking_the_save(self):
+        """预检自己坏了不能拖累保存：跳过 target 这项，模式那条照说。"""
+        with mock.patch.object(panel, "_takeover_origin_normalizer", lambda: None):
+            self.assertEqual(panel._takeover_preflight_advice(
+                self.cfg(takeover=True, target="https://a:b@x.test")), [])
+            self.assertEqual(len(panel._takeover_preflight_advice(
+                self.cfg(mode="explicit", takeover=True))), 1)
+
+    def test_non_dict_config_is_not_a_crash(self):
+        for bad in (None, [], "x", {"upstreams": "not-a-list"}):
+            with self.subTest(cfg=bad):
+                self.assertEqual(panel._takeover_preflight_advice(bad), [])
+
+
+class TakeoverAdviceReachesTheUserTests(unittest.TestCase):
+    """预检必须真的走到用户眼前：前端把 warnings 逐条 toast，函数里返回等于没说。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "config.json"
+        patcher = mock.patch.object(panel, "CONFIG_PATH", self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(panel._sync_runtime_config, panel.default_config())
+        # 磁盘上就摆好「将要保存的那份」上游，避免撞上结构收缩守卫（少一项会被拒）。
+        cfg = panel.default_config()
+        cfg["capture_mode"] = "explicit"
+        cfg["upstreams"] = [{"name": "t", "port": 18701, "base_path": "/t",
+                             "target": "https://x.example.test", "paths": ["/v1"],
+                             "takeover": False}]
+        panel.save_config(cfg)
+
+    def post(self, endpoint, payload):
+        with panel.app.test_client() as client:
+            return client.post(endpoint, json=payload,
+                               headers={"X-Shield-Token": panel.API_TOKEN})
+
+    def test_full_save_returns_the_advice(self):
+        cfg = panel.load_config()
+        cfg["upstreams"][0]["takeover"] = True
+        response = self.post("/api/config", cfg)
+        self.assertEqual(response.status_code, 200)
+        warnings = response.get_json()["warnings"]
+        self.assertTrue(any("takeover" in w or "接管" in w for w in warnings), warnings)
+        self.assertIn("explicit", warnings[0])
+
+    def test_incremental_patch_returns_the_advice_too(self):
+        """两个保存通道都要说：前端改一个上游的开关走的是 patch，不是全量 POST。"""
+        response = self.post("/api/config/patch", {
+            "key": "upstreams", "op": "list_upsert",
+            "value": {"name": "t", "port": 18701, "base_path": "/t",
+                      "target": "https://x.example.test", "paths": ["/v1"],
+                      "takeover": True}})
+        self.assertEqual(response.status_code, 200)
+        warnings = response.get_json()["warnings"]
+        self.assertTrue(any("接管" in w or "takeover" in w for w in warnings), warnings)
+        self.assertTrue(panel.load_config()["upstreams"][0]["takeover"])
+
+    def test_healthy_save_stays_quiet(self):
+        cfg = panel.load_config()
+        cfg["capture_mode"] = "reverse"
+        response = self.post("/api/config", cfg)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([w for w in response.get_json()["warnings"]
+                          if "接管" in w or "takeover" in w], [])
+
+    def test_advice_survives_the_log_path(self):
+        """warnings 除了回传前端还要进面板日志：只有 toast 的话，用户切走页面就没了。"""
+        logs = []
+        with mock.patch.object(panel, "_emit_log", side_effect=lambda m, *a: logs.append(m)):
+            cfg = panel.load_config()
+            cfg["upstreams"][0]["takeover"] = True
+            self.post("/api/config", cfg)
+        self.assertTrue(any("接管" in m or "takeover" in m for m in logs), logs[-5:])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,13 @@ hiddenimports = (
         # 而不是报错（分析器的运气不能当保证）。tests/test_engine_packaging.py 锁这条。
         'selfcheck',
         'body_buffer',
+        # C1 上游传输接管：transparent.py 在模块级 import upstream_retry，又在
+        # `_c1_ensure_started()` 里懒加载 upstream_sidecar。两者原先都不在 spec 里
+        # （全靠分析器捞），datas 也缺——打包态一旦捞不到，症状是「takeover 开了却
+        # 从不生效」，日志里只留一行被吞掉的 ImportError。
+        'upstream_retry',
+        'upstream_sidecar',
+        'credential_labels',
         'onnxruntime',
         'tokenizers',
         # mitmdump 命令行入口：安装包不含 mitmdump.exe，引擎要自己当 mitmdump 跑
@@ -111,6 +118,9 @@ datas = (
        , (str(ENGINE_DIR / 'body_buffer.py'), '.')
        , (str(ENGINE_DIR / 'mitm_transport_adapter.py'), '.')
        , (str(ENGINE_DIR / 'shield_defaults.py'), '.')
+       , (str(ENGINE_DIR / 'credential_labels.py'), '.')
+       , (str(ENGINE_DIR / 'upstream_retry.py'), '.')
+       , (str(ENGINE_DIR / 'upstream_sidecar.py'), '.')
        , (str(ENGINE_DIR / 'event_store.py'), '.')
        , (str(ENGINE_DIR / 'onboarding.py'), '.')
        , (str(ENGINE_DIR / 'inspection.py'), '.')

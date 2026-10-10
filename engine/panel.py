@@ -56,6 +56,7 @@ from shield_defaults import (
     BUILTIN_RULE_META,
     validate_command_regex,
     parse_egress_proxy,
+    is_true,
     OPENROUTER_MODELS_URL,
     PRICE_SYNC_INTERVAL_DAYS,
     MODEL_PRICES,
@@ -3898,6 +3899,69 @@ def _preflight_connection_controls(upstreams):
                 _validate_upstream_connection_policy(upstream["connection_policy"], http2=False)
 
 
+# takeover 的预检**不**放进上面那个函数：那个的语义是「显式不支持就必须挡住保存」，
+# 而接管是性能选项，退回直连是安全默认——为它拦下整次保存比警告难接受得多。
+# 所以这里是「存后建议」，走 warnings 通道（前端把 warnings 逐条 toast 出来）。
+_TAKEOVER_ADVICE_MODE = (
+    "上游传输接管只在反向代理模式下生效，当前模式是 {mode}：已保存但不会生效 / "
+    "Upstream takeover only takes effect in reverse mode (current: {mode}); saved but inactive"
+)
+_TAKEOVER_ADVICE_TARGET = (
+    "客户端「{name}」的接管不会生效：目标 {target} 规范化不出 origin，"
+    "sidecar 的目标白名单按 origin 建，宁可退回直连也不会转发给它不认识的上游 / "
+    "Takeover for \"{name}\" stays inactive: {target} yields no origin, and the sidecar "
+    "allowlist is keyed by origin (falls back to the direct route)"
+)
+
+
+def _takeover_origin_normalizer():
+    """取 sidecar 那一份 `normalize_origin`：白名单是谁建的，判据就得用谁的。
+
+    在面板里另写一份「这个 target 能不能规范化」，等于允许两份代码各自漂移，而漂移
+    的表现恰好就是本函数要消灭的那种「开关开了却不起作用」。sidecar 属于引擎侧模块，
+    这里只在保存后跑一次，所以懒加载（同 `selfcheck` 的做法）；拿不到就跳过这项检查
+    ——预检自己坏了绝不能拖累保存。
+    """
+    try:
+        from upstream_sidecar import normalize_origin
+    except Exception:
+        return None
+    return normalize_origin
+
+
+def _takeover_preflight_advice(cfg):
+    """把「接管存了但永远不会生效」当场说给用户，而不是留到指标里让人猜。
+
+    C1 接管成立的条件只有两个，都写死在别处：
+      ① 反向代理模式——`transparent._c1_apply_takeover` 的唯一调用点是
+         `apply_reverse_routing`，explicit/local 模式下这个键被完全忽略；
+      ② target 能规范化成 origin——sidecar 的白名单就是按 origin 建的，规范化不出
+         origin 的上游即使被送到 sidecar 也会被自己拒转。
+    两种情况以前都毫无提示：面板显示开关已开，而 runtime metrics 里
+    `caller_connections` 永远是 0，用户只能猜「接管没加速是不是没生效」。
+    """
+    if not isinstance(cfg, dict):
+        return []
+    on = [u for u in (cfg.get("upstreams") or [])
+          if isinstance(u, dict) and is_true(u.get("takeover"))]
+    if not on:
+        return []
+    advice = []
+    mode = str(cfg.get("capture_mode") or "reverse").strip().lower()
+    if mode != "reverse":
+        advice.append(_TAKEOVER_ADVICE_MODE.format(mode=mode))
+    normalize = _takeover_origin_normalizer()
+    if normalize is None:
+        return advice
+    for up in on:
+        raw_target = up.get("target") or ""
+        if normalize(raw_target):
+            continue
+        advice.append(_TAKEOVER_ADVICE_TARGET.format(
+            name=up.get("name") or "?", target=_safe_target(raw_target)))
+    return advice
+
+
 _CONNECTION_POLICY_LOAD_WARNING = (
     "connection_policy 无效或当前不可用：已保留原值且未改写文件，请移除显式策略后保存。 / "
     "Invalid or unavailable connection_policy: original value and file retained; remove the explicit policy before saving."
@@ -4156,11 +4220,14 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
                         continue
                     extra_headers[kk] = vv
             upstream = {"name": name, "base_path": base_path, "port": port, "target": target,
-                        "paths": paths_u, "use_proxy": bool(u.get("use_proxy")),
+                        "paths": paths_u, "use_proxy": is_true(u.get("use_proxy")),
                         # takeover 由 transparent._c1_apply_takeover 消费。不在这里显式保留
                         # 就等于「开关存不住」：手改 config.json 生效，但任何一次面板保存
                         # 都会把它抹掉且不留痕迹。
-                        "takeover": bool(u.get("takeover")),
+                        # 两个开关都用 `is_true` 而不是裸 `bool()`：手改配置里写成字符串
+                        # "false" 时 `bool()` 读成 True，而这两个都改转发路径——面板把
+                        # 「关掉」存成「开启」，引擎再照着开启走，用户完全看不出链路变了。
+                        "takeover": is_true(u.get("takeover")),
                         "extra_headers": extra_headers}
             if "connection_policy" in u and u["connection_policy"] is not None:
                 try:
@@ -4915,6 +4982,10 @@ def api_set_config():
                     merged[k] = v
                 incoming = merged
             cfg = save_config(incoming, warnings)
+            # 接管预检放在 save 之后、且用**规整后的** cfg：那时 target 已补过 scheme、
+            # takeover 已是真 bool、capture_mode 是合并后的最终值——判据才对得上引擎
+            # 真正会读到的东西（用 incoming 判会把「没提交的字段」当成默认值）。
+            warnings.extend(_takeover_preflight_advice(cfg))
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
     _emit_log("[panel] 配置已保存（词表/规则/域名等热重载即时生效）")
@@ -5129,6 +5200,7 @@ def api_patch_config():
             allow_before = _allow_hosts_of(cfg)
             cfg = _apply_config_patch(cfg, key, op, path, body["value"], body.get("match"))
             cfg = save_config(cfg, warnings)
+            warnings.extend(_takeover_preflight_advice(cfg))
     except Exception as e:
         return jsonify({"ok": False, "error": _safe_public_text(e, 240)}), 400
     _emit_log(f"[panel] 配置增量已保存（{key} / {op}）")

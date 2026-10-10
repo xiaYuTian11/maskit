@@ -8,3 +8,7 @@ onnxruntime>=1.20,<2.0
 tokenizers>=0.20,<1.0
 # C1 上游传输接管：跨客户端共享的 httpx keep-alive 连接池
 httpx>=0.28,<1.0
+# C1 sidecar 的环回 HTTP/1.1 服务端直接以 h11 做分帧（upstream_sidecar.py）。
+# 它目前只由 httpx→httpcore 传递提供，而 sidecar 是**直接 import 它**的一方：
+# 传递依赖收紧时，源码态一切正常、打包/新环境才 ImportError。同 Brotli/zstandard 的口径。
+h11>=0.16,<0.17

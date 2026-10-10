@@ -32,6 +32,7 @@ import re
 import time
 import secrets
 import uuid
+import weakref
 from pathlib import Path
 from mitmproxy import http, ctx, exceptions
 from connection_policy import ConnectionGovernance, validate_connection_policy
@@ -52,6 +53,8 @@ from shield_defaults import (
     KNOWN_PUBLIC_DNS,
     validate_command_regex,
     parse_egress_proxy,
+    egress_proxy_url,
+    is_true,
     extract_usage as _extract_usage,
 )
 from event_store import enqueue_event
@@ -78,6 +81,9 @@ _MASK_WORK_CONTEXT = threading.local()
 # sidecar 在 takeover=true 的上游首次出现时惰性启动，跑在 mitmproxy 事件循环上。
 _C1_SIDECAR = None
 _C1_SIDECAR_TASK = None
+# 启动失败后不再每条请求重试：一次失败要么来自配置（改完热重载会重置），
+# 要么来自端口（重试也不会好），而每条请求都付一次 import + 建池的代价不值。
+_C1_SIDECAR_FAILED = False
 
 
 class _ClientFlowCancelled(asyncio.CancelledError):
@@ -243,11 +249,20 @@ def _upstream_idle_seconds(flow, phase):
 
 
 def _upstream_idle_killed(flow, phase):
-    """这次失败是否落在「上游静默到点、被连接空闲看门狗掐掉」的窗口里。
+    """这次失败是否该判成「上游静默被掐」。
 
     判据只写这一处：`_flow_failure_owner` 与 `_record_client_cancel` 都要用，
     各写一遍必然漂移（同 `_response_concluded` 的理由）。
+
+    两种来路，结论相同但确定度不同：
+    ① 引擎空闲闸主动落的刀（`_act_stream_idle` 在 flow 上留了 `shield_idle_killed`）——
+       动手的人是自己，不必反推，直接认定；
+    ② 没人动手却断了，且距最后一次上游字节已满 `tcp_timeout` —— 那是 mitmproxy 的
+       连接空闲看门狗掐掉了静默上游，文案却长成 `Client disconnected.`。
     """
+    md = getattr(flow, "metadata", None) or {}
+    if md.get("shield_idle_killed") is not None:
+        return True
     idle = _upstream_idle_seconds(flow, phase)
     return (idle is not None
             and idle >= _UPSTREAM_INACTIVITY_BOUND_S - _UPSTREAM_IDLE_MARGIN_S)
@@ -446,6 +461,9 @@ async def _heartbeat_loop():
         stalled = _CONNECTIONS.stalled_before_send(_CONNECT_STALL_S)
         for key, value in _act_handshake_kills(stalled).items():
             _CONNECT_KILL_TOTAL[key] += value
+        # 响应流空闲闸：同一把刀，砍在另一个阶段（首包之后的静默，见 `_act_stream_idle`）
+        for key, value in _act_stream_idle().items():
+            _STREAM_IDLE_TOTAL[key] += value
         _CONNECT_STALL = {
             "stalled": len(stalled),
             "phases": sorted({phase for _conn, phase, _addr, _peer in stalled}),
@@ -472,11 +490,21 @@ def _c1_any_takeover_enabled():
     """检查是否有上游开启了 takeover。"""
     try:
         for up in UPSTREAMS:
-            if up.get("takeover"):
+            if is_true(up.get("takeover")):
                 return True
     except Exception:
         pass
     return False
+
+
+def _c1_egress_proxy_url(settings):
+    """从 `_read_settings()` 的结果里取出口代理 URL（httpx 要文本，不是 ServerSpec）。
+
+    只是 `shield_defaults.egress_proxy_url` 的一层薄封装——形状判据归它，本函数只负责
+    从设置字典里挑出那个键。为什么要有这一层：见 `egress_proxy_url` 的 docstring
+    （sidecar 第一版照 config.json 的形状读元组，`start()` 当场 AttributeError）。
+    """
+    return egress_proxy_url((settings or {}).get("egress_proxy"))
 
 
 async def _c1_ensure_started():
@@ -484,26 +512,63 @@ async def _c1_ensure_started():
 
     sidecar 只在至少一个上游开启了 takeover 时才启动。
     首次调用会 await 启动完成；后续调用是 no-op。
+
+    **启动失败绝不让请求跟着炸**：takeover 是「换一条更快的路」，不是「不提供服务的
+    前提」。失败就把 sidecar 摘掉、置起 `_C1_SIDECAR_FAILED` 并记一条日志，本次以及
+    后续请求都退回原直连路径（= 这个特性还没上线时的行为）。
     """
-    global _C1_SIDECAR, _C1_SIDECAR_TASK
-    if _C1_SIDECAR is not None or not _c1_any_takeover_enabled():
+    global _C1_SIDECAR, _C1_SIDECAR_TASK, _C1_SIDECAR_FAILED
+    if _C1_SIDECAR is not None or _C1_SIDECAR_FAILED:
+        return
+    if not _c1_any_takeover_enabled():
         return
     if _C1_SIDECAR_TASK is not None:
-        await _C1_SIDECAR_TASK  # 等待启动完成
+        # 并发请求：等在建的这一次。失败已由发起方处理，这里只负责不被异常带走。
+        try:
+            await _C1_SIDECAR_TASK
+        except Exception:
+            pass
         return
     try:
         from upstream_sidecar import UpstreamSidecar
-    except ImportError:
+    except Exception as e:
+        _C1_SIDECAR_FAILED = True
+        _log("[C1] 导入 upstream_sidecar 失败（%s）：takeover 已配置但不生效，"
+             "退回直连。打包态缺模块属构建事故，见 tests/test_engine_packaging.py" % e)
         return
-    _C1_SIDECAR = UpstreamSidecar(_read_settings() or {})
-    _C1_SIDECAR_TASK = asyncio.get_running_loop().create_task(_C1_SIDECAR.start())
-    await _C1_SIDECAR_TASK
-    _log("[C1] sidecar started on port %d (httpx cross-client keep-alive pool)" % _C1_SIDECAR.port)
+    sidecar = UpstreamSidecar(_read_settings() or {})
+    task = asyncio.get_running_loop().create_task(sidecar.start())
+    _C1_SIDECAR_TASK = task
+    try:
+        await task
+    except Exception as e:
+        _C1_SIDECAR_TASK = None
+        _C1_SIDECAR_FAILED = True
+        _retire_sidecar(sidecar)
+        # 归因写全：用户只看到「开关开了但没加速」时，这句话是唯一线索。
+        _log("[C1] sidecar 启动失败（%s: %s）：退回直连路径，"
+             "配置热重载后可重试" % (type(e).__name__, e))
+        return
+    _C1_SIDECAR_TASK = None
+    _C1_SIDECAR = sidecar
+    _log("[C1] sidecar started on port %d (httpx cross-client keep-alive pool)" % sidecar.port)
+
+
+def _retire_sidecar(sidecar):
+    """尽力释放一个没启用成功/已被换下的 sidecar（连接池、监听套接字）。"""
+    if sidecar is None:
+        return
+    try:
+        asyncio.get_running_loop().create_task(sidecar.stop())
+    except RuntimeError:
+        pass
+    except Exception:
+        pass
 
 
 def _c1_stop():
     """同步关闭 C1 sidecar（在 done() 里调用）。"""
-    global _C1_SIDECAR, _C1_SIDECAR_TASK
+    global _C1_SIDECAR, _C1_SIDECAR_TASK, _C1_SIDECAR_FAILED
     if _C1_SIDECAR_TASK is not None:
         _C1_SIDECAR_TASK.cancel()
         _C1_SIDECAR_TASK = None
@@ -514,29 +579,85 @@ def _c1_stop():
         else:
             asyncio.run(_C1_SIDECAR.stop())
         _C1_SIDECAR = None
+    _C1_SIDECAR_FAILED = False
 
 
-def _c1_apply_takeover(flow, up):
+def _c1_reconcile(settings):
+    """配置热重载后让 sidecar 与配置对齐。
+
+    不处理就会留下两种「面板说了不算」的状态（2026-10-10 审计）：
+    ① 用户把 takeover 全关掉——监听与连接池照旧在跑，面板开关和真实数据路径解耦；
+    ② 用户改了出口代理——sidecar 在**构造时**就把 egress 读进了 httpx 客户端，
+       热重载不重读，等于「改了代理但转发照旧」，且没有任何提示。
+    这里只负责「摘下来交给循环去关」；重建由下一条请求的 `_c1_ensure_started()`
+    按新配置惰性完成（`_C1_SIDECAR_FAILED` 一并清零，好让此前失败的配置改完能重试）。
+    """
+    global _C1_SIDECAR, _C1_SIDECAR_TASK, _C1_SIDECAR_FAILED
+    if _C1_SIDECAR is None:
+        _C1_SIDECAR_FAILED = False
+        return
+    stale = (not _c1_any_takeover_enabled()
+             or _c1_egress_proxy_url(settings) != _C1_SIDECAR.egress_url)
+    if not stale:
+        return
+    old, _C1_SIDECAR = _C1_SIDECAR, None
+    _C1_SIDECAR_TASK = None
+    _C1_SIDECAR_FAILED = False
+    _log("[C1] 配置已变更（接管=%s / 出口代理=%s）：停用旧连接池，下一条请求按新配置重建"
+         % (_c1_any_takeover_enabled(), _c1_egress_proxy_url(settings) or "off"))
+    _retire_sidecar(old)
+
+
+def _upstream_host_of(flow):
+    """这条 flow 的**真实上游** host（不是 mitmproxy 实际连的那个）。
+
+    takeover 把 `flow.request.host` 改成了环回 sidecar，而下游四类判据
+    （`is_target` / `STREAM_EXCLUDE_HOSTS` / 事件里的 host 字段 / 日志）要的是
+    真实上游域名——照 `request.host` 读会把「排除某域名不流式」这类配置整个失效。
+    """
+    md = getattr(flow, "metadata", None) or {}
+    real = md.get("shield_upstream_host")
+    if real:
+        return real
+    return getattr(flow.request, "host", None) or flow.request.pretty_host
+
+
+def _c1_apply_takeover(flow, up, path):
     """在 apply_reverse_routing 里调用：takeover=true 且 sidecar 就绪时改写到 sidecar。
 
-    返回 True 表示已改写（调用方跳过原逻辑），False 表示走原逻辑。
+    返回改写后的最终请求路径（含上游 target 的路径前缀），未接管时返回 None。
+
+    `X-Maskit-Upstream` 只带 **origin**（scheme://host:port），路径前缀与 query 由
+    这里用 `_merge_path_and_query` 拼进 `flow.request.path`——与非接管路径**同一份**
+    拼接逻辑。第一版把 target 整串塞进头里、又不拼前缀，于是 sidecar 的
+    `upstream_url + path` 对 `https://…/v1` 这类 target 会拼出 `/v1/v1/…`，
+    而 target 上的 `?api-version=` 参数会整个丢掉（Azure 式上游必挂）。
     """
-    if not up.get("takeover") or _C1_SIDECAR is None or not _C1_SIDECAR.is_running:
-        return False
-    port = _C1_SIDECAR.port
+    if not is_true(up.get("takeover")) or _C1_SIDECAR is None or not _C1_SIDECAR.is_running:
+        return None
     try:
+        host, port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
+        if not host:
+            return None
+        final = _merge_path_and_query(path_prefix, query_prefix, path)
         flow.request.host = "127.0.0.1"
-        flow.request.port = port
+        flow.request.port = _C1_SIDECAR.port
         flow.request.scheme = "http"
-        flow.request.headers["Host"] = "127.0.0.1:%d" % port
-        flow.request.headers["X-Maskit-Upstream"] = up["target"]
+        flow.request.path = final
+        flow.request.headers["Host"] = "127.0.0.1:%d" % _C1_SIDECAR.port
+        flow.request.headers["X-Maskit-Upstream"] = "%s://%s:%d" % (scheme, host, port)
         flow.request.headers["X-Maskit-Upstream-Name"] = up.get("name", "")
         # 告诉 sidecar 是否走出口代理（sidecar 自己管，避免 mitmproxy 把本地连接也代理了）
-        if up.get("use_proxy"):
+        if is_true(up.get("use_proxy")):
             flow.request.headers["X-Maskit-Use-Proxy"] = "true"
-        return True
-    except Exception:
-        return False
+        # 真实上游域名留给下游判据（见 `_upstream_host_of`）
+        flow.metadata["shield_upstream_host"] = host
+        flow.metadata["shield_takeover"] = True
+        return final
+    except Exception as e:
+        # 改写失败不影响转发：退回原直连路径，但必须留痕，否则「没加速」无从归因
+        _log("[C1] 接管改写失败（%s: %s）：本条走直连" % (type(e).__name__, e))
+        return None
 
 
 def done():
@@ -2962,13 +3083,13 @@ def apply_reverse_routing(flow):
     up = _match_upstream_by_port(port)
     if up:
         # C1 接管：takeover=true 时改写到 sidecar，跳过原上游直连
-        if _c1_apply_takeover(flow, up):
-            final = _merge_path_and_query("", "", path)
+        takeover_final = _c1_apply_takeover(flow, up, path)
+        if takeover_final is not None:
             try:
-                flow.request.path = final
+                flow.request.path = takeover_final
             except Exception:
                 pass
-            return up, final
+            return up, takeover_final
         host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
         try:
             flow.request.host = host
@@ -2987,14 +3108,14 @@ def apply_reverse_routing(flow):
     up, stripped = _match_upstream(path)
     if not up:
         return None, path
-    # C1 接管（单端口模式）
-    if _c1_apply_takeover(flow, up):
-        final = _merge_path_and_query("", "", stripped)
+    # C1 接管（单端口模式）：stripped 已去掉 base_path，前缀由 sidecar 头里的 origin 补
+    takeover_final = _c1_apply_takeover(flow, up, stripped)
+    if takeover_final is not None:
         try:
-            flow.request.path = final
+            flow.request.path = takeover_final
         except Exception:
             pass
-        return up, final
+        return up, takeover_final
     host, up_port, scheme, path_prefix, query_prefix = _parse_upstream_target(up["target"])
     try:
         flow.request.host = host
@@ -6796,7 +6917,7 @@ def error(flow):
     _aux_abandon(flow)
     sid = flow.metadata.get("session_id")
     try:
-        host = getattr(flow.request, "host", None) or getattr(flow.request, "pretty_host", "")
+        host = _upstream_host_of(flow)
         path = flow.metadata.get("shield_orig_path") or getattr(flow.request, "path", "")
         s = _session_get(sid, {}) if sid else {}
         source = s.get("source", {})
@@ -7127,6 +7248,119 @@ _CONNECT_STALL_S = _connect_budget(_env_float("MASKIT_CONNECT_STALL_S", 20.0))
 # 关掉它（`MASKIT_CONNECT_KILL=0`）= 退回纯观测：仍然统计、仍然归因，只是不落刀。
 _CONNECT_KILL = _env_int("MASKIT_CONNECT_KILL", 1) != 0 and _CONNECT_STALL_S > 0
 
+# ── 上游响应流空闲闸：首包到了、然后彻底没声 ────────────────────────────────
+# 建连闸（上面的 `_CONNECT_STALL_S`）管「请求还没写出去」，`_ENGINE_DEADLINE_S` 管
+# 「脱敏阶段」，而**响应流开走之后这一层原本一个 idle 判据都没有**：上游吐完首包就
+# 彻底静默时，唯一的兜底是 mitmproxy 每连接的空闲看门狗 `tcp_timeout`（默认 600 s），
+# 于是 Maskit 替客户端握着一条已经死了的连接整整十分钟，客户端那边早就超时放弃了。
+# 判据只能是**空闲间隔**而不是总时长：库里同时存在 876 chunks / 412 KB / 跑满 646 s
+# 的合法长生成，按总时长一刀切就是在砍真请求。
+# N=120 s 是保守值——比 600 s 早一个数量级，又远高于本机任何一条真流式的块间隔
+# （`max_gap_s` 每次收到块都刷新、随 runtime metrics 上报，下次调 N 向这个数要，
+# 不要再拍）。首包**之前**的静默一律不管：推理模型几分钟不出首包是合法的。
+_SSE_IDLE_S = max(0.0, _env_float("MASKIT_SSE_IDLE_S", 120.0))
+# 关掉落刀（`MASKIT_SSE_IDLE_KILL=0`）= 退回纯观测：仍然统计静默流，只是不断连接。
+_SSE_IDLE_KILL = _env_int("MASKIT_SSE_IDLE_KILL", 1) != 0 and _SSE_IDLE_S > 0
+# flow -> {"peer", "last_byte", "max_gap_s", "chunks", "killed"}
+# 用 WeakKeyDictionary 而不是手工登记表：收尾路径有好几条（正常结束、审计下池、
+# 客户端断开、异常），漏一条就是永久扣住一个 flow 对象。
+_STREAM_WATCH = weakref.WeakKeyDictionary()
+_STREAM_IDLE_TOTAL = {"killed": 0, "silent": 0, "ambiguous": 0,
+                      "no_task": 0, "no_peer": 0}
+# 观测：本机见过的最大「相邻两块间隔」。定 N 的唯一依据，别再用猜的。
+_STREAM_GAP_MAX = {"s": 0.0}
+
+
+def _stream_watch(flow):
+    """登记一条「响应流已在跑」的 flow，返回它的观测记录（首字节那一刻调用）。
+
+    测试用的 SimpleNamespace flow 不能当 weakref 键——那种情况返回一个不落表的临时
+    记录，空闲闸自然看不到它，绝不因此让流量本身出问题（同 `_safe_transport_snapshot`
+    的口径：诊断链路自己坏了不能拖累转发）。
+    """
+    # 取记录与登记都各自兜底：`flow.client_conn` 只有真 mitmproxy flow 才有，
+    # `_STREAM_WATCH` 又只收弱引用键。这两处任一抛异常都会冒泡进 `_stream_owned`
+    # 的 except，把**整条流式还原**降级成原样直通（2026-10-10 回归：只捕 TypeError
+    # 时，SimpleNamespace flow 的 AttributeError 让 12+ 个流式用例一起变红）。
+    # 观测链路坏了绝不能拖累转发（同 `_safe_transport_snapshot` 的口径）。
+    entry = None
+    try:
+        entry = _STREAM_WATCH.get(flow)
+    except Exception:
+        entry = None
+    if entry is not None:
+        return entry
+    entry = {"peer": None, "last_byte": time.time(),
+             "max_gap_s": 0.0, "chunks": 0, "killed": False}
+    try:
+        peer = getattr(getattr(flow, "client_conn", None), "peername", None)
+        if peer:
+            entry["peer"] = tuple(peer)
+        _STREAM_WATCH[flow] = entry
+    except Exception:
+        pass
+    return entry
+
+
+def _stream_watch_forget(flow):
+    """流已交付完毕：不必再盯着它静默。"""
+    try:
+        _STREAM_WATCH.pop(flow, None)
+    except Exception:
+        pass
+
+
+def _client_handler_tasks(tasks, peername):
+    """mitmproxy 里持有这条客户端连接的那个 task。
+
+    mitmproxy 自己结束一条静默连接的动作就是取消它
+    （`proxy/server.py` 的 `on_timeout` → `transports[client].handler.cancel("timeout")`）。
+    这里不另造机制，只把同一刀的预算从 600 s 提前到 `_SSE_IDLE_S`、条件收窄到
+    「响应流已经开始之后」。名字对不上就退化成「不动手」= 今天的表现，而不是误杀。
+    """
+    return [task for task in tasks
+            if task.get_name() == "client connection handler"
+            and getattr(task, "client", None) == peername
+            and not task.done()]
+
+
+def _act_stream_idle(now=None):
+    """扫一遍在跑的响应流，掐掉连续静默超预算的那条。返回本次计数。"""
+    counters = dict.fromkeys(_STREAM_IDLE_TOTAL, 0)
+    if not _STREAM_WATCH:
+        return counters
+    now = time.time() if now is None else now
+    tasks = None
+    for flow, entry in list(_STREAM_WATCH.items()):
+        if entry["killed"]:
+            continue
+        idle = now - entry["last_byte"]
+        if idle < _SSE_IDLE_S:
+            continue
+        counters["silent"] += 1
+        if not _SSE_IDLE_KILL:
+            continue
+        if not entry["peer"]:
+            # 认不出是哪条客户端连接就不动手：错杀一条健康连接的代价比漏杀大。
+            counters["no_peer"] += 1
+            continue
+        if tasks is None:
+            tasks = list(asyncio.all_tasks())
+        hits = _client_handler_tasks(tasks, entry["peer"])
+        if len(hits) > 1:
+            counters["ambiguous"] += 1
+        elif not hits:
+            counters["no_task"] += 1
+        else:
+            entry["killed"] = True
+            # 「是我们掐的」这件事必须留在 flow 上：mitmproxy 被取消的是客户端读任务，
+            # 落下来的文案照旧是 `Client disconnected.`，不记这一笔就只能靠 600 s 那个
+            # 窗口去反推，而 120 s 的预算根本落不进那个窗口。
+            flow.metadata["shield_idle_killed"] = round(idle, 1)
+            hits[0].cancel("upstream idle")
+            counters["killed"] += 1
+    return counters
+
 
 def set_mask_workers(n):
     """重建脱敏池（压测脚本 `--workers N` 与未来的运行时调参用）。
@@ -7313,9 +7547,20 @@ def _write_runtime_metrics(force=False):
             "connect": dict(_CONNECT_STALL, stall_after_s=_CONNECT_STALL_S,
                             actuating=_CONNECT_KILL, kills=dict(_CONNECT_KILL_TOTAL),
                             retry=_upstream_retry.stats()),
+            # 上游响应流空闲闸：预算、是否落刀、累计计数，以及**本机实测的最大块间隔**
+            # ——最后这个数是下次调 `_SSE_IDLE_S` 的依据（没有它，N 只能一直靠猜）。
+            "stream_idle": {"budget_s": _SSE_IDLE_S, "actuating": _SSE_IDLE_KILL,
+                            "kills": dict(_STREAM_IDLE_TOTAL),
+                            "max_gap_s": round(_STREAM_GAP_MAX["s"], 2),
+                            "watching": len(_STREAM_WATCH)},
             "transport": dict(_CONNECTION_STATS),
             "heartbeat": dict(_HEARTBEAT),
-            "c1_sidecar": _C1_SIDECAR.metrics() if _C1_SIDECAR is not None else {"enabled": False},
+            # 接管开着但 sidecar 没起来时，只报 `enabled:false` 等于什么都没解释
+            # （用户视角就是「开关没生效」）。把「配了/起没起/起失败过」分开暴露。
+            "c1_sidecar": (_C1_SIDECAR.metrics() if _C1_SIDECAR is not None
+                           else {"enabled": False,
+                                 "takeover_configured": _c1_any_takeover_enabled(),
+                                 "start_failed": _C1_SIDECAR_FAILED}),
         }
 
         # 敏感词表：**引擎里真正生效的词数**与**问题清单**（词 -> 原因）。
@@ -8095,7 +8340,7 @@ async def _request_impl(flow: http.HTTPFlow):
             flow.response = http.Response.make(404, b'{"error":"no_reverse_route"}', {"content-type": "application/json"})
             return
         # 路由后用最终路径和真实上游 host 判断是否为目标 LLM API
-        host = getattr(flow.request, "host", None) or orig_host
+        host = _upstream_host_of(flow)
         path = flow.request.path
         # 非白名单路径不再 404 拦下：/v1/models、/v1/embeddings、健康检查等是客户端
         # 初始化必打的接口，直接拒绝会让人以为代理坏了。这里只决定"是否脱敏"，转发照旧。
@@ -8853,7 +9098,9 @@ async def response(flow: http.HTTPFlow):
     # 流式响应已在 stream 回调里逐块还原并收尾，这里不再重复处理
     if flow.metadata.get("shield_streamed"):
         return
-    host = getattr(flow.request, "host", None) or flow.request.pretty_host
+    # 真实上游 host 走 `_upstream_host_of`：takeover 下 `request.host` 是环回 sidecar，
+    # 照它读会让「排除某域名不流式」这类按域名的判据整个失效（见该函数注释）。
+    host = _upstream_host_of(flow)
     path = flow.request.path
     emit_path = flow.metadata.get("shield_orig_path") or path
     method = getattr(flow.request, "method", "") or ""
@@ -9787,6 +10034,8 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
         if state["done"]:
             return
         state["done"] = True
+        # 整条流已交付，空闲闸不必再盯着它（见 `_stream_watch`）
+        _stream_watch_forget(flow)
         # 收尾：还原摘要留在循环上（微秒级），审计与响应扫描投递 `_AUX_POOL`
         # （实测原占住循环 64KB≈15ms / 1MB≈127ms / 4MB≈216ms）。
         # 注意本回调是**同步**的（mitmproxy 的 stream 回调无 await 点），投递后不等待，
@@ -9827,6 +10076,7 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
         nonlocal session_ref
         state["done"] = True
         state["aborted"] = True
+        _stream_watch_forget(flow)
         state["buf"] = ""
         state["text"] = []
         state["text_len"] = 0
@@ -9862,10 +10112,22 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
             _touch(sid)  # 长生成期间刷新会话 TTL，防止 _sweep 误删活动中的流式会话
             # 首字节计时：第一次收到非空数据块即记（含流式接管路径）
             if data:
+                _now = time.time()
                 # 「最后一次看到上游字节」的时刻：上游静默多久只能靠它算，
                 # 用于区分真客户端断开与看门狗掐掉静默上游（见
                 # `_upstream_idle_seconds`）。
-                flow.metadata["shield_last_byte_at"] = time.time()
+                flow.metadata["shield_last_byte_at"] = _now
+                # 相邻两块的间隔：既是空闲闸的判据（`_act_stream_idle`），也是
+                # 下次调 `_SSE_IDLE_S` 唯一该向它要的那个数（`_STREAM_GAP_MAX`）。
+                _watch = _stream_watch(flow)
+                if _watch["chunks"]:
+                    _gap = _now - _watch["last_byte"]
+                    if _gap > _watch["max_gap_s"]:
+                        _watch["max_gap_s"] = _gap
+                    if _gap > _STREAM_GAP_MAX["s"]:
+                        _STREAM_GAP_MAX["s"] = _gap
+                _watch["last_byte"] = _now
+                _watch["chunks"] += 1
                 s_cur = _session_get(sid)
                 if s_cur is not None:
                     if s_cur.get("resp_ts") is None:
@@ -10273,7 +10535,7 @@ def responseheaders(flow: http.HTTPFlow):
         if flow.metadata.get("shield_stream_requested"):
             _note_stream_degraded(flow, "non_sse")
         return
-    host = getattr(flow.request, "host", None) or flow.request.pretty_host
+    host = _upstream_host_of(flow)
     path = flow.request.path
     emit_path = flow.metadata.get("shield_orig_path") or path
     method = getattr(flow.request, "method", "") or ""
@@ -10362,8 +10624,7 @@ def _restore_sse_body(raw, sid):
 def _handle_json(flow, sid):
     """薄包装（保留给单测与其他调用点）：纯函数 + 回写。"""
     raw = flow.response.content or b""
-    out = _restore_json_body(raw, sid,
-                             getattr(flow.request, "host", None) or flow.request.pretty_host,
+    out = _restore_json_body(raw, sid, _upstream_host_of(flow),
                              getattr(flow.request, "method", "") or "",
                              flow.metadata.get("shield_orig_path") or flow.request.path,
                              flow.response.headers.get("content-type", "") or "")
@@ -10513,8 +10774,14 @@ def _read_settings():
                         continue
                     extra_headers[kk] = vv
 
+            # takeover 必须在这里显式取出来。面板 `normalize_config` 一直存着它，而
+            # 引擎读侧原先不取 → `up.get("takeover")` 恒 False → 整个 C1 是个哑开关，
+            # 且「config.json → _read_settings() → UPSTREAMS」这条链当时零覆盖
+            # （2026-10-10 审计查明；锁它的是 tests/test_c1_config_chain.py）。
+            # 布尔判据统一用 `shield_defaults.is_true`：手改配置里的 "false" 不能读成开启。
             ups.append({"name": name, "base_path": base, "port": port, "target": target,
-                        "paths": list(paths), "use_proxy": bool(u.get("use_proxy")),
+                        "paths": list(paths), "use_proxy": is_true(u.get("use_proxy")),
+                        "takeover": is_true(u.get("takeover")),
                         "extra_headers": extra_headers,
                         **({"connection_policy": u["connection_policy"]} if "connection_policy" in u else {})})
     if not ups:
@@ -10696,6 +10963,9 @@ def _maybe_reload(force=False):
     set_ner_req_budget(s.get("ner_req_budget_s"))
     UPSTREAMS = s["upstreams"]
     EGRESS_PROXY = s.get("egress_proxy")
+    # C1 连接池必须跟着配置换代走：接管全关时它还在跑（面板说了不算），
+    # 出口代理改了时它还在用构造时那份（改了不生效且无提示）。见 `_c1_reconcile`。
+    _c1_reconcile(s)
     CAPTURE_MODE = s["capture_mode"]
     FILTER_ENABLED = bool(s.get("filter_enabled", True))
     FAIL_CLOSED = bool(s.get("fail_closed", True))

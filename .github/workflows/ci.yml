@@ -42,11 +42,12 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests
 
-      - name: Smoke tests (stream, egress & transport)
+      - name: Smoke tests (stream, egress, transport & takeover)
         run: |
           python tests/smoke_stream.py
           python tests/smoke_egress.py
           python tests/smoke_transport.py
+          python tests/smoke_takeover.py
 
   frontend:
     name: frontend

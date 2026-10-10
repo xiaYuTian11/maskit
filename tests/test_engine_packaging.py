@@ -80,6 +80,43 @@ class EngineSpecCoverageTests(unittest.TestCase):
             self.assertIn("'" + name + "'", src)
             self.assertIn("ENGINE_DIR / '" + name + ".py'", src)
 
+    def _engine_import_closure(self, root):
+        """engine/ 内从 `root` 出发能走到的模块（含函数体内的懒 import）。"""
+        modules = self._engine_modules()
+        seen, frontier = set(), [root]
+        while frontier:
+            name = frontier.pop()
+            if name in seen or name not in modules:
+                continue
+            seen.add(name)
+            path = ROOT / "engine" / (name + ".py")
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    frontier += [a.name.split(".")[0] for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    frontier.append(node.module.split(".")[0])
+        return seen
+
+    def test_transparent_import_closure_is_shipped_as_source(self):
+        """`transparent.py` 的引擎导入闭包必须**逐个**出现在 spec 的 datas 里。
+
+        既有那条 `test_every_engine_module_is_reachable_from_the_spec` 只建模 **PYZ
+        可达性**：函数级 import 通常被分析器捞到，于是「hiddenimports 没写、datas
+        也没写」照样绿。而打包态真正的加载方式是 mitmdump 把 transparent.py 当**脚本**
+        读，靠 PYTHONPATH 指向 `_BUNDLE_ROOT` 找同级明文文件——PYZ 里有、磁盘上没有，
+        就是「takeover 开了却从不生效」（`upstream_sidecar` / `upstream_retry` /
+        `credential_labels` 2026-10-10 审计时正是这个状态：三个都在闭包里，datas 一个都没有）。
+        """
+        src = self._spec_source()
+        shipped = set(re.findall(r"ENGINE_DIR / '([a-z_]+)\.py'", src))
+        closure = self._engine_import_closure("transparent")
+        self.assertIn("upstream_sidecar", closure,
+                      "transparent 里已经取不到 upstream_sidecar 了？同步这条判据前先确认 C1 还在")
+        missing = sorted(name for name in closure if name not in shipped)
+        self.assertEqual(missing, [],
+                         "这些模块被 transparent.py 的导入链用到，却没作为明文文件进包：%s"
+                         "（打包态是 ImportError，源码态永远绿）" % missing)
+
     def _shipped_under_internal(self):
         """由 spec 推导出产物 `_internal/` 下会出现的相对路径（三种形状）。
 

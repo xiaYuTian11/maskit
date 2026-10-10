@@ -354,6 +354,11 @@ jobs:
             resources/engine/_internal/inspection.py
             resources/engine/_internal/protocol_contracts.py
             resources/engine/_internal/onboarding.py
+            # C1 接管链路的明文模块：transparent.py 靠 PYTHONPATH 找同级文件，
+            # PYZ 里有而磁盘上没有时，症状只是「takeover 开了不生效」。
+            resources/engine/_internal/upstream_sidecar.py
+            resources/engine/_internal/upstream_retry.py
+            resources/engine/_internal/credential_labels.py
             resources/engine/_internal/skill_bundle/SKILL.md
             resources/engine/_internal/models/ner_mini_zh/model_quantized.onnx
           )

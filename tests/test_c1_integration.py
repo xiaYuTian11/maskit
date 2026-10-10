@@ -74,14 +74,14 @@ class TestC1ApplyTakeover(unittest.TestCase):
         self.transparent._C1_SIDECAR_TASK = None
 
     def test_returns_false_when_sidecar_not_running(self):
-        """sidecar 未启动 → 返回 False（走原逻辑）。"""
+        """sidecar 未启动 → 返回 None（走原逻辑）。"""
         flow = mock.MagicMock()
         up = {"takeover": True, "target": "https://example.com", "name": "test"}
-        result = self.transparent._c1_apply_takeover(flow, up)
-        self.assertFalse(result)
+        result = self.transparent._c1_apply_takeover(flow, up, "/v1/chat/completions")
+        self.assertIsNone(result)
 
     def test_returns_false_when_takeover_false(self):
-        """takeover=false → 返回 False。"""
+        """takeover=false → 返回 None。"""
         # 模拟 sidecar 已启动
         fake_sidecar = mock.MagicMock()
         fake_sidecar.is_running = True
@@ -90,8 +90,8 @@ class TestC1ApplyTakeover(unittest.TestCase):
 
         flow = mock.MagicMock()
         up = {"takeover": False, "target": "https://example.com", "name": "test"}
-        result = self.transparent._c1_apply_takeover(flow, up)
-        self.assertFalse(result)
+        result = self.transparent._c1_apply_takeover(flow, up, "/v1/chat/completions")
+        self.assertIsNone(result)
 
     def test_rewrites_flow_when_active(self):
         """takeover=true + sidecar 运行 → 改写 flow 到 sidecar。"""
@@ -111,20 +111,27 @@ class TestC1ApplyTakeover(unittest.TestCase):
         class FakeFlow:
             def __init__(self):
                 self.request = FakeRequest()
+                self.metadata = {}
 
         flow = FakeFlow()
         up = {"takeover": True, "target": "https://api.example.com", "name": "openai"}
-        result = self.transparent._c1_apply_takeover(flow, up)
+        result = self.transparent._c1_apply_takeover(flow, up, "/v1/chat/completions")
 
         self.assertTrue(result)
         self.assertEqual(flow.request.host, "127.0.0.1")
         self.assertEqual(flow.request.port, 12345)
         self.assertEqual(flow.request.scheme, "http")
         self.assertEqual(flow.request.headers["Host"], "127.0.0.1:12345")
-        self.assertEqual(flow.request.headers["X-Maskit-Upstream"], "https://api.example.com")
+        # 头里带默认端口：sidecar 两侧（白名单与请求头）都过一遍 normalize_origin，
+        # 所以 443 写不写都能匹配上；带端口能让「这是完整 origin」一目了然。
+        self.assertEqual(flow.request.headers["X-Maskit-Upstream"],
+                         "https://api.example.com:443")
         self.assertEqual(flow.request.headers["X-Maskit-Upstream-Name"], "openai")
         # use_proxy=false (default) → 不设 X-Maskit-Use-Proxy
         self.assertNotIn("X-Maskit-Use-Proxy", flow.request.headers)
+        # 真实上游域名留在 metadata：下游按 host 判定的配置不受接管影响
+        self.assertEqual(flow.metadata["shield_upstream_host"], "api.example.com")
+        self.assertTrue(flow.metadata["shield_takeover"])
 
     def test_rewrites_flow_with_use_proxy(self):
         """takeover=true + use_proxy=true → 设置 X-Maskit-Use-Proxy 头。"""
@@ -143,14 +150,52 @@ class TestC1ApplyTakeover(unittest.TestCase):
         class FakeFlow:
             def __init__(self):
                 self.request = FakeRequest()
+                self.metadata = {}
 
         flow = FakeFlow()
         up = {"takeover": True, "target": "https://api.example.com",
               "name": "openai", "use_proxy": True}
-        result = self.transparent._c1_apply_takeover(flow, up)
+        result = self.transparent._c1_apply_takeover(flow, up, "/v1/chat/completions")
 
         self.assertTrue(result)
         self.assertEqual(flow.request.headers["X-Maskit-Use-Proxy"], "true")
+
+    def test_merges_target_path_prefix_and_query(self):
+        """接管路径必须与非接管路径用同一份拼接逻辑：target 的路径前缀与 query 都不能丢。
+
+        第一版把 target 整串塞进头里、又不拼前缀：`https://…/v1` 这类 target 会拼出
+        `/v1/v1/…`，而 target 上的 `?api-version=` 会整个丢掉（Azure 式上游必挂）。
+        头里只带 origin，路径与 query 全留在 `flow.request.path` 上。
+        """
+        fake_sidecar = mock.MagicMock()
+        fake_sidecar.is_running = True
+        fake_sidecar.port = 12345
+        self.transparent._C1_SIDECAR = fake_sidecar
+
+        class FakeRequest:
+            def __init__(self):
+                self.host = None
+                self.port = None
+                self.scheme = None
+                self.headers = {}
+                self.path = ""
+
+        class FakeFlow:
+            def __init__(self):
+                self.request = FakeRequest()
+                self.metadata = {}
+
+        flow = FakeFlow()
+        up = {"takeover": True, "name": "azure",
+              "target": "https://api.example.com/openai?api-version=2024-10-21"}
+        result = self.transparent._c1_apply_takeover(
+            flow, up, "/v1/chat/completions?stream=true")
+
+        self.assertEqual(result,
+                         "/openai/v1/chat/completions?api-version=2024-10-21&stream=true")
+        self.assertEqual(flow.request.path, result)
+        self.assertEqual(flow.request.headers["X-Maskit-Upstream"],
+                         "https://api.example.com:443")
 
 
 class TestC1EgressProxySkip(unittest.TestCase):
@@ -286,6 +331,23 @@ class TestC1ConstantParity(unittest.TestCase):
         leaked = set(_INTERNAL_HEADERS) & set(transparent._CREDENTIAL_HEADER_NAMES)
         self.assertEqual(leaked, set(),
                          "凭据头名被加进了剥离名单 → 上游必然 401")
+
+    def test_sidecar_timeouts_stay_inside_engine_deadline(self):
+        """sidecar 的每一层超时都得留在引擎端到端预算之内（§2.4）。
+
+        不能写成 `connect + read <= deadline`：`read` 是**相邻两块数据之间**的等待
+        上限，不是整段流的预算，两者求和不构成总时长上界。真正要防的是「某一层
+        比外层还大」——那时外层 `engine_timeout` 先到，sidecar 的报错永远看不到，
+        归因就指不到真正超时的那一层。
+        """
+        import transparent
+        from upstream_sidecar import _CONNECT_TIMEOUT_S, _READ_TIMEOUT_S
+        deadline = transparent._ENGINE_DEADLINE_S
+        for name, value in (("connect", _CONNECT_TIMEOUT_S),
+                            ("read", _READ_TIMEOUT_S)):
+            self.assertLessEqual(value, deadline,
+                                 "sidecar %s 超时 %ss 超过引擎预算 %ss"
+                                 % (name, value, deadline))
 
 
 if __name__ == "__main__":

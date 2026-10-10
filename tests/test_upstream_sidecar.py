@@ -2,9 +2,11 @@
 
 用本地 mock HTTP server 做端到端验证，不依赖外部网络。
 覆盖：基本转发 / POST body / 流式响应 / 内部头剥离 / 凭据头透传 /
-TLS fail-closed / 32 MiB 上限 / 连接池复用 / 出口代理双客户端 / metrics / 有界关停。
+TLS fail-closed / 32 MiB 上限 / 连接池复用 / 出口代理双客户端 / metrics / 有界关停 /
+目标白名单 / 请求体残缺 / 压缩响应字节保真 / 无体响应封帧 / 调用方空闲预算。
 """
 import asyncio
+import gzip
 import h11
 import httpx
 import json
@@ -14,12 +16,15 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
 
+import upstream_sidecar as c1mod
 from upstream_sidecar import (
     UpstreamSidecar,
     _MAX_REQUEST_BODY,
     _SHUTDOWN_GRACE_S,
     _UPSTREAM_HEADER,
+    normalize_origin,
 )
+from shield_defaults import parse_egress_proxy
 
 
 class MockUpstream:
@@ -34,6 +39,8 @@ class MockUpstream:
         self._port = 0
         self.received_headers = []  # 每次 request 收到的头
         self.received_targets = []  # 每次 request 收到的请求行 target
+        self.received_methods = []  # 每次 request 收到的方法（HEAD 必须与 GET 区分）
+        self.received_bodies = []   # 每次 request 收到的 body
         self.connection_count = 0   # accepted 连接数（判定 keep-alive 是否真的复用）
 
     async def start(self):
@@ -52,6 +59,8 @@ class MockUpstream:
     async def _handle(self, reader, writer):
         self.connection_count += 1
         conn = h11.Connection(our_role=h11.SERVER)
+        pending = b""
+        method = "GET"
         try:
             while True:
                 data = await reader.read(65536)
@@ -69,41 +78,21 @@ class MockUpstream:
                                 for k, v in event.headers}
                         self.received_headers.append(hdrs)
                         self.received_targets.append(path)
-                        # 消费后续 body 事件
+                        self.received_methods.append(method)
+                        pending = b""
+                    elif isinstance(event, h11.Data):
+                        pending += event.data
                     elif isinstance(event, h11.EndOfMessage):
-                        # 生成响应
-                        if path.startswith("/stream/"):
-                            n = int(path.split("/")[-1])
-                            body = b"".join(
-                                b'data: {"i":%d}\n\n' % (i + 1) for i in range(n)
-                            )
-                            resp = h11.Response(status_code=200, headers=[
-                                ("content-type", "text/event-stream"),
-                                ("content-length", str(len(body))),
-                            ])
-                        elif path == "/get":
-                            body = json.dumps({
-                                "path": "/get",
-                                "headers_received": hdrs,
-                            }).encode()
-                            resp = h11.Response(status_code=200, headers=[
-                                ("content-type", "application/json"),
-                                ("content-length", str(len(body))),
-                            ])
-                        elif path == "/post":
-                            body = json.dumps({"ok": True, "echo_method": method}).encode()
-                            resp = h11.Response(status_code=200, headers=[
-                                ("content-type", "application/json"),
-                                ("content-length", str(len(body))),
-                            ])
-                        else:
-                            body = b'{"ok":true}'
-                            resp = h11.Response(status_code=200, headers=[
-                                ("content-type", "application/json"),
-                                ("content-length", str(len(body))),
-                            ])
-                        writer.write(conn.send(resp))
-                        writer.write(conn.send(h11.Data(data=body)))
+                        self.received_bodies.append(pending)
+                        pending = b""
+                        status, resp_headers, body = self._respond(
+                            method, path, hdrs)
+                        writer.write(conn.send(h11.Response(
+                            status_code=status, headers=resp_headers)))
+                        # HEAD / 204 / 304 按协议没有响应体：h11 会按 0 长度封帧，
+                        # 这里硬塞 Data 只会让 mock 自己抛协议错误。
+                        if body and method != "HEAD" and status not in (204, 304):
+                            writer.write(conn.send(h11.Data(data=body)))
                         writer.write(conn.send(h11.EndOfMessage()))
                         await writer.drain()
                         try:
@@ -118,13 +107,45 @@ class MockUpstream:
             except Exception:
                 pass
 
+    @staticmethod
+    def _respond(method, path, hdrs):
+        """→ (status, headers, body)。body 是**线上原始字节**（gzip 端点保持压缩）。"""
+        def json_(obj, status=200):
+            payload = json.dumps(obj).encode()
+            return status, [("content-type", "application/json"),
+                            ("content-length", str(len(payload)))], payload
+
+        if path.startswith("/stream/"):
+            n = int(path.split("/")[-1])
+            body = b"".join(b'data: {"i":%d}\n\n' % (i + 1) for i in range(n))
+            return 200, [("content-type", "text/event-stream"),
+                         ("content-length", str(len(body)))], body
+        if path.startswith("/gzip"):
+            payload = gzip.compress(b"hello-from-gzip-upstream")
+            return 200, [("content-type", "text/plain"),
+                         ("content-encoding", "gzip"),
+                         ("content-length", str(len(payload)))], payload
+        if path.startswith("/nocontent"):
+            return 204, [], b""
+        if path.startswith("/fixed"):
+            # 长度与请求头无关，HEAD 与 GET 才能直接比 content-length
+            return json_({"ok": True, "fixed": True})
+        if path == "/get":
+            return json_({"path": "/get", "headers_received": hdrs,
+                          "method": method})
+        if path == "/post":
+            return json_({"ok": True, "echo_method": method})
+        return json_({"ok": True})
+
 
 class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         self.mock = MockUpstream()
         await self.mock.start()
-        self.sidecar = UpstreamSidecar(config={})
+        # 白名单在构造时固化：sidecar 只转发配置里声明过的上游 origin（见
+        # UpstreamSidecar.__init__ 的红线注释），空集合等于什么都不放行。
+        self.sidecar = UpstreamSidecar(config=self._sidecar_cfg())
         await self.sidecar.start()
         self.test_client = httpx.AsyncClient(
             timeout=10.0, trust_env=False,
@@ -134,6 +155,18 @@ class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
         await self.test_client.aclose()
         await self.sidecar.stop()
         await self.mock.stop()
+
+    def _sidecar_cfg(self, *extra_targets):
+        """被测 sidecar 的配置：mock 上游 + 额外目标都算「配置里声明过的上游」。"""
+        return {"upstreams": [{"name": "mock", "target": t}
+                              for t in (self.mock.url, *extra_targets)]}
+
+    async def _restart_sidecar(self, *extra_targets):
+        """按新白名单重建 sidecar（白名单构造时固化，运行中改不了）。"""
+        await self.sidecar.stop()
+        self.sidecar = UpstreamSidecar(config=self._sidecar_cfg(*extra_targets))
+        await self.sidecar.start()
+        return self.sidecar
 
     def _sidecar_url(self, path):
         return "http://127.0.0.1:%d%s" % (self.sidecar.port, path)
@@ -196,6 +229,9 @@ class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
 
     async def test_tls_fail_closed(self):
         """无效上游 → fail-closed 502（连接失败不放行）。"""
+        # 先把它登记进白名单：本用例测的是 TLS/DNS 失败后的 fail-closed，
+        # 不是白名单本身（否则先撞 403，测不到真正想测的那条路径）。
+        await self._restart_sidecar("https://self-signed.invalid")
         resp = await self.test_client.get(
             self._sidecar_url("/get"),
             headers={"X-Maskit-Upstream": "https://self-signed.invalid"},
@@ -229,6 +265,7 @@ class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
     async def test_retry_on_connect_error(self):
         """连接失败时重试一次（PRE_SEND_PHASES 安全）。"""
         # 用一个 DNS 解析失败的上游 → ConnectError → 重试 → 502
+        await self._restart_sidecar("https://nonexistent-host-12345.invalid")
         resp = await self.test_client.get(
             self._sidecar_url("/get"),
             headers={"X-Maskit-Upstream": "https://nonexistent-host-12345.invalid"},
@@ -257,6 +294,15 @@ class TestUpstreamSidecar(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    async def test_malformed_upstream_header(self):
+        """头值不是 http(s) origin（带用户信息）→ 400，与白名单的 403 分开归因。"""
+        resp = await self.test_client.get(
+            self._sidecar_url("/get"),
+            headers={"X-Maskit-Upstream": "http://user:pw@127.0.0.1:9"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("invalid", resp.text)
+
 
 class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
     """生产级安全加固测试：覆盖所有 fail-open 高危路径。"""
@@ -264,7 +310,9 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.mock = MockUpstream()
         await self.mock.start()
-        self.sidecar = UpstreamSidecar(config={})
+        # 白名单在构造时固化：sidecar 只转发配置里声明过的上游 origin（见
+        # UpstreamSidecar.__init__ 的红线注释），空集合等于什么都不放行。
+        self.sidecar = UpstreamSidecar(config=self._sidecar_cfg())
         await self.sidecar.start()
         self.test_client = httpx.AsyncClient(
             timeout=10.0, trust_env=False,
@@ -274,6 +322,18 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
         await self.test_client.aclose()
         await self.sidecar.stop()
         await self.mock.stop()
+
+    def _sidecar_cfg(self, *extra_targets):
+        """被测 sidecar 的配置：mock 上游 + 额外目标都算「配置里声明过的上游」。"""
+        return {"upstreams": [{"name": "mock", "target": t}
+                              for t in (self.mock.url, *extra_targets)]}
+
+    async def _restart_sidecar(self, *extra_targets):
+        """按新白名单重建 sidecar（白名单构造时固化，运行中改不了）。"""
+        await self.sidecar.stop()
+        self.sidecar = UpstreamSidecar(config=self._sidecar_cfg(*extra_targets))
+        await self.sidecar.start()
+        return self.sidecar
 
     def _sidecar_url(self, path):
         return "http://127.0.0.1:%d%s" % (self.sidecar.port, path)
@@ -319,6 +379,8 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
             upstream_tls_url = "https://127.0.0.1:%d" % tls_port
 
             try:
+                # 目标先登记进白名单，才能走到真正的 TLS 校验分支
+                await self._restart_sidecar(upstream_tls_url)
                 resp = await self.test_client.get(
                     self._sidecar_url("/get"),
                     headers={"X-Maskit-Upstream": upstream_tls_url},
@@ -340,6 +402,35 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
         # 当前实现 tls_verify 恒为 True，这里验证统计字段存在
         m = self.sidecar.metrics()
         self.assertIn("tls_verify_off", m["stats"])
+
+    async def test_target_outside_config_is_rejected(self):
+        """头里写配置外的目标 → 403 拒转，并计数上报（不静默）。
+
+        环回端口不是访问控制：它只挡得住外来的，挡不住本机上任何一个进程。
+        这条闸断的是「知道 sidecar 端口就能借它转发到任意 host」。
+        """
+        resp = await self.test_client.get(
+            self._sidecar_url("/get"),
+            headers={"X-Maskit-Upstream": "http://127.0.0.1:9"},
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("not_allowed", resp.text)
+        self.assertGreaterEqual(
+            self.sidecar.metrics()["stats"]["rejected_target"], 1)
+
+    async def test_empty_config_rejects_everything(self):
+        """配置里没有任何上游 → 白名单是空集合，方向必须是「全拒」而不是「不限制」。"""
+        sidecar = UpstreamSidecar(config={})
+        await sidecar.start()
+        try:
+            self.assertEqual(sidecar.allowed_origins, frozenset())
+            resp = await self.test_client.get(
+                "http://127.0.0.1:%d/get" % sidecar.port,
+                headers={"X-Maskit-Upstream": self.mock.url},
+            )
+            self.assertEqual(resp.status_code, 403)
+        finally:
+            await sidecar.stop()
 
     # ─── 凭据头穷尽透传测试 ─────────────────────────────────────────────────
 
@@ -513,9 +604,11 @@ class TestSidecarProxyClientSelection(unittest.IsolatedAsyncioTestCase):
         await self.proxy.stop()
 
     async def _start_sidecar(self, with_proxy: bool = True) -> UpstreamSidecar:
-        cfg: dict = {}
+        # 两项都按真实链路的形状给：上游白名单是 config 里的 upstreams，
+        # 出口代理是 _read_settings() 解析后的 ServerSpec（不是 config.json 那串文本）。
+        cfg: dict = {"upstreams": [{"name": "mock", "target": self.upstream.url}]}
         if with_proxy:
-            cfg = {"egress_proxy": {"enabled": True, "url": self.proxy.url}}
+            cfg["egress_proxy"] = parse_egress_proxy(self.proxy.url)
         sidecar = UpstreamSidecar(cfg)
         await sidecar.start()
         self._sidecars.append(sidecar)
@@ -634,6 +727,205 @@ class TestSidecarProxyClientSelection(unittest.IsolatedAsyncioTestCase):
         # 两个客户端成对释放，否则退出时连接池泄漏
         self.assertIsNone(sidecar._client)
         self.assertIsNone(sidecar._client_proxy)
+
+
+class TestSidecarFramingAndLimits(unittest.IsolatedAsyncioTestCase):
+    """分帧与调用方侧的闸——这一组的每一条都对应一个「静默退化」或「带病上行」。
+
+    这些行为在功能冒烟里全是绿的：解压错发的响应只有非流式且上游真压缩时才踩，
+    GET 断保活只表现为「没加速」，残缺 body 照样转发成功。所以必须逐条钉死。
+    """
+
+    async def asyncSetUp(self):
+        self.mock = MockUpstream()
+        await self.mock.start()
+        self.sidecar = UpstreamSidecar(config={
+            "upstreams": [{"name": "mock", "target": self.mock.url}]})
+        await self.sidecar.start()
+        self.test_client = httpx.AsyncClient(timeout=10.0, trust_env=False)
+
+    async def asyncTearDown(self):
+        await self.test_client.aclose()
+        await self.sidecar.stop()
+        await self.mock.stop()
+
+    def _url(self, path):
+        return "http://127.0.0.1:%d%s" % (self.sidecar.port, path)
+
+    def _hdrs(self):
+        return {"X-Maskit-Upstream": self.mock.url}
+
+    async def _raw(self, payload: bytes, close_after=True, read_bytes=4096):
+        """直连 sidecar 发原始字节（httpx 不肯帮我们发出畸形请求）。
+
+        `close_after` 走 ``write_eof()`` **半关闭写方向**而不是 ``close()``：整条
+        socket 关掉时，对端回写在这条连接上的字节会被 RST 丢掉，测试就永远读不到
+        那半个响应（400 之类）；半关闭恰好也是真实的「调用方这边没东西要发了」
+        形态，body 残缺与 absolute-form 两种场景都靠它。
+        """
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.sidecar.port)
+        writer.write(payload)
+        await writer.drain()
+        if close_after:
+            try:
+                writer.write_eof()
+            except (OSError, RuntimeError):
+                pass
+        try:
+            data = await asyncio.wait_for(reader.read(read_bytes), timeout=5)
+        except asyncio.TimeoutError:
+            data = b""
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return data
+
+    async def _wait_stat(self, key: str, expect: int = 1, timeout: float = 3.0) -> None:
+        """等一条统计到位。
+
+        sidecar 的 handler 是另一条 task：``_raw()`` 回来只说明调用方这侧读完了，
+        断言统计前必须给它跑完的机会，否则就是拿「还没发生」当「没发生」。
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            if self.sidecar.metrics()["stats"].get(key, 0) >= expect:
+                return
+            await asyncio.sleep(0.02)
+        self.fail("统计 %s 在 %.1fs 内没到 %d（实际 %r）"
+                  % (key, timeout, expect, self.sidecar.metrics()["stats"]))
+
+    # ─── 调用方侧 keep-alive ────────────────────────────────────────────────
+
+    async def test_get_requests_reuse_one_caller_connection(self):
+        """连续 GET 必须复用同一条调用方连接。
+
+        旧实现只给 POST/PUT/PATCH 读 body，GET 之后 h11 停在 SEND_BODY，
+        `start_next_cycle()` 抛 LocalProtocolError → 每条 GET 结束就断一次连接。
+        C1 要省的「每请求重做握手」于是被换成「每请求重连」，而 `GET /v1/models`
+        正是客户端初始化必打的接口。
+        """
+        for _ in range(3):
+            resp = await self.test_client.get(self._url("/get"), headers=self._hdrs())
+            self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.sidecar.metrics()["stats"]["requests"], 3)
+        self.assertEqual(self.sidecar.metrics()["caller_connections"], 1,
+                         "3 次 GET 开了 %d 条调用方连接，keep-alive 未复用"
+                         % self.sidecar.metrics()["caller_connections"])
+
+    async def test_head_and_get_on_same_connection(self):
+        """HEAD 之后再接 GET：同一条连接上还能继续，且不串响应。"""
+        resp = await self.test_client.head(self._url("/get"), headers=self._hdrs())
+        self.assertEqual(resp.status_code, 200)
+        resp = await self.test_client.get(self._url("/get"), headers=self._hdrs())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.sidecar.metrics()["caller_connections"], 1)
+
+    # ─── 响应分帧 ───────────────────────────────────────────────────────────
+
+    async def test_gzip_response_bytes_are_verbatim(self):
+        """上游 gzip 响应必须按**线上原始字节**转发。
+
+        `aiter_bytes` 给的是解压后的字节，而头部照原样带着 `content-encoding: gzip`
+        ——声明 gzip 却送明文，客户端解码当场炸。这是「看起来更快、实际换了一种坏法」。
+        """
+        resp = await self.test_client.get(self._url("/gzip"), headers=self._hdrs())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("content-encoding"), "gzip")
+        self.assertEqual(resp.text, "hello-from-gzip-upstream")
+        # 原始字节确实是压缩流，不是明文
+        self.assertEqual(self.mock.received_targets[-1], "/gzip")
+
+    async def test_head_response_is_not_chunked(self):
+        """HEAD 响应不能带 `transfer-encoding: chunked`（那是在声明不存在的分帧）。"""
+        # 用固定长度的路径：mock 的 /get 会把收到的请求头揉进 body，HEAD 与 GET 的
+        # 请求头本就不同，长度对不上就成了测数据自身的噪声。
+        resp = await self.test_client.head(self._url("/fixed"), headers=self._hdrs())
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("transfer-encoding", resp.headers)
+        self.assertEqual(resp.content, b"")
+        # 体长按 RFC 9110 §4.3.2 与同一请求发 GET 时一致，所以 content-length 要保留。
+        # 注意不能直接比两条响应的头：sidecar 把 GET 的 body 改写成 chunked，
+        # content-length 是被**有意**去掉的（两个 framer 并存是协议错误）。
+        get = await self.test_client.get(self._url("/fixed"), headers=self._hdrs())
+        self.assertEqual(resp.headers.get("content-length"), str(len(get.content)))
+
+    async def test_204_response_has_no_body_or_framing(self):
+        """204 透传：无体、无 chunked，客户端不会挂在等终止 chunk 上。"""
+        resp = await self.test_client.get(self._url("/nocontent"),
+                                          headers=self._hdrs())
+        self.assertEqual(resp.status_code, 204)
+        self.assertNotIn("transfer-encoding", resp.headers)
+        self.assertEqual(resp.content, b"")
+        # 还能在同一连接上继续请求，说明上一条响应确实被正确定界了
+        again = await self.test_client.get(self._url("/get"), headers=self._hdrs())
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(self.sidecar.metrics()["caller_connections"], 1)
+
+    # ─── 请求侧的闸 ─────────────────────────────────────────────────────────
+
+    async def test_truncated_body_is_never_forwarded(self):
+        """对端半路断开的残缺 body 绝不转发——转出去的是断掉的 JSON，脱敏看到的是残骸。"""
+        await self._raw(
+            ("POST /post HTTP/1.1\r\nHost: x\r\n%s: %s\r\n"
+             "Content-Length: 100\r\n\r\n0123456789" % ("X-Maskit-Upstream", self.mock.url)).encode()
+        )
+        await self._wait_stat("truncated_request")
+        self.assertEqual(self.sidecar.metrics()["stats"]["truncated_request"], 1)
+        self.assertEqual(self.sidecar.metrics()["stats"]["requests"], 0)
+        self.assertEqual(self.mock.received_targets, [])
+
+    async def test_absolute_form_target_is_rejected(self):
+        """请求行必须是 origin-relative 路径：absolute-form 会拼出指向不明的 URL。"""
+        data = await self._raw(
+            ("GET http://evil.invalid/get HTTP/1.1\r\nHost: x\r\n"
+             "X-Maskit-Upstream: %s\r\n\r\n" % self.mock.url).encode())
+        self.assertIn(b"400", data)
+        self.assertIn(b"shield_request_target_invalid", data)
+        self.assertEqual(self.mock.received_targets, [])
+
+    async def test_caller_idle_read_timeout_releases_the_slot(self):
+        """僵住的调用方连接会被空闲预算放开，不会永远占着 handler 名额。
+
+        没有这道闸时，一条停在写请求头中间的连接会同时占住 `_slots` 名额和 httpx
+        池槽位——两个并发闸都变成形式。
+        """
+        original = c1mod._CLIENT_IDLE_TIMEOUT_S
+        c1mod._CLIENT_IDLE_TIMEOUT_S = 0.3
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", self.sidecar.port)
+            writer.write(b"GET /get HTTP/1.1\r\n")  # 故意不发完
+            await writer.drain()
+            self.assertEqual(b"", await asyncio.wait_for(reader.read(1), timeout=5))
+            await asyncio.sleep(0.1)
+            self.assertEqual(self.sidecar.metrics()["caller_connections"], 1)
+            self.assertEqual(self.sidecar.metrics()["stats"]["requests"], 0)
+        finally:
+            c1mod._CLIENT_IDLE_TIMEOUT_S = original
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    # ─── origin 判据 ────────────────────────────────────────────────────────
+
+    def test_normalize_origin(self):
+        """白名单比对的规范化：补齐默认端口、拒绝非 http(s)、拒绝用户信息。"""
+        self.assertEqual(normalize_origin("https://api.openai.com"),
+                         "https://api.openai.com:443")
+        self.assertEqual(normalize_origin("https://api.openai.com/v1"),
+                         "https://api.openai.com:443")          # 路径不参与判定
+        self.assertEqual(normalize_origin("http://127.0.0.1:8080/x?q=1"),
+                         "http://127.0.0.1:8080")
+        self.assertEqual(normalize_origin("API.Example.COM"), None)      # 无 scheme
+        self.assertEqual(normalize_origin("socks5://h:1080"), None)
+        self.assertEqual(normalize_origin("https://user:pw@h"), None)
+        self.assertEqual(normalize_origin("https://h:0"), None)
+        self.assertEqual(normalize_origin("https://h:99999"), None)
+        self.assertEqual(normalize_origin(None), None)
 
 
 if __name__ == "__main__":

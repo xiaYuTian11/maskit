@@ -124,6 +124,14 @@ HANDOVER.md
 # 当成现状读。当前事实以代码注释与测试为准。判据见 AGENTS.md §6.1。
 DESIGN-*.md
 
+# freedesktop 回收站目录：以 root 身份跑过的清理动作会把测试残留（.test-shield-*
+# 等运行时产物）移到这里，目录名按 uid 生成（.Trash-0 / .Trash-1000…）。
+# 它是本机垃圾桶而不是项目资产，判据见 AGENTS.md §6；留在 `git status` 里只会
+# 让人每次发版前多看一眼、甚至顺手 `git add -A` 带进仓库（release.ps1 已刻意
+# 改用 `git add -u` + 精确路径，就是为了不出现那种事故）。
+# 只忽略、不代删——里面是什么由用户自己决定。
+.Trash-*/
+
 # 本机调研 / 方案探索 / 参考快照（统一归档至已忽略的 ai-coding/，或按通配忽略）
 docs/*-REFERENCES.md
 docs/DESIGN-*.md

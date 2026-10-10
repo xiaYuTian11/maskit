@@ -39,6 +39,10 @@ GATES = [
     {"group": "python", "name": "Smoke tests (stream)", "cwd": ".", "argv": ["{python}", "tests/smoke_stream.py"]},
     {"group": "python", "name": "Smoke tests (egress)", "cwd": ".", "argv": ["{python}", "tests/smoke_egress.py"]},
     {"group": "python", "name": "Smoke tests (transport)", "cwd": ".", "argv": ["{python}", "tests/smoke_transport.py"]},
+    # C1 接管的端到端验证：真实 mitmdump + takeover 上游，验「接管组上游连接数
+    # 明显少于请求数」——单测证明不了这条链路（sidecar 单测用 mock 上游，路由单测
+    # 不连 mitmproxy），而它正是 C1 声称的那份收益。
+    {"group": "python", "name": "Smoke tests (takeover)", "cwd": ".", "argv": ["{python}", "tests/smoke_takeover.py"]},
     # ---- frontend（ci.yml: frontend job，工作目录 frontend/）----
     {"group": "frontend", "name": "Typecheck & build", "cwd": "frontend", "argv": ["{npm}", "run", "build"]},
     {"group": "frontend", "name": "Lint", "cwd": "frontend", "argv": ["{npm}", "run", "lint"]},

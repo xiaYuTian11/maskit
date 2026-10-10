@@ -5,20 +5,32 @@
 ## [Unreleased]
 
 ### 修复
-- 日志：上游首包后彻底静默、被 mitmproxy 连接空闲看门狗（默认 600 秒）掐断的请求，此前写成「客户端断开」并把排查方向带向客户端；现改判为 `upstream_idle`（责任方上游）并给出连续静默秒数，`docs/SETTINGS.md` 同步说清三条互不相同的静默时间线。
+- 日志：上游首包后长时间静默、被 mitmproxy 空闲看门狗（默认 600 秒）掐断的请求，此前写成「客户端断开」，把排查方向带向客户端；现改判为 `upstream_idle`（责任方上游）并给出连续静默秒数。`docs/SETTINGS.md` 同步说清三条互不相同的静默时间线。
+- 引擎：接管旁路只转发配置里声明过的上游目标，其余目标回 403 并断开——本机环回端口不再能被同机任意进程当通用中继用。
+- 引擎：修复开启接管后的三处静默失效：出口代理配置使旁路进程启动即抛异常、解压后的响应仍带着 `Content-Encoding`、打包清单漏掉该模块导致生产包里根本没有它。
+- 面板：布尔开关统一改用严格判据，手改 config.json 写成 `"false"`、`[]`、`{}` 的值不再被当成「开启」。
+- 面板：`takeover` 在当前模式下永远不会生效时，保存会给出可见提示；客户端编辑页也只在反向代理模式显示这个开关。
 
 ### Fixed
-- Logs: a request whose upstream fell silent after the first byte and was killed by mitmproxy's inactivity watchdog (600s by default) used to be written as a client disconnect, pointing triage at the wrong side; it is now attributed as `upstream_idle` (owner: upstream) with the idle seconds, and `docs/SETTINGS.md` spells out the three distinct silence timelines.
+- Logs: a request whose upstream fell silent after the first byte and was killed by mitmproxy's inactivity watchdog (600s by default) used to be written as a client disconnect, pointing triage at the wrong side; it is now attributed as `upstream_idle` (owner: upstream) with the idle seconds. `docs/SETTINGS.md` spells out the three distinct silence timelines.
+- Engine: the takeover relay now forwards only upstream targets declared in the config and answers 403 to anything else, so the loopback port can no longer be used as an open relay by any local process.
+- Engine: fixed three silent failures that appeared once takeover was enabled — an egress proxy config made the relay crash on startup, decompressed responses still carried `Content-Encoding`, and the module was missing from the packaging manifest so released builds did not contain it at all.
+- Panel: boolean switches now share one strict predicate, so values hand-edited into config.json as `"false"`, `[]` or `{}` are no longer read as "enabled".
+- Panel: saving `takeover` in a capture mode where it can never take effect now shows a warning, and the client editor only renders the switch in reverse proxy mode.
 
 ### 新增
-- 引擎：C1 上游传输接管（可选开关 `upstreams[].takeover`，默认关闭）。开启后旁路 mitmproxy 上游连接，由进程级 httpx keep-alive 连接池跨客户端共享上游连接，把每天数万次 TCP 握手降到数百次，丢包暴露从「每请求赌一次」降回「每批次赌一次」。TLS 证书校验默认严格（verify=True）、32 MiB 上限守卫平移、客户端凭据头原样透传（仅剥内部路由头）、有/无出口代理双池按上游分流均覆盖；`takeover=false` 时走原逻辑，零影响。
+- 引擎：新增可选开关 `upstreams[].takeover`（默认关闭）。开启后该上游的连接由引擎进程级连接池跨客户端复用，把「每请求一次 TCP+TLS 握手」换成「按连接复用」；`takeover=false` 时转发路径与原来完全一致。
+- 引擎：接管路径沿用原来的安全边界——TLS 校验不放宽、32 MiB 请求体上限仍守（超限 413）、客户端凭据头原样透传，且只转发配置里声明过的上游目标。
 - 面板：客户端编辑页新增「接管上游连接」开关；此前 `takeover` 只能手改 config.json，且面板任何一次保存都会把它静默抹掉。
-- 引擎：metrics 暴露 `c1_sidecar` 状态字段（enabled/port/stats/pool），便于面板观测连接池效果。
+- 引擎：运行指标（metrics）暴露 `c1_sidecar` 状态字段（enabled/port/stats/pool），便于面板观测连接池效果。
+- 引擎：新增响应流空闲闸 `MASKIT_SSE_IDLE_S`（默认 120 秒，`0` 或 `MASKIT_SSE_IDLE_KILL=0` 退回纯观测）：首包之后连续静默到点即取消这条客户端连接并归因 `upstream_idle`，不再替客户端握着一头已死的连接等到 mitmproxy 默认的 600 秒。判据是相邻数据块的间隔而非总时长，跑满 646 秒的长生成不受影响。
 
 ### Added
-- Engine: C1 upstream takeover (opt-in via `upstreams[].takeover`, off by default). When enabled, bypasses mitmproxy's upstream connection and routes through a process-level httpx keep-alive pool shared across all clients — daily TCP handshakes drop from tens of thousands to hundreds, packet-loss exposure shifts from "per-request gamble" back to "per-batch gamble". TLS verification stays strict (verify=True), the 32 MiB body guard carries over, client credential headers pass through untouched (only internal routing headers are stripped), and proxied/direct upstreams get their own pool. With `takeover=false`, the original path is used with zero impact.
+- Engine: optional `upstreams[].takeover` (off by default) — the upstream's connections are reused across clients by a process-level pool, replacing one TCP+TLS handshake per request with per-connection reuse; with `takeover=false` the forwarding path is exactly as before.
+- Engine: the takeover path keeps the same security boundaries — TLS verification is not relaxed, the 32 MiB body limit still applies (413 over limit), client credential headers pass through untouched, and only upstream targets declared in the config are forwarded.
 - Panel: the client editor gains a "take over upstream connection" switch; previously `takeover` could only be set by editing config.json by hand, and every panel save silently wiped it.
 - Engine: metrics now expose a `c1_sidecar` status field (enabled/port/stats/pool) for pool-effect observability.
+- Engine: new response-stream idle gate `MASKIT_SSE_IDLE_S` (120s by default; `0` or `MASKIT_SSE_IDLE_KILL=0` keeps it observation-only) — after the first byte, a stream that produces no bytes for that long gets its client connection cancelled and attributed as `upstream_idle`, instead of Maskit holding a dead connection open for the client until mitmproxy's 600s watchdog fires. The measure is the gap between chunks, not total duration, so a 646s generation is unaffected.
 
 ## [0.8.1] - 2026-10-09
 

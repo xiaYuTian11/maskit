@@ -10,6 +10,30 @@
 
 import re
 
+
+def is_true(value):
+    """配置里布尔项的严格判据：面板存的是真 bool，手改 config.json 的却可能是字符串。
+
+    `bool("false")` / `bool([])` 都是 True —— 用裸 `bool()` 读用户配置时，「把这个
+    开关关掉」会被读成「开启」。受影响的两个键（takeover / use_proxy）都会改**转发
+    路径**，判反了不是小事。字符串只认这几种明确表真的写法，其余一律 False
+    （宁可少开，不可误开）。
+
+    放这里而不是 panel / transparent 各写一份：**存配置的面板**和**读配置的引擎**
+    必须同一判据，否则「面板存进去的形状」与「引擎读出来的意思」可以各自漂移，
+    而漂移的表现是「面板显示已开启、引擎当它没开」。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
+
+
 # 出口代理默认值：关闭 + 空地址（用户在高级设置里填）
 DEFAULT_EGRESS_PROXY = {"enabled": False, "url": ""}
 
@@ -49,6 +73,30 @@ def parse_egress_proxy(url):
     if not (0 < port <= 65535):
         return None
     return (scheme, (host, port))
+
+
+def egress_proxy_url(spec):
+    """ServerSpec `(scheme, (host, port))` → httpx 要的文本形式；非法返回 None。
+
+    `parse_egress_proxy` 的产物本来是给 mitmproxy 的 `flow.server_conn.via` 用的，
+    而 mitmproxy 是**唯一**消费方时不必有反向转换。C1 sidecar 出现后有了第二个消费方
+    （httpx 的 `proxy=`），判据就必须只有一份：sidecar 第一版直接照 **config.json 的
+    形状**（`{"enabled":…, "url":…}`）去读那个元组，`tuple.get(...)` 在启动当场抛
+    AttributeError（2026-10-10 审计查明）。
+    """
+    if not isinstance(spec, (tuple, list)) or len(spec) != 2:
+        return None
+    scheme, hostport = spec[0], spec[1]
+    if not isinstance(scheme, str) or not isinstance(hostport, (tuple, list)) or len(hostport) != 2:
+        return None
+    host, port = hostport[0], hostport[1]
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return None
+    if not host or not (0 < port <= 65535):
+        return None
+    return "%s://%s:%d" % (scheme.strip().lower(), str(host).strip().strip("[]"), port)
 
 
 # 反向代理模式：每个 upstream = 一个本地端口入口。

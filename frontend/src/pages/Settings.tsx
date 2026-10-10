@@ -503,11 +503,15 @@ function UpstreamForm({
                 </div>
               )
             )}
-            <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
-              <Switch checked={!!form.takeover} onCheckedChange={(v) => set('takeover', v)} />
-              {t('settings.upstream.takeover')}
-            </label>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.upstream.takeoverHint')}</p>
+            {captureMode === 'reverse' && (
+              <>
+                <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
+                  <Switch checked={!!form.takeover} onCheckedChange={(v) => set('takeover', v)} />
+                  {t('settings.upstream.takeover')}
+                </label>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.upstream.takeoverHint')}</p>
+              </>
+            )}
           </div>
         </div>
         <DialogFooter>
