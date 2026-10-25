@@ -6206,6 +6206,33 @@ def _mask_text(text, sid):
                 _ner_warn_once("model_missing",
                                "NER 已开启但模型文件不可用（%s），本次未做实体识别"
                                % ner_engine.status().get("model_dir"))
+                # 模型不可用时**仍要跑**中文姓名启发层（2026-10-25 CI 发现）：
+                # 它是纯规则（姓氏表 + 上下文证据），本来就不依赖模型 ——
+                # 恰恰是「模型不可用」时最该由它兜底。原实现把它整块放在 `else`
+                # （模型可用）分支里，于是 CI 无模型环境下启发层完全不生效，
+                # `test_zh_names_are_masked_when_ner_on` 直接红。
+                translated_entities = []
+                _zh_extra, _zh_drop, _zh_truncated = _zh_name_spans(text, [])
+                if _zh_truncated:
+                    try:
+                        ner_engine.record_skip("zh_names_truncated",
+                                               "中文姓名启发层只扫了前 32KB")
+                    except Exception:
+                        pass
+                planned = []
+                for s0, e0, lbl in _ner_entity_spans(text, _zh_extra):
+                    raw_frag = text[s0:e0]
+                    frag = raw_frag.strip()
+                    if len(frag) < 2:
+                        continue
+                    lead = len(raw_frag) - len(raw_frag.lstrip())
+                    _hit(frag, lbl)
+                    token = fwd.get(frag)
+                    if token:
+                        planned.append((s0 + lead, s0 + lead + len(frag), token))
+                if planned:
+                    planned.sort(key=lambda x: (x[0], -x[1]))
+                    text = _mask_by_spans(text, planned)
             else:
                 entities = ner_engine.extract_entities(original)
                 translated_entities = []

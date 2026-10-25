@@ -221,6 +221,50 @@ class IntegrationTests(unittest.TestCase):
         """NER 关时不跑（它不是独立检测器）。"""
         self.assertTrue(hasattr(tr, "_zh_name_spans"), "缺少 `_zh_name_spans` 接入点")
 
+    def test_zh_names_work_when_model_is_unavailable(self):
+        """模型不可用时启发层**仍要生效**（2026-10-25 CI 发现）。
+
+        启发层是纯规则（姓氏表 + 上下文证据），不依赖模型 —— 恰恰是「模型不可用」
+        时最该由它兜底。原实现把它整块放在「模型可用」分支里，于是 CI 无模型环境
+        下启发层完全不生效（`test_zh_names_are_masked_when_ner_on` 在 CI 红、
+        本地绿，因为本地有模型）。
+        """
+        from unittest import mock
+
+        d = tempfile.mkdtemp(prefix="maskit-zh-nomodel-")
+        saved = {k: getattr(tr, k) for k in
+                 ("CUSTOM_WORDS", "BUILTIN_RULES", "SENSITIVE_DISABLED",
+                  "SENSITIVE_WORD_DISABLED", "SENSITIVE_WORD_WHOLE",
+                  "UPSTREAMS", "TARGET_DOMAINS", "API_PATHS",
+                  "CAPTURE_MODE", "FAIL_CLOSED", "_DATA_ROOT")}
+        mtime = tr._cfg_mtime[0]
+        import ner_engine
+        try:
+            with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"sensitive": {}, "builtin_rules": {}, "ner_enabled": True,
+                           "target_domains": ["api.example.com"],
+                           "api_paths": ["/v1/messages"]}, fh, ensure_ascii=False)
+            tr._DATA_ROOT = Path(d)
+            tr._cfg_mtime[0] = None
+            tr._maybe_reload(force=True)
+            tr.BUILTIN_RULES = {k: False for k in tr.DEFAULT_BUILTIN_RULES}
+            tr._CUSTOM_WORD_RX_CACHE.clear()
+            tr._known_reset_for_tests()
+            sid = "zh-nomodel"
+            tr._new_session(sid)
+            with mock.patch.object(ner_engine, "is_ner_available", lambda: False):
+                out = tr.mask("客户陈建国反馈说订单有问题", sid)
+            self.assertNotIn(
+                "陈建国", out,
+                f"模型不可用时启发层未兜底：{out!r}",
+            )
+        finally:
+            for k, v in saved.items():
+                setattr(tr, k, v)
+            tr._cfg_mtime[0] = mtime
+            shutil.rmtree(d, ignore_errors=True)
+            tr._known_reset_for_tests()
+
     def test_zh_names_are_masked_when_ner_on(self):
         """NER 开 + 模型漏检 → 启发层补上，值被脱敏。"""
         d = tempfile.mkdtemp(prefix="maskit-zh-")
