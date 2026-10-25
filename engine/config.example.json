@@ -45,6 +45,8 @@
     "TOKEN": true,
     "SECRET": true
   },
+  "rule_actions": {},
+  "allow_values": [],
   "secret_prefixes": [
     "sk-",
     "ah-",

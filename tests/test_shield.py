@@ -61,6 +61,8 @@ class ShieldEngineTests(unittest.TestCase):
         # 跨请求占位符复用表：不清会串到下一个用例（同一原文会复用上一用例的占位符）
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"张三": "NAME", "李四": "NAME"})
         # 禁用状态与规则开关是全局的，前一个用例设置后不重置会串到下一个用例
@@ -4890,6 +4892,8 @@ class NewRulesTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
         tr.SENSITIVE_WORD_DISABLED = {}
@@ -5255,6 +5259,8 @@ class NerEngineIntegrationTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._NER_WARNED.discard("model_missing")
         self._old_ner = tr.NER_ENABLED
 

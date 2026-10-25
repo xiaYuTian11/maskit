@@ -558,6 +558,16 @@ _SUMMARY_KEEP_FIELDS = frozenset({
     "upstream_may_have_executed", "engine_busy", "engine_queue_bytes", "engine_queue_depth",
     # 还原结果计数
     "restored_unique", "unresolved", "degraded", "success", "usage",
+    # C-2（2026-10-25）：还原失败归因。`placeholder_seen` 让「模型提了但形态坏了」
+    # 与「模型压根没提」在事件里可区分（真机 34% 的 no_placeholder 混了这两种）。
+    "placeholder_seen",
+    # B-4（2026-10-25）：warn 三态本轮放行的值与类型。不发出去等于用户设了
+    # warn 却什么都看不到——那和关掉规则没区别，还留着「我设了 warn」的误解。
+    "warned", "warned_labels",
+    # B-1：known 正向打码命中数（让「无锚点却被遮」可归因）
+    "known_hits",
+    # B-2：出口复检被跳过（超预算）与原因——「跳过必须留痕」的唯一落点
+    "egress_skipped", "egress_skip_reason",
     # 耗时（毫秒）、前缀保真诊断、扫描范围计数
     "mask_ms", "upstream_ms", "first_byte_ms", "queue_wait_ms", "aux_wait_ms",
     "body_rewritten", "first_diff_byte", "suffix_reused", "short_hits", "scan_scope",

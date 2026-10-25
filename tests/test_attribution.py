@@ -25,7 +25,11 @@ import panel
 import event_store
 import transparent as tr
 
-ALLOWED_SOURCES = {"upstream", "engine", "fallback"}
+# `egress`（2026-10-25，B-2）：出口前复检发现「脱敏后仍含原文」时的阻断来源。
+# 它与 `engine` 不同：engine 是 fail-closed 主闸（脱敏管线本身出错/超限），
+# egress 是**脱敏成功之后**回头再扫一遍才发现问题——归因时必须能区分，
+# 否则用户看到「网关拦截」无法判断是配置问题还是引擎缺陷。
+ALLOWED_SOURCES = {"upstream", "engine", "fallback", "egress"}
 
 
 def _restore_summary_fields(tree):

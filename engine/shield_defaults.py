@@ -143,7 +143,20 @@ DEFAULT_PATHS = [
 ]
 
 DEFAULT_TTL = 600
+# 凭据前缀清单。命中即走 `_prefix_secret_regex()`（前缀 + ≥8 位尾），标签固定
+# `APIKEY`。
+#
+# 2026-10-25 补齐（真机日志复盘驱动）：旧清单只有 9 个，实测下面这些主流厂商前缀
+# **全部漏检**（前缀是公开格式标记，误报风险极低，属于白送的覆盖）：
+#   hf_（HuggingFace）/ gsk_（Groq）/ xai-（xAI）/ nvapi-（NVIDIA NIM）
+#   pplx-（Perplexity）/ dop_v1_（DigitalOcean）/ SG.（SendGrid）
+#   sk-or-（OpenRouter）/ sk-ant-（Anthropic）/ sk-proj-（OpenAI 新版）
+#
+# ⚠️ 加新前缀必须同时确认**不会误伤**：`tests/test_secret_prefixes.py` 里有
+# 区域常量（ASIA_EAST_1）、Git SHA、UUID、Base64 的误报侧用例。短前缀（如 `r8_`、
+# `sk-`）尤其要小心——它们太容易撞上代码里的普通标识符。
 DEFAULT_SECRET_PREFIXES = [
+    # 通用 / 旧有
     "sk-",
     "ah-",
     "ghp_",
@@ -153,7 +166,30 @@ DEFAULT_SECRET_PREFIXES = [
     "pypi-",
     "npm_",
     "dify-",
+    # OpenAI 新版细粒度 key（`sk-proj-` / `sk-svcacct-` / `sk-admin-`）
+    "sk-proj-",
+    "sk-svcacct-",
+    "sk-admin-",
+    # Anthropic
+    "sk-ant-",
+    # OpenRouter（`sk-or-v1-`）
+    "sk-or-",
+    # HuggingFace / Groq / xAI / NVIDIA NIM / Perplexity
+    "hf_",
+    "gsk_",
+    "xai-",
+    "nvapi-",
+    "pplx-",
+    # DigitalOcean / SendGrid（`SG.` 带点，`_prefix_secret_regex` 会逐字转义）
+    "dop_v1_",
+    "SG.",
 ]
+# ⚠️ 刻意**不**收 `ak-` / `tk-`：它们太短且与大量普通词相交（`task-` / `make-` /
+# `peak-`），而且会**抢在中文关键词规则之前**吃掉值——实测
+# `API 密钥：ak_live_9qIR...` 被前缀规则先换成 `{{APIKEY_...}}`，
+# 原本应当走 `{{SECRET_...}}` 的中文凭据路径被绕过（`tests/test_regressions.py`
+# 的 `ChineseCredentialContextTests` 当场红）。前缀规则先于关键词规则执行，
+# 每加一个短前缀都要想清楚「它会不会把更精确的标签抢掉」。
 
 # ========== 命令拦截（config.command_block）内置危害命令清单 ==========
 #

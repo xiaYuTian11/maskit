@@ -120,6 +120,15 @@ interface AuditRow {
   block_source?: string
   /** 靠宽松兜底（模型剥了花括号）修回来的占位符数。成功路径，但值得看见 */
   degraded?: number
+  /** B-4（2026-10-25）：warn 三态本轮放行的值与类型。
+   *  **必须看得见**：设成 warn 就是明文出网，用户得知道放行了什么。 */
+  warned?: number
+  warned_labels?: string[]
+  /** B-1：known 正向打码命中数（让「无锚点却被遮」可归因，不必怀疑规则误报） */
+  known_hits?: number
+  /** B-2：出口复检因超预算被跳过（跳过必须留痕，否则用户以为复检跑过了） */
+  egress_skipped?: boolean
+  egress_skip_reason?: string
   /**
    * 批次 2 统一检测口径：处置结论与完整度。列表必须能区分「已扫描未命中 / 明确直通 /
    * 已阻断 / 检测不完整」——它们此前都长得像「什么都没发生」。

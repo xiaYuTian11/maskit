@@ -41,6 +41,7 @@ hiddenimports = (
         # 两者必须同进 datas：漏了 datas 但只有 hiddenimports 时，产物里没有明文文件，
         # 而 release.yml 的「Assert packaged engine contents」会因此把发版拦下（已实测）。
         'inspection',
+        'zh_names',
         'protocol_contracts',
         'audit_signals',
         'audit_engine',
@@ -124,6 +125,7 @@ datas = (
        , (str(ENGINE_DIR / 'event_store.py'), '.')
        , (str(ENGINE_DIR / 'onboarding.py'), '.')
        , (str(ENGINE_DIR / 'inspection.py'), '.')
+       , (str(ENGINE_DIR / 'zh_names.py'), '.')
        , (str(ENGINE_DIR / 'protocol_contracts.py'), '.')
        , (str(ENGINE_DIR / 'audit_signals.py'), '.')
        , (str(ENGINE_DIR / 'audit_engine.py'), '.')

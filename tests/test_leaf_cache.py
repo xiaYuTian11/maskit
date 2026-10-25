@@ -58,6 +58,8 @@ class _LeafCacheIsolation(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
 
         self._saved_cache_ok = tr._LEAF_CACHE_OK[0]

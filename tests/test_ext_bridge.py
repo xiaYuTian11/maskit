@@ -139,6 +139,8 @@ class ExtBridgeTestCase(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         panel._EXT_STATS.update({"mask": 0, "restore": 0})
         panel._EXT_LAST_SWEEP = 0.0
@@ -159,6 +161,8 @@ class ExtBridgeTestCase(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
 
     def _cleanup_tmp(self):
         for p in sorted(self.tmp.glob("**/*"), reverse=True):
@@ -630,6 +634,67 @@ class SweepThrottleTests(ExtBridgeTestCase):
         self.assertIn("ext mask 失败: RuntimeError", _log_lines())
 
 
+class EgressVerifyParityTests(ExtBridgeTestCase):
+    """扩展链路必须与代理链路**同口径**地做出口前复检。
+
+    为什么单列一组：本仓反复踩过「同一个 body 走两条链路结果不同」的坑
+    （键名脱敏、体积闸、检测口径都各踩过一次）。出口复检最初只接了代理链路，
+    扩展用户等于少一层保护——而扩展链路恰恰是**明文直通**的
+    （`ext_block_when_engine_down` 默认 false），更需要这道网。
+    """
+
+    def test_leak_is_blocked_with_503(self):
+        """脱敏后仍含原文 → 503 + blocking:true（与代理链路同形态）。"""
+        def _leaky(text, sid):
+            tr._new_session(sid) if tr._session_get(sid) is None else None
+            sess = tr._session_get(sid, {})
+            tok = "13812345678"
+            sess.setdefault("fwd", {})["13900000000"] = tok
+            sess.setdefault("labels", {})["13900000000"] = "PHONE"
+            sess.setdefault("rev", {})[tok] = "13900000000"
+            # needle 现在只取「本轮新增」：桩必须登记，否则复检拿不到 needle
+            sess.setdefault("new_orig", set()).add("13900000000")
+            return text  # 原样返回：模拟「规则漏了」
+
+        with mock.patch.object(tr, "mask_body", _leaky):
+            r = self._mask('{"c":"13900000000"}')
+        self.assertEqual(r.status_code, 503, "扩展链路漏检未被阻断")
+        body = r.get_json() or {}
+        self.assertIs(body.get("blocking"), True, "阻断响应必须带 blocking:true")
+        self.assertEqual(body.get("error"), "egress_unmasked")
+
+    def test_clean_body_passes(self):
+        """正常脱敏的 body 不该被误拦。"""
+        r = self._mask('{"c":"13900000000"}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("13900000000", (r.get_json() or {}).get("masked_text", ""))
+
+    def test_block_is_logged(self):
+        """阻断必须留痕（否则用户只看到「网页请求失败」）。"""
+        def _leaky(text, sid):
+            tr._new_session(sid) if tr._session_get(sid) is None else None
+            sess = tr._session_get(sid, {})
+            tok = "13812345678"
+            sess.setdefault("fwd", {})["13900000000"] = tok
+            sess.setdefault("labels", {})["13900000000"] = "PHONE"
+            sess.setdefault("rev", {})[tok] = "13900000000"
+            # needle 现在只取「本轮新增」：桩必须登记，否则复检拿不到 needle
+            sess.setdefault("new_orig", set()).add("13900000000")
+            return text
+
+        with mock.patch.object(tr, "mask_body", _leaky):
+            self._mask('{"c":"13900000000"}')
+        # `_emit` 走标准 logging（不进 `panel.log_buf`），真实落点是事件库。
+        # 必须等 writer 批次落库：`_flush_and_drain_events` 是本模块的既有口径。
+        self._flush_and_drain_events()
+        blocks = [e for e in event_store.fetch_events(limit=50) if e.get("type") == "BLOCK"]
+        self.assertTrue(blocks, "阻断没有产生 BLOCK 事件")
+        hit = [e for e in blocks if e.get("reason") == "egress_verify"]
+        self.assertTrue(hit, f"BLOCK 事件缺 reason=egress_verify；实际={[e.get('reason') for e in blocks]}")
+        self.assertEqual(hit[0].get("block_source"), "egress",
+                         "BLOCK 事件缺 block_source=egress（归因会落到 engine）")
+
+
 class FailureVisibilityTests(ExtBridgeTestCase):
     """T19 失败路径留痕（只记异常类型名，不记 message）。"""
 
@@ -983,6 +1048,8 @@ class WarmupTests(ExtBridgeTestCase):
         email_tok = by_label["EMAIL"]["tok"]
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.sessions.clear()
         with mock.patch.dict(os.environ, {"LLM_SHIELD_DATA_DIR": str(self.tmp)}):

@@ -90,6 +90,8 @@ class MaskPathAwarenessTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"张三": "NAME"})
@@ -794,6 +796,8 @@ class PromptCacheByteFidelityTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"张三": "NAME"})
@@ -832,6 +836,8 @@ class PromptCacheByteFidelityTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
 
     def test_only_the_masked_span_differs_across_client_layouts(self):
@@ -1015,6 +1021,8 @@ class CredentialRedactionTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
@@ -1655,6 +1663,8 @@ class ReverseRoutingPathPrefixTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
@@ -2752,6 +2762,8 @@ class StabilityFixTests(unittest.TestCase):
         old_tables = (dict(tr._RECENT_FWD), dict(tr._RECENT_REV))
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         try:
             tok1 = tr._recall_token("13800138000", "PHONE")
@@ -3542,6 +3554,8 @@ class _RuleTestBase(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
@@ -5164,6 +5178,8 @@ class ToolCorrelationIdTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"ACMECORP": "CUSTOMER"})
@@ -5231,6 +5247,8 @@ class ObjectKeyMaskingBoundaryTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.SENSITIVE_DISABLED = set()
@@ -5286,6 +5304,8 @@ class FailClosedCaptureModeTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"SENSITIVEPERSONXYZ": "NAME"})
@@ -5638,6 +5658,8 @@ class CardFalsePositiveTests(unittest.TestCase):
         tr.sessions.pop(sid, None)
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr._new_session(sid)
         return tr.mask(text, sid)
@@ -5727,6 +5749,8 @@ class LLMMutatedPlaceholderAutoHealTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
 
     def test_llm_mutated_ip_is_never_fabricated(self):
@@ -5984,6 +6008,8 @@ class CoreChineseValidationTests(unittest.TestCase):
         tr._CUSTOM_WORD_RX_CACHE.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
 
     def test_idcard18_validation(self):
@@ -7024,6 +7050,8 @@ class PersistentCustomWordsAndFaultTolerantRestoreTests(unittest.TestCase):
         # 模拟清空通用复用表
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
 
         sid = "test-fallback-lookup"
         tr._new_session(sid)
@@ -7511,6 +7539,8 @@ class MaskOffloadTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr.CUSTOM_WORDS.update({"张三": "NAME"})
@@ -7854,6 +7884,8 @@ class SharedStateConcurrencyTests(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.CUSTOM_WORDS.clear()
         tr._CUSTOM_WORD_FWD.clear()
@@ -7872,6 +7904,8 @@ class SharedStateConcurrencyTests(unittest.TestCase):
         tr.SENSITIVE_DISABLED = self._saved["disabled"]
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.sessions.clear()
 
@@ -8450,6 +8484,8 @@ class RecentTableThrottleTests(unittest.TestCase):
         tr._CUSTOM_WORDS_SORTED = ()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr._RECENT_MAX = 200
         tr._prune_last[0] = time.monotonic()
@@ -8462,6 +8498,8 @@ class RecentTableThrottleTests(unittest.TestCase):
         tr.CUSTOM_WORDS.update(self._saved["words"])
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
 
     def _fill(self, n):

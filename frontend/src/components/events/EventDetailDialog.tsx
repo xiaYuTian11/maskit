@@ -76,6 +76,12 @@ const NER_SKIP_LABELS: Record<string, string> = {
   signed_blocks_skipped: 'reason.signedBlocksSkipped',
   unresolved_tokens: 'reason.unresolvedTokens',
   semantic_incomplete: 'reason.semanticIncomplete',
+  // 2026-10-25（B-1）：known 正向打码降级。它是「已知值扫描出错」的唯一可见入口——
+  // 静默失败会让用户以为「这个值本来就不该被遮」，与 NER 降级同一性质。
+  known_scan: 'reason.knownScan',
+  // C-1（2026-10-25）：中文姓名启发层降级（NER 后处理出错，本轮未做姓名补漏/剔误）。
+  zh_names: 'reason.zhNames',
+  zh_names_truncated: 'reason.zhNamesTruncated',
   request_too_large: 'reason.requestTooLarge',
   engine_busy: 'reason.engineBusy',
   engine_timeout: 'reason.engineTimeout',
@@ -561,6 +567,37 @@ export function EventDetailDialog({
                     {(event.degraded ?? 0) > 0 && (
                       <span className="text-muted-foreground">
                         {t('logs.colDegraded')} <strong>{event.degraded}</strong>
+                      </span>
+                    )}
+                    {/* B-4（2026-10-25）：warn 三态本轮放行的值与类型。
+                        **必须看得见**：设成 warn 就是明文出网，用户得知道放行了什么，
+                        否则和关掉规则没区别，却还留着「我设了 warn」的误解。 */}
+                    {(event.warned ?? 0) > 0 && (
+                      <span className="text-amber-600 dark:text-amber-400" title={t('logs.warnedHint')}>
+                        {t('logs.colWarned')} <strong>{event.warned}</strong>
+                        {Array.isArray(event.warned_labels) && event.warned_labels.length > 0 && (
+                          <span className="ml-1 font-mono text-[10px] opacity-80">
+                            {event.warned_labels.join(',')}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {/* B-1：known 正向打码命中数 —— 让「无锚点却被遮」可归因，
+                        不必怀疑规则误报（后者会导致用户去关规则、扩大漏检面）。 */}
+                    {(event.known_hits ?? 0) > 0 && (
+                      <span className="text-muted-foreground" title={t('logs.knownHitsHint')}>
+                        {t('logs.colKnownHits')} <strong>{event.known_hits}</strong>
+                      </span>
+                    )}
+                    {/* B-2：出口复检被跳过（超预算）—— 「跳过必须留痕」的可见落点。 */}
+                    {event.egress_skipped && (
+                      <span className="text-muted-foreground" title={t('logs.egressSkippedHint')}>
+                        {t('logs.colEgressSkipped')}
+                        {event.egress_skip_reason && (
+                          <span className="ml-1 font-mono text-[10px] opacity-80">
+                            {event.egress_skip_reason}
+                          </span>
+                        )}
                       </span>
                     )}
                   </div>

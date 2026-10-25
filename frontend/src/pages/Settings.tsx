@@ -198,6 +198,12 @@ const NER_SKIP_ITEMS: { key: string; labelKey: string }[] = [
   { key: 'global_throttled', labelKey: 'settings.sw.nerSkipGlobalThrottled' },
   { key: 'sem_timeout', labelKey: 'settings.sw.nerSkipSemTimeout' },
   { key: 'signed_blocks_skipped', labelKey: 'settings.sw.nerSkipSignedBlocks' },
+  // B-1（2026-10-25）：已知值正向打码降级。与 NER 降级同性质，必须有可见落点——
+  // 静默降级会让用户以为「这个值本来就不该被遮」。
+  { key: 'known_scan', labelKey: 'settings.sw.nerSkipKnownScan' },
+  // C-1（2026-10-25）：中文姓名启发层降级。
+  { key: 'zh_names', labelKey: 'settings.sw.nerSkipZhNames' },
+  { key: 'zh_names_truncated', labelKey: 'settings.sw.nerSkipZhNamesTruncated' },
 ]
 
 function detectClientType(u: UpstreamConfig): string {
@@ -1135,6 +1141,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
     save(() => saveBuiltinRules({ [rule]: on }), tf(on ? 'settings.toast.ruleOn' : 'settings.toast.ruleOff', { rule }))
   }
 
+  // per-kind 三态（B-4）：走增量 patch（`merge` 到 `rule_actions`），
+  // 不整份覆盖 —— 整表快照会把另一个标签页刚改的其它规则冲掉。
+  const setRuleAction = (rule: string, action: string) => {
+    save(
+      () => patchConfig({ key: 'rule_actions', op: 'merge', value: { [rule]: action } }),
+      tf('settings.toast.ruleAction', { rule, action }),
+    )
+  }
+
   // 前缀增删一律下发增量：整表快照会把并发新增的前缀覆盖掉
   const addSecret = (p: string, msg?: string) => save(() => patchConfig({ key: 'secret_prefixes', op: 'list_add', value: [p] }), msg || t('settings.toast.prefixUpdated'))
   const removeSecret = (p: string, msg?: string) => save(() => patchConfig({ key: 'secret_prefixes', op: 'list_remove', value: [p] }), msg || t('settings.toast.prefixUpdated'))
@@ -1173,6 +1188,8 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   const auditCfg = (cfg?.audit as Record<string, unknown>) ?? {}
   const auditSignals = (auditCfg.signals as Record<string, boolean>) ?? {}
   const builtinRules = (cfg?.builtin_rules as Record<string, boolean>) ?? {}
+  // per-kind 三态（B-4）：缺省 mask。`warn` = **只提醒、明文出网**，UI 必须标清。
+  const ruleActions = (cfg?.rule_actions as Record<string, string>) ?? {}
   const ruleMeta = (cfg?._meta?.builtin_rule_meta as Record<string, string>) ?? {}
   const secretPrefixes = (cfg?.secret_prefixes as string[]) ?? []
   const streamExclude = (cfg?.stream_exclude_hosts as string[]) ?? []
@@ -1878,7 +1895,28 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                                 <div className="truncate text-[10px] text-muted-foreground" title={ruleMeta[rule]}>{ruleMeta[rule]}</div>
                               )}
                             </div>
-                            <Switch checked={on} onCheckedChange={(v) => setRule(rule, v)} className="scale-75 shrink-0" />
+                            <div className="flex shrink-0 items-center gap-1">
+                              {on && (
+                                <select
+                                  value={ruleActions[rule] ?? 'mask'}
+                                  onChange={(e) => setRuleAction(rule, e.target.value)}
+                                  title={t('settings.words.actionHint')}
+                                  className={cn(
+                                    'h-5 rounded border bg-background px-1 font-mono text-[10px]',
+                                    (ruleActions[rule] ?? 'mask') === 'warn'
+                                      ? 'border-amber-500/50 text-amber-600 dark:text-amber-400'
+                                      : (ruleActions[rule] ?? 'mask') === 'block'
+                                        ? 'border-red-500/50 text-red-600 dark:text-red-400'
+                                        : 'border-border text-muted-foreground',
+                                  )}
+                                >
+                                  <option value="mask">{t('settings.words.actionMask')}</option>
+                                  <option value="warn">{t('settings.words.actionWarn')}</option>
+                                  <option value="block">{t('settings.words.actionBlock')}</option>
+                                </select>
+                              )}
+                              <Switch checked={on} onCheckedChange={(v) => setRule(rule, v)} className="scale-75 shrink-0" />
+                            </div>
                           </label>
                         )
                       })}

@@ -70,6 +70,8 @@ class _SignalsIsolation(unittest.TestCase):
         tr.sessions.clear()
         tr._RECENT_FWD.clear()
         tr._RECENT_REV.clear()
+        # known/sent 是 2026-10-25 新增的进程级索引：不清会串到下一个用例
+        tr._known_reset_for_tests()
         tr._RECENT_SUFFIX.clear()
         tr.sessions["live-sid"] = {"fwd": {}, "rev": {}, "labels": {}, "pending": {}}
         tr._RECENT_FWD["SYNTH-ORIG"] = ["{{" + "PHONE_" + "aaaaaa" + "}}", "PHONE", time.time()]

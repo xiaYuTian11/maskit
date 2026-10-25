@@ -4,6 +4,48 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 数据库密码、API 密钥这类配置项现在能正确识别带前缀的写法，以前只认裸关键词。
+- 日志页现在能分清「模型没提到敏感值」和「真的没还原」，不再把两种情况都显示成同一个状态。
+- 新增「只提醒」「拦截」两种处理方式和值级白名单，误报可以只放行那一个值，不必关掉整条规则。
+- Credentials written the way .env files actually look are now detected; previously only the bare keyword was.
+- The log page now tells "the model never mentioned the value" apart from "the value was not restored", instead of showing one status for both.
+- Added "warn only" and "block" per-rule handling plus a per-value allowlist, so a false positive can be released without disabling the whole rule.
+
+### 修复
+- 凭据识别覆盖 `.env` 真实写法：`DB_PASSWORD` / `MYSQL_ROOT_PASSWORD` / `OPENAI_API_KEY` / `db.password` 等带前缀或点号的键名以前全部漏检，现在正常脱敏。
+- 工具定义区不再被改写：工具名、命名空间、参数结构、语法约束以前会被打码，导致上游拒绝请求；现在只扫描其中的说明文字。
+- 视觉等价写法不再绕过：零宽字符插入、全角数字与符号（`１３８…`、`alice＠example.com`）以前整条漏检，现在能识别，且发出去的内容与用户输入逐字节一致。
+- 已知敏感值不再重复出网：某个值一旦被确认敏感，之后在任何位置出现都会被替换，不必再靠 `password=` 这类锚点。
+- 新增出口前复检：脱敏后仍能匹配到原文的请求会被拦下，不再上行。
+- 新增中文姓名补漏与剔误：`客户陈建国` 这类句式不再漏检，`张开的括号` 这类普通词不再被当成人名。
+- 还原状态细分：`no_placeholder_in_response` 拆成「模型没提」「模型提了但形态坏了」「响应没走完」，日志页可区分。
+- 「只提醒」「拦截」两种处理方式现在对所有规则都生效（此前只对部分规则有效），且放行记录会显示在日志里。
+
+### 新增
+- 每条规则可选「脱敏 / 只提醒 / 拦截」三种处理方式。
+- 值级白名单：可放行单个具体值，大小写不敏感，最多 200 条。
+- 脱敏取证：可在日志页查看最近 50 条「实际发出去的内容」，仅内存、不落盘。
+- 高熵凭据检测（默认关闭）：覆盖没有厂商前缀、也没有赋值标签的内部服务令牌。
+
+### 修复 / Fixed
+- Credential detection now covers real `.env` key names (`DB_PASSWORD`, `MYSQL_ROOT_PASSWORD`, `OPENAI_API_KEY`, `db.password`), which were previously missed entirely.
+- Tool definitions are no longer rewritten: tool names, namespaces, parameter schemas and grammar constraints used to be masked, causing upstream rejections; only their descriptions are scanned now.
+- Visually equivalent spellings no longer bypass masking: zero-width insertions and full-width digits/symbols (`１３８…`, `alice＠example.com`) were missed entirely; they are now detected, and what leaves the machine stays byte-identical to what the user typed.
+- A value once confirmed sensitive is now masked wherever it appears, without needing a `password=`-style anchor.
+- New pre-egress re-check: a request that still matches an original value after masking is rejected instead of being sent upstream.
+- Chinese name completion and rejection: `客户陈建国` style phrases are no longer missed, and ordinary words like `张开的括号` are no longer treated as names.
+- Restore status is now split: `no_placeholder_in_response` becomes "the model never mentioned it", "the model rewrote the placeholder", or "the response did not finish".
+- "Warn only" and "block" now apply to every rule (previously only some), and what was let through is shown in the log.
+
+### 新增 / Added
+- Each rule can be set to mask, warn only, or block.
+- Per-value allowlist: release a single concrete value (case-insensitive, up to 200 entries).
+- Masking forensics: the log page can show the last 50 bodies actually sent upstream (memory only, never written to disk).
+- High-entropy credential detection (off by default) for internal service tokens with neither a vendor prefix nor an assignment label.
+
 ## [0.11.4] - 2026-10-20
 
 ### 更新摘要 / Summary

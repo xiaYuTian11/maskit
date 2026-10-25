@@ -60,11 +60,50 @@ class TestSecretPrefixes(unittest.TestCase):
             # 普通标识符或文件名
             'path = "/var/log/app_trace_dump_2026.log"',
             'class AsiaPacificController:',
+            # 2026-10-25 新增前缀的误伤面（必须继续放行）
+            'task-queue-name = "worker-pool"',       # tk- 只认 tk-，不认 task
+            'make-archive=2026',                     # ak- 不认 make-archive
+            'peak-load = "12"',
+            'speak-language = "zh-CN"',
+            'safety-check = "on"',                   # SG. 不认 safety
+            'sg.group = "ops"',                      # SG. 大小写敏感，sg. 不命中
+            'hf_config = "default"',                 # hf_ 后需 ≥8 位尾，default 不足
+            'gsk_docs = "v2"',                       # gsk_ 后仅 2 位，不命中
+            'xai-models = "list"',                   # xai- 后仅 6 位，不命中
+            'nvapi-version = "1"',
         ]
 
         for code in non_secrets:
             match = rx.search(code)
             self.assertIsNone(match, f"代码中的正常标识符不应被误判为凭据: {code}")
+
+    def test_new_prefixes_are_covered(self):
+        """2026-10-25 补齐的厂商前缀必须都在清单里（防「改了正则忘了清单」）。
+
+        真机日志复盘结论：旧清单只有 9 个，HuggingFace / Groq / xAI / NVIDIA /
+        Perplexity / DigitalOcean / SendGrid / OpenRouter / Anthropic 新版
+        全部漏检。这些前缀是**公开格式标记**，误报风险极低。
+        """
+        required = {
+            "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-", "sk-or-",
+            "hf_", "gsk_", "xai-", "nvapi-", "pplx-", "dop_v1_", "SG.",
+        }
+        missing = required - set(DEFAULT_SECRET_PREFIXES)
+        self.assertEqual(missing, set(), f"缺少这些厂商前缀：{sorted(missing)}")
+
+    def test_new_prefixes_hit_end_to_end(self):
+        """走完整 mask()（不只正则），确保标签与还原都对。"""
+        sample_tail = "Ab9" + "Xy2" + "Zq7" + "Lm4"  # 12 位，均含字母数字
+        for prefix in ("hf_", "gsk_", "xai-", "nvapi-", "pplx-", "dop_v1_", "sk-or-"):
+            with self.subTest(prefix=prefix):
+                sid = f"pfx-{prefix.strip('-_')}"
+                transparent._new_session(sid)
+                text = "token " + prefix + sample_tail
+                out = transparent.mask(text, sid)
+                self.assertNotIn(
+                    prefix + sample_tail, out, f"前缀 {prefix} 端到端漏检：{out!r}"
+                )
+                self.assertIn("{{", out, f"前缀 {prefix} 未产生占位符：{out!r}")
 
 
 if __name__ == "__main__":

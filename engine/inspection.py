@@ -44,6 +44,12 @@ REASON_CODES = {
     "global_throttled": ("degraded", "语义推理被限流"),
     "om_compose": ("degraded", "坐标合成降级，跳过语义识别"),
     "runtime": ("degraded", "语义识别运行时降级"),
+    # B-1（2026-10-25）：已知值正向打码降级。与 NER 降级同一性质——
+    # 「已知这个值敏感、但这一轮没扫」，静默失败会让用户以为值本来不该被遮。
+    "known_scan": ("degraded", "已知值正向打码降级"),
+    # C-1（2026-10-25）：中文姓名启发层降级。与 NER 降级同性质。
+    "zh_names": ("degraded", "中文姓名启发层降级"),
+    "zh_names_truncated": ("degraded", "中文姓名启发层只扫了前 32KB"),
     # 协议契约豁免
     "signed_blocks_skipped": ("exempt", "签名/密文思考块按协议契约整块未扫描"),
     # 主动阻断
