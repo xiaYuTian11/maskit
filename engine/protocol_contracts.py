@@ -179,6 +179,22 @@ def _in_real_array(carrier, path) -> bool:
     return head == () or head == (carrier.array_path,)
 
 
+def _block_type_of(obj):
+    """取 `obj["type"]` 作为**块类型字符串**；非字符串一律返回空串。
+
+    为什么必须收窄（2026-10-25 真机事故）：JSON Schema 里 `type` 是合法保留字，
+    取值可以是数组（`{"type": ["string","null"]}`）或对象（`{"properties":
+    {"type": {...}}}`）——客户端把工具定义放进请求、或上游在 `response.completed`
+    里回显整份 tools schema 时，这两种形态**必然出现**。
+
+    直接 `dict(c.types).get(obj.get("type"))` 会抛 `TypeError: unhashable type`：
+    请求侧 fail-closed 直接 503，响应侧整条流式降级为原样透传（客户端看到满屏
+    占位符）。`_restore_tree` 在 issue #44 已修过一次同类问题，这里漏了。
+    """
+    t = obj.get("type")
+    return t if isinstance(t, str) else ""
+
+
 def match(obj, key, parent, path, role, in_business):
     """命中的载体（或 None）。`obj` 是当前 dict 节点。"""
     if not isinstance(obj, dict):
@@ -197,7 +213,7 @@ def match(obj, key, parent, path, role, in_business):
         if c.types:
             # 块类型 → 不可改写字段：字段缺失或为空都不算命中（无签名的块上游无从校验，
             # 照常脱敏才不白丢一个漏检面）。
-            field = dict(c.types).get(obj.get("type"))
+            field = dict(c.types).get(_block_type_of(obj))
             if not field:
                 continue
             value = obj.get(field)
@@ -213,7 +229,8 @@ def match(obj, key, parent, path, role, in_business):
 def protected_fields(carrier, obj) -> frozenset:
     """`slot` 作用域下这条载体锁住的字段（`block` 作用域不使用）。"""
     if carrier.types:
-        field = dict(carrier.types).get(obj.get("type"))
+        # 同 `_block_type_of`：`type` 可能是数组/对象（JSON Schema 保留字形态）
+        field = dict(carrier.types).get(_block_type_of(obj))
         return frozenset({field} if field else ())
     return frozenset(s for s in carrier.slots
                      if isinstance(obj.get(s), str) and obj.get(s))

@@ -33,6 +33,25 @@ RESERVED_MAIL_RX = re.compile(
 SECRET_RX = re.compile(
     r"(?<![A-Za-z0-9_-])(?:sk|ah|ghp|gho|xox[baprs]|AKIA)[-_][A-Za-z0-9]{24,}(?![A-Za-z0-9_-])")
 
+# 中文姓名形态（2026-10-25 新增，来自同一条事故链的第二次踩中）。
+#
+# 为什么必须加：`engine/zh_names.py` 的注释里写着「`客户陈建国` / `联系人：XXX`」
+# 这类**示例串**，本机网关在落盘时把占位符还原成了真实自然人姓名 —— 与号码/邮箱
+# 完全同一机制（本文件 docstring 记录的那次事故）。而当时的守卫只扫号码/邮箱/凭据，
+# 姓名一路绿灯进了仓库。
+#
+# 判据：常见姓氏 + 1~2 汉字，且**紧邻**角色词/称谓/标点（即 docstring 里的示例位置）。
+# 不扫裸的两三个汉字：那是正常中文文本，会把守卫变成噪声源。
+NAME_ROLE_BEFORE = ("客户", "联系人：", "我叫", "作者：", "作者: ", "姓名：", "名字：",
+                    "署名：", "收件人：", "发件人：", "负责人：", "提交者：")
+NAME_TITLE_AFTER = ("先生", "女士", "小姐", "反馈", "说")
+SURNAMES = "王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋"
+# 边界必须**窄**：只认反引号收尾（代码注释里的示例惯用写法）或紧跟称谓。
+# 用句号/右括号当边界会把「客户端指定」这类普通词组卷进来（实测误报）。
+NAME_RX = re.compile(
+    "(?:" + "|".join(re.escape(w) for w in NAME_ROLE_BEFORE) + ")"
+    r"[\u4e00-\u9fff]{2,3}(?=`|" + "|".join(NAME_TITLE_AFTER) + ")")
+
 
 def _production_sources():
     files = sorted(ROOT.glob("engine/*.py"))
@@ -81,6 +100,23 @@ class SourcePiiLiteralTests(unittest.TestCase):
         # 源码里不出现完整形态（正是上面两条测试守的），而运行时必须有
         source = (ROOT / "engine" / "panel.py").read_text(encoding="utf-8")
         self.assertIsNone(MOBILE_RX.search(source))
+
+    def test_no_real_name_sample_literal(self):
+        """生产源码里不得出现「角色词 + 真实姓名」形态的示例串。
+
+        起因：`engine/zh_names.py` 的注释示例被网关在落盘时还原成真实姓名并入库
+        （与号码/邮箱同一机制）。示例一律改用「某甲/某乙」这类显式假名。
+        """
+        offenders = []
+        for f in _production_sources():
+            for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                for m in NAME_RX.finditer(line):
+                    # 「某X」是我们约定的假名，放行
+                    if "某" in m.group(0):
+                        continue
+                    offenders.append("%s:%d: %s" % (f.relative_to(ROOT), i, m.group(0)))
+        self.assertEqual(offenders, [],
+                         "生产源码里出现真实姓名形态示例：改用「某甲/某乙」或片段拼接")
 
     def test_scan_actually_covers_files(self):
         """防止扫描目录写错导致“零命中”的假绿。"""

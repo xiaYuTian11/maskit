@@ -5392,7 +5392,7 @@ def _overlaps_any_placeholder(text, start, end):
 def _zh_name_spans(text, ner_entities):
     """中文姓名启发层：补 NER 漏检、剔 NER 过检（2026-10-25，C-1）。
 
-    为什么必须有这一层：NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的
+    为什么必须有这一层：NER 是概率模型，`客户某甲` 这类「角色词 + 姓名」的
     固定句式经常漏检，而 `张开的括号` / `王国的军队` 会被误标成人名（实测见
     `tests/test_zh_names.py` 头部）。`engine/zh_names.py` 用纯 stdlib 的
     姓氏表 + 上下文证据 + 反例词表双向修正。
@@ -8482,25 +8482,30 @@ def _parse_response_payload(body_text, ct):
                     if txt:
                         chunks.append(txt)
                 # text chunks: OpenAI delta
-                for c in data.get("choices", []):
-                    d = c.get("delta", {})
+                # `_choices_of`：`choices` 可能不是 list（真值非 list 会抛 not iterable，
+                # 真机 2026-10-25 事故），审计侧同样不能被带崩。
+                for c in _choices_of(data):
+                    d = c.get("delta") or {}
                     if isinstance(d.get("content"), str):
                         chunks.append(d["content"])
         else:  # json
             data = json.loads(body_text)
             model_field = data.get("model")
             # OpenAI chat
-            for c in data.get("choices", []):
-                msg = c.get("message", {})
+            for c in _choices_of(data):
+                msg = c.get("message") or {}
                 if isinstance(msg.get("content"), str):
                     chunks.append(msg["content"])
                 elif isinstance(msg.get("content"), list):
                     for p in msg["content"]:
                         if isinstance(p, dict) and isinstance(p.get("text"), str):
                             chunks.append(p["text"])
-                for tc in msg.get("tool_calls", []):
-                    args = tc.get("function", {}).get("arguments", "")
-                    if args:
+                for tc in msg.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments", "") if isinstance(fn, dict) else ""
+                    if isinstance(args, str) and args:
                         chunks.append(args)
             # Anthropic
             if isinstance(data.get("content"), list):
@@ -11130,6 +11135,21 @@ def _sse_response_channel(data, kind):
     return "r%s.%s" % (data.get("output_index", 0), kind)
 
 
+def _choices_of(data):
+    """取 SSE/JSON 负载里的 `choices` 列表；值不是 list 时返回空列表。
+
+    为什么必须收窄（2026-10-25 真机事故）：原写法 `data.get("choices", []) or []`
+    只挡了「假值」，而 `choices: true` / `choices: 1` / `choices: {...}` 都是**真值**，
+    直接 `enumerate()` 会抛 `TypeError: 'bool' object is not iterable`。
+    异常冒泡到 `_stream_owned` 的 except，整条流式还原降级为原样透传 —— 真机事件
+    库里就是 11 条 `sse_stream:unhashable type: 'list'` 那一批的兄弟形态。
+
+    上游发这种畸形负载本身不合协议，我们的责任是「不被它带崩」，不是纠正它。
+    """
+    v = data.get("choices")
+    return v if isinstance(v, list) else []
+
+
 def _sse_text_slots(data):
     """列出 SSE 事件里的增量文本槽位：[(channel, text, setter, escape)]。
 
@@ -11141,7 +11161,7 @@ def _sse_text_slots(data):
     if not isinstance(data, dict):
         return slots
     # OpenAI Chat Completions / Completions 流
-    for position, c in enumerate(data.get("choices", []) or []):
+    for position, c in enumerate(_choices_of(data)):
         if not isinstance(c, dict):
             continue
         # Sparse chunks may each contain only one of several completion choices.
@@ -11236,7 +11256,7 @@ def _sse_terminal_prefixes(data):
     if data.get("type") == "response.function_call_arguments.done":
         return (_sse_response_channel(data, "args"),)
     return tuple(f"c{_sse_choice_index(c, position)}."
-                 for position, c in enumerate(data.get("choices", []) or [])
+                 for position, c in enumerate(_choices_of(data))
                  if isinstance(c, dict) and c.get("finish_reason"))
 
 
@@ -11320,7 +11340,7 @@ def _build_flush_event(tmpl_json, channel, leftover):
             hit = True
     if not hit:
         return ""
-    for c in data.get("choices", []) or []:
+    for c in _choices_of(data):
         if isinstance(c, dict):
             c["finish_reason"] = None  # 补发事件不能带结束标记
     prefix = ""

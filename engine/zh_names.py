@@ -4,7 +4,7 @@
 
 `ner_engine` 是概率模型，两类错都真实存在（2026-10-25 隔离实例实测）：
 
-- **漏检**：`客户陈建国` / `联系人：赵丽颖` / `我叫黄晓明` 这类「角色词 + 姓名」
+- **漏检**：`客户某甲` / `联系人：某乙` / `我叫某丙` 这类「角色词 + 姓名」
   的固定句式，模型经常只标出一部分或干脆漏掉；
 - **过检**：`张开的括号` / `王国的军队` —— 姓氏字开头的普通词被当成姓名。
 
@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 
 # 常见单字姓（按使用频率粗排，不追求全量——漏掉的姓由 NER 自己兜）。
@@ -143,6 +144,18 @@ def _is_han(ch: str) -> bool:
             or 0xF900 <= cp <= 0xFAFF or 0x20000 <= cp <= 0x3FFFF)
 
 
+# 汉字/姓氏的**快筛正则**（性能关键，2026-10-25）。
+#
+# 原实现是 `any(_is_han(c) for c in text)`：纯 Python 逐字符迭代，1MB 英文文本
+# 实测 106ms —— 而这段跑在**截断之前**，于是「截断上限 32KB」根本挡不住它。
+# 真机长会话请求体 1.9MB，每次脱敏都白付这笔钱。
+#
+# 换成正则后由 C 引擎扫描，同样的 1MB 只要 ~2ms（50 倍）。判据完全等价：
+# 字符类就是 `_is_han` 的码位区间的并集。
+_HAN_RX = re.compile("[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+                     "\U00020000-\U0003ffff]")
+
+
 def _surname_len_at(text: str, i: int) -> int:
     """从 `i` 开始能匹配多长的姓氏（2=复姓，1=单姓，0=不是姓）。"""
     two = text[i:i + 2]
@@ -153,8 +166,8 @@ def _surname_len_at(text: str, i: int) -> int:
     return 0
 
 
-# 角色词与姓名之间可能隔着分隔符（`联系人：赵丽颖` / `客户-陈建国` /
-# `作者: 张三`）。判据必须**跳过紧邻的标点**，否则「联系人：」永远匹配不上
+# 角色词与姓名之间可能隔着分隔符（`联系人：某乙` / `客户-陈建国` /
+# `作者: 某甲`）。判据必须**跳过紧邻的标点**，否则「联系人：」永远匹配不上
 # —— 而带冒号恰恰是最常见的写法（实测漏检）。
 _SEPARATORS = frozenset("：:，,。.、；;！!？? \t\u3000-—_|/()（）[]【】<>《》\"'“”‘’")
 # `str.lstrip` 要字符串而不是集合：预先拼好，避免每次调用都 join
@@ -214,7 +227,7 @@ def _has_role_before(text: str, start: int) -> bool:
 
 
 def _has_title_after(text: str, end: int) -> bool:
-    """姓名后是否有称谓/动词（同样允许中间隔标点：`张伟，先生`）。"""
+    """姓名后是否有称谓/动词（同样允许中间隔标点：`某甲，先生`）。"""
     tail = text[end:end + 5]
     stripped = tail.lstrip(_SEPARATORS_STR)
     return _head_hits(stripped, _ZH_AFTER_BY_LEN)
@@ -269,16 +282,26 @@ def find_names(text, return_truncated=False):
     try:
         if not isinstance(text, str) or len(text) < 2:
             return _ret([])
-        # 快路径：没有汉字就没有中文姓名
-        if not any(_is_han(c) for c in text):
+        # 截断必须**在预检之前**（2026-10-25）：原实现的汉字预检扫的是**全文**，
+        # 于是「上限 32KB」完全挡不住超长文本——纯英文 1MB 实测 106ms 全花在
+        # 那次逐字符预检上（真机长会话请求体 1.9MB，每轮白付）。
+        #
+        # ⚠️ 截断标志的**判定位置**不能随便挪（2026-10-25 复核 P2-1）：
+        # 必须在「无汉字早退」**之后**才能置位。否则一段 >32KB 的纯英文/纯代码
+        # system prompt 也会报 `zh_names_truncated` —— 而它里面根本没有姓名候选，
+        # 截断没损失任何东西。那是纯粹的新噪声源（本模块的全部意义就是去噪）。
+        _over = len(text) > MAX_SCAN_CHARS
+        if _over:
+            text = text[:MAX_SCAN_CHARS]
+        # 快路径：没有汉字就没有中文姓名。用 C 引擎的正则扫（比逐字符快 ~50 倍），
+        # 判据与 `_is_han` 的码位区间完全等价。
+        if not _HAN_RX.search(text):
+            # 无汉字 → 截断不损失任何候选，**不报截断**
             return _ret([])
+        _truncated = _over
         out = []
         i = 0
         n = len(text)
-        # 超长文本只扫前 MAX_SCAN_CHARS（见该常量的注释）；截断必须**可见**
-        _truncated = n > MAX_SCAN_CHARS
-        if _truncated:
-            n = MAX_SCAN_CHARS
         while i < n:
             slen = _surname_len_at(text, i)
             if not slen:
@@ -295,7 +318,7 @@ def find_names(text, return_truncated=False):
             if blocked:
                 continue
             matched = None
-            # 名 1~2 字：优先试 2 字（`陈建国`），再试 1 字（`李娜`）
+            # 名 1~2 字：优先试 2 字（`某乙`），再试 1 字（`某丁`）
             for glen in (2, 1):
                 gstart, gend = i + slen, i + slen + glen
                 if gend > n:

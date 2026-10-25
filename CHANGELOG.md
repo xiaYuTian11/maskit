@@ -4,6 +4,22 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 修复更新到 0.12.0 后日志页几乎每条请求都标「检测不完整」的问题，告警恢复正常。
+- 修复部分请求会整条失败或回复里的敏感值不还原的问题，涉及工具定义与结构化输出。
+- Fixed nearly every request showing "incomplete scan" after updating to 0.12.0.
+- Fixed some requests failing entirely, or restored values left masked in replies.
+
+### 修复
+- 「检测不完整」告警不再被长对话误触发：中文姓名补漏只扫前 32KB 是**有界设计**，此前它把整条请求判成降级，于是长对话（每轮重发整段历史）几乎每条都标黄；现在它仍可见，但不再算作检测未完成。
+- 工具定义里 `type` 写成数组（`["string","null"]`）或对象时不再整条报错：此前请求侧会直接失败（503），响应侧会让整段流式还原降级。
+- 上游返回的 `choices` 不是数组时不再中断还原：此前这类畸形响应会让整段回复以未还原形态透传。
+- The "incomplete scan" badge is no longer triggered by long conversations: the 32KB cap on Chinese-name detection is intentional, but it used to mark the whole request as degraded, so long conversations (which resend full history every turn) were almost always flagged.
+- Tool definitions whose `type` is an array (`["string","null"]`) or an object no longer break the request: previously the request failed outright, and responses fell back to passing text through unmasked.
+- Responses whose `choices` is not an array no longer interrupt restoration.
+
 ## [0.12.0] - 2026-10-25
 
 ### 更新摘要 / Summary
