@@ -30,17 +30,17 @@
 - 脱敏取证：可在日志页查看最近 50 条「实际发出去的内容」，仅内存、不落盘。
 - 高熵凭据检测（默认关闭）：覆盖没有厂商前缀、也没有赋值标签的内部服务令牌。
 
-### 修复 / Fixed
+### Fixed
 - Credential detection now covers real `.env` key names (`DB_PASSWORD`, `MYSQL_ROOT_PASSWORD`, `OPENAI_API_KEY`, `db.password`), which were previously missed entirely.
 - Tool definitions are no longer rewritten: tool names, namespaces, parameter schemas and grammar constraints used to be masked, causing upstream rejections; only their descriptions are scanned now.
 - Visually equivalent spellings no longer bypass masking: zero-width insertions and full-width digits/symbols (`１３８…`, `alice＠example.com`) were missed entirely; they are now detected, and what leaves the machine stays byte-identical to what the user typed.
 - A value once confirmed sensitive is now masked wherever it appears, without needing a `password=`-style anchor.
 - New pre-egress re-check: a request that still matches an original value after masking is rejected instead of being sent upstream.
-- Chinese name completion and rejection: `客户陈建国` style phrases are no longer missed, and ordinary words like `张开的括号` are no longer treated as names.
+- Chinese name completion and rejection: "role word + name" phrases (customer, contact, author …) are no longer missed, and ordinary words that merely start with a surname are no longer treated as names.
 - Restore status is now split: `no_placeholder_in_response` becomes "the model never mentioned it", "the model rewrote the placeholder", or "the response did not finish".
 - "Warn only" and "block" now apply to every rule (previously only some), and what was let through is shown in the log.
 
-### 新增 / Added
+### Added
 - Each rule can be set to mask, warn only, or block.
 - Per-value allowlist: release a single concrete value (case-insensitive, up to 200 entries).
 - Masking forensics: the log page can show the last 50 bodies actually sent upstream (memory only, never written to disk).
