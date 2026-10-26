@@ -643,8 +643,13 @@ class EgressVerifyParityTests(ExtBridgeTestCase):
     （`ext_block_when_engine_down` 默认 false），更需要这道网。
     """
 
-    def test_leak_is_blocked_with_503(self):
-        """脱敏后仍含原文 → 503 + blocking:true（与代理链路同形态）。"""
+    def test_leak_is_recorded_by_default(self):
+        """脱敏后仍含原文 → **只记录、不阻断**（用户第一准则，2026-10-26）。
+
+        扩展链路与代理链路同一条准则：默认不阻断（阻断会把用户的网页工具链打停），
+        只留 `decision=flagged` 事件。阻断行为由
+        `test_leak_is_blocked_when_explicitly_enabled` 单独覆盖。
+        """
         def _leaky(text, sid):
             tr._new_session(sid) if tr._session_get(sid) is None else None
             sess = tr._session_get(sid, {})
@@ -658,7 +663,32 @@ class EgressVerifyParityTests(ExtBridgeTestCase):
 
         with mock.patch.object(tr, "mask_body", _leaky):
             r = self._mask('{"c":"13900000000"}')
-        self.assertEqual(r.status_code, 503, "扩展链路漏检未被阻断")
+        self.assertEqual(r.status_code, 200,
+                         "默认配置下扩展链路不该阻断（用户第一准则）")
+        body = r.get_json() or {}
+        self.assertIsNot(body.get("blocking"), True)
+        self.assertEqual(body.get("ok"), True)
+
+    def test_leak_is_blocked_when_explicitly_enabled(self):
+        """显式开启阻断时仍然要拦（开关是有效的，不是摆设）。"""
+        def _leaky(text, sid):
+            tr._new_session(sid) if tr._session_get(sid) is None else None
+            sess = tr._session_get(sid, {})
+            tok = "13812345678"
+            sess.setdefault("fwd", {})["13900000000"] = tok
+            sess.setdefault("labels", {})["13900000000"] = "PHONE"
+            sess.setdefault("rev", {})[tok] = "13900000000"
+            sess.setdefault("new_orig", set()).add("13900000000")
+            return text
+
+        old = tr._MASK_EGRESS_BLOCK
+        try:
+            tr._MASK_EGRESS_BLOCK = True
+            with mock.patch.object(tr, "mask_body", _leaky):
+                r = self._mask('{"c":"13900000000"}')
+        finally:
+            tr._MASK_EGRESS_BLOCK = old
+        self.assertEqual(r.status_code, 503, "显式开启后扩展链路漏检未被阻断")
         body = r.get_json() or {}
         self.assertIs(body.get("blocking"), True, "阻断响应必须带 blocking:true")
         self.assertEqual(body.get("error"), "egress_unmasked")
@@ -688,11 +718,13 @@ class EgressVerifyParityTests(ExtBridgeTestCase):
         # 必须等 writer 批次落库：`_flush_and_drain_events` 是本模块的既有口径。
         self._flush_and_drain_events()
         blocks = [e for e in event_store.fetch_events(limit=50) if e.get("type") == "BLOCK"]
-        self.assertTrue(blocks, "阻断没有产生 BLOCK 事件")
+        self.assertTrue(blocks, "复检命中没有产生事件（等于静默放过）")
         hit = [e for e in blocks if e.get("reason") == "egress_verify"]
-        self.assertTrue(hit, f"BLOCK 事件缺 reason=egress_verify；实际={[e.get('reason') for e in blocks]}")
+        self.assertTrue(hit, f"事件缺 reason=egress_verify；实际={[e.get('reason') for e in blocks]}")
         self.assertEqual(hit[0].get("block_source"), "egress",
-                         "BLOCK 事件缺 block_source=egress（归因会落到 engine）")
+                         "事件缺 block_source=egress（归因会落到 engine）")
+        self.assertEqual(hit[0].get("decision"), "flagged",
+                         "只记录模式的决定必须是 flagged 而不是 blocked")
 
 
 class FailureVisibilityTests(ExtBridgeTestCase):

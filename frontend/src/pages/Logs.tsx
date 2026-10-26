@@ -133,7 +133,7 @@ interface AuditRow {
    * 批次 2 统一检测口径：处置结论与完整度。列表必须能区分「已扫描未命中 / 明确直通 /
    * 已阻断 / 检测不完整」——它们此前都长得像「什么都没发生」。
    */
-  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'passthrough'
+  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'flagged' | 'passthrough'
   completeness?: 'complete' | 'partial' | 'failed' | 'not_applicable' | 'unknown'
   stream_actual?: string
   model?: string
@@ -900,7 +900,11 @@ export default function LogsPage() {
           ? { text: t('logs.statePassthrough'), cls: 'text-muted-foreground' }
           : row.decision === 'blocked'
             ? { text: t('logs.stateBlocked'), cls: 'text-red-600 dark:text-red-400' }
-            : null
+            : row.decision === 'flagged'
+              // 出口复检「只记录」：请求已照常上行，所以是告警色而不是红色失败色。
+              // 用户第一准则（2026-10-26）：不阻断请求，但必须让他看得见。
+              ? { text: t('logs.stateFlagged'), cls: 'text-amber-600 dark:text-amber-400' }
+              : null
     // 提取本条记录捕获的敏感词类型标签（如 PHONE, CONNSTR 等），让列表直观展现脱敏项类别
     const itemLabels = Array.from(
       new Set(

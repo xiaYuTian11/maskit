@@ -568,6 +568,10 @@ _SUMMARY_KEEP_FIELDS = frozenset({
     "known_hits",
     # B-2：出口复检被跳过（超预算）与原因——「跳过必须留痕」的唯一落点
     "egress_skipped", "egress_skip_reason",
+    # 2026-10-26：出口复检「命中但按规则同口径判定不该遮」的条数。
+    # 与 `egress_skipped` 同一纪律：豁免不能静默，否则用户分不清
+    # 「复检没跑」与「跑了但全放行」。纯计数，不含正文。
+    "egress_passed",
     # 耗时（毫秒）、前缀保真诊断、扫描范围计数
     "mask_ms", "upstream_ms", "first_byte_ms", "queue_wait_ms", "aux_wait_ms",
     "body_rewritten", "first_diff_byte", "suffix_reused", "short_hits", "scan_scope",

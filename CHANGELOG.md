@@ -8,9 +8,11 @@
 
 ### 更新摘要 / Summary
 - 修复更新到 0.12.0 后日志页几乎每条请求都标「检测不完整」的问题，告警恢复正常。
-- 修复部分请求会整条失败或回复里的敏感值不还原的问题，涉及工具定义与结构化输出。
+- 修复部分请求会整条失败、客户端一直重试失败的问题，涉及工具定义、结构化输出与出口复检。
+- 网关不再因为「检测到某个值可能没遮住」就拦截请求：现在只在日志里提示，请求照常转发，不会让微信机器人、编辑器助手这类服务整条不可用。
 - Fixed nearly every request showing "incomplete scan" after updating to 0.12.0.
-- Fixed some requests failing entirely, or restored values left masked in replies.
+- Fixed requests failing outright and the client retrying forever.
+- The gateway no longer blocks requests over a possibly unmasked value: it logs a note and forwards them, so chat bots and editor assistants stay online.
 
 ### 修复
 - 「检测不完整」告警不再被长对话误触发：中文姓名补漏只扫前 32KB 是**有界设计**，此前它把整条请求判成降级，于是长对话（每轮重发整段历史）几乎每条都标黄；现在它仍可见，但不再算作检测未完成。
@@ -19,6 +21,14 @@
 - The "incomplete scan" badge is no longer triggered by long conversations: the 32KB cap on Chinese-name detection is intentional, but it used to mark the whole request as degraded, so long conversations (which resend full history every turn) were almost always flagged.
 - Tool definitions whose `type` is an array (`["string","null"]`) or an object no longer break the request: previously the request failed outright, and responses fell back to passing text through unmasked.
 - Responses whose `choices` is not an array no longer interrupt restoration.
+- 出口复检不再把「本来就该放过的写法」当成泄漏：同一个值在别处以更长数字串、带字母边界、结尾多一个点的形式出现时，规则本就主动放过它，此前会被判成泄漏并让整条请求失败（客户端重试也一样失败）。现在复检与扫描规则同口径，真泄漏仍然拦截。
+- 出口复检不再被占位符「拼接」骗过：当对话正文里出现「部分被遮」的示例时，此前把占位符删掉会让两侧文字拼回原文，误判成泄漏；现在占位符按分隔符处理，不会拼出原文。
+- The egress recheck no longer treats "forms the rules deliberately skip" as leaks: when the same value appears elsewhere as part of a longer digit run, with letter boundaries, or followed by a trailing dot, the rules intentionally skip it — this used to be flagged as a leak and fail the whole request (client retries failed too). The recheck now uses the same criteria as the scanner, while real leaks are still blocked.
+- The egress recheck is no longer fooled by placeholder "splicing": when the conversation text contains a "partially masked" example, deleting the placeholder used to glue the surrounding text back into the original value and misreport a leak. Placeholders are now treated as separators, so no such value can be reconstructed.
+- 出口复检默认改为「只记录、不拦截」：命中时日志里留下原因与残留明细，请求照常上行。阻断会让整条业务链路不可用，而漏掉的值可以事后从日志里补规则；需要旧行为的用户可显式开启拦截开关。
+- 修复部分地址在含全角字符的文本里被误判为需要打码、而在纯英文文本里又不需要，导致同一条请求被反复拦截的问题。
+- The egress recheck now records instead of blocking by default: a hit leaves the reason and the leftover details in the log while the request is forwarded. Blocking takes a whole service offline, whereas a missed value can be fixed later from the log; users who want the old behaviour can turn the block switch on explicitly.
+- Fixed addresses being masked in text containing full-width characters but not in plain text, which made the same request get blocked repeatedly.
 
 ## [0.12.0] - 2026-10-25
 

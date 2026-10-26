@@ -214,6 +214,69 @@ class PrecheckParityTests(unittest.TestCase):
                              "含全角冒号的中文没触发视图，SECRET 规则会漏检")
 
 
+class ValidatorParityTests(_IsolatedCase):
+    """归一化补充扫描必须与主扫描用**同一套**值校验（2026-10-26 真机 503 的根因）。
+
+    缺一个校验就是「第二套口径」：归一化路径比主路径宽松，于是同一段文本仅因为
+    含变形字符（全角数字 / 零宽）就遮了主路径明确拒绝的值 —— 环回地址
+    `127.0.0.1` 被当 IP_PUBLIC 遮掉，而纯 ASCII 叶子按 `_ip_public_ok` 不遮。
+    出口复检于是看到「登记过但没遮」的残留 → 真机 12 条 503。
+
+    本用例用 AST 读源码比对两处的校验集合，任何一个分支缺失就红 —— 靠行为断言
+    覆盖不全（某些 label 需要特定开关与特定形态才会触发）。
+    """
+
+    def _validator_labels(self, block):
+        """从代码块里抽出被校验的 label 集合。
+
+        用正则而不是 AST：抽出来的是**片段**（从 `for` 循环到某个注释），
+        独立 parse 会因缩进不完整报 IndentationError。判据足够窄 ——
+        `<name> == "LABEL"` 且 name 必须是 `label` 或 `_lbl`（两处循环变量名）。
+        """
+        import re
+        return set(re.findall(r'\b(?:label|_lbl)\s*==\s*"([A-Z0-9_]+)"', block))
+
+    def test_normalize_scan_validators_match_main_scan(self):
+        import re
+        src = (ROOT / "engine" / "transparent.py").read_text(encoding="utf-8")
+        # 主扫描块：必须锚到**主扫描那个** `for rx, label, group_idx in RULES:`。
+        # 源码里这个循环头出现两次（复检的 `_mask_egress_label_matchers` 也用它），
+        # 靠 `_rule_may_hit(text, label)` 区分。右界收在 `if matched:`（循环体末尾）——
+        # 用「按唯一原文替换」会一路吃到后面几个函数的文档注释，把
+        # `PRIVATE_KEY  只给密钥类型（RSA/EC/OPENSSH）` 这类散文误判成校验分支
+        # （本用例第一版就是这么误报的）。
+        m1 = re.search(
+            r"for rx, label, group_idx in RULES:\s*\n\s*if not _rule_enabled\(label\):"
+            r".*?\n        if matched:", src, re.S)
+        self.assertIsNotNone(m1, "没找到主扫描块（源码结构变了，请同步本用例）")
+        # 归一化补充扫描块
+        m2 = re.search(r"归一化补充扫描（2026-10-25.*?text = _mask_by_spans\(text, _norm_spans\)",
+                       src, re.S)
+        self.assertIsNotNone(m2, "没找到归一化补充扫描块（源码结构变了，请同步本用例）")
+        main = self._validator_labels(m1.group(0))
+        norm = self._validator_labels(m2.group(0))
+        self.assertTrue(main, "主扫描没解析出任何校验分支？AST 判据是不是失配了")
+        self.assertEqual(
+            sorted(main - norm), [],
+            "归一化补充扫描缺少这些 label 的值校验（第二套口径 → 出口复检误判 503）：%s"
+            % sorted(main - norm),
+        )
+
+    def test_loopback_ip_is_not_masked_even_with_deformable_chars(self):
+        """行为侧反证：含全角字符时环回地址仍不该被当公网 IP 遮掉。"""
+        old = tr.BUILTIN_RULES
+        try:
+            rules = dict(old)
+            rules["IP_PUBLIC"] = True
+            tr.BUILTIN_RULES = rules
+            tr._new_session("vp1")
+            out = tr.mask("全角１２３ 与 127.0.0.1 同时出现", "vp1")
+            self.assertNotIn("{{IPPUBLIC_", out,
+                             "环回地址在归一化路径被当公网 IP 遮了（与主扫描口径不一致）")
+        finally:
+            tr.BUILTIN_RULES = old
+
+
 class BypassDetectionTests(_IsolatedCase):
     """绕过形态必须被抓住。"""
 

@@ -311,20 +311,29 @@ class IntegrationTests(_IsolatedCase):
             server_conn=SimpleNamespace(via=None),
         )
         old_emit, old_reload = tr._emit, tr._maybe_reload
+        events = []
         try:
-            tr._emit = lambda *a, **k: None
+            # 必须**收集**而不是丢弃：复检默认只记录不阻断，「留痕」就是唯一可观察
+            # 的行为证据（2026-10-26 用户第一准则）。
+            tr._emit = lambda *a, **k: events.append((a, k))
             tr._maybe_reload = lambda force=False: None
             from tests.test_regressions import _drive_request
             _drive_request(flow)
         finally:
             tr._emit, tr._maybe_reload = old_emit, old_reload
+        self.events = events
         return (flow.request.content or b"").decode(), flow
 
-    def test_leak_is_blocked_end_to_end(self):
-        """端到端：人为制造一个「脱敏后仍含原文」的场景，请求必须被 503 阻断。
+    def test_leak_is_recorded_end_to_end(self):
+        """端到端：人为制造「脱敏后仍含原文」，必须**留痕**（默认不阻断）。
 
         制造方式：把 `_mask_text` 临时替换成「原样返回」（模拟脱敏失效），
         然后走真实 request() 管线。这是复检存在的唯一理由——**主闸失效时它兜住**。
+
+        ⚠️ 2026-10-26 用户第一准则：复检默认**只记录不阻断**（阻断会让整条业务
+        链路不可用，详见 `_MASK_EGRESS_BLOCK`）。所以这里验的是「事件里有
+        reason=egress_verify + decision=flagged」，而不是 503。阻断行为由
+        `tests/test_egress_record_only.py::ExplicitBlockStillWorksTests` 单独覆盖。
         """
         body = {"model": "m", "messages": [{"role": "user", "content": f"see {TERM_VALUE}"}]}
         orig = tr._mask_text
@@ -346,9 +355,11 @@ class IntegrationTests(_IsolatedCase):
             sent, flow = self._drive(body)
         finally:
             tr._mask_text = orig
-        self.assertIsNotNone(flow.response, "泄漏未被阻断：复检没生效")
-        self.assertEqual(flow.response.status_code, 503)
-        self.assertIn(b"shield_egress_unmasked", flow.response.content)
+        self.assertIsNone(flow.response, "默认配置下复检不该阻断请求（用户第一准则）")
+        self.assertIn(TERM_VALUE, sent, "前置条件：桩确实留下了明文")
+        flagged = [k for a, k in self.events if k.get("reason") == "egress_verify"]
+        self.assertTrue(flagged, "复检没有留下 egress_verify 事件（等于静默放过）")
+        self.assertEqual(flagged[0].get("decision"), "flagged")
 
     def test_zero_rewrite_is_also_verified(self):
         """**零改写**的请求也要复检（2026-10-25 复核发现的真实缺陷）。
@@ -377,8 +388,9 @@ class IntegrationTests(_IsolatedCase):
             sent, flow = self._drive(body)
         finally:
             tr._mask_text = orig
-        self.assertIsNotNone(flow.response, "零改写的泄漏未被阻断（复检被 if 挡住了）")
-        self.assertEqual(flow.response.status_code, 503)
+        self.assertIsNone(flow.response, "默认配置下复检不该阻断（用户第一准则）")
+        flagged = [k for a, k in self.events if k.get("reason") == "egress_verify"]
+        self.assertTrue(flagged, "零改写的泄漏未被检测（复检被 if 挡住了）")
 
     def test_zero_rewrite_is_also_captured_for_forensics(self):
         """零改写的请求也要进取证缓冲（2026-10-25 复核）。

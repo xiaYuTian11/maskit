@@ -2938,6 +2938,203 @@ _MASK_EGRESS_MAX_BYTES = max(64 * 1024, _env_int(
 # needle 最短长度：与 `_KNOWN_MIN` 同口径，更短的值在正常文本里误报率过高
 _MASK_EGRESS_MIN_NEEDLE = 8
 
+# 复检命中时**是否阻断**：默认**不阻断**（只记录 + 取证）。
+#
+# 用户第一准则（2026-10-26 定案，原话：「不管怎么样不应该阻断我的请求啊，只是
+# 日志记录有提示的吧……这个是第一准则，不然的话都无法使用了」）：
+#
+# · Maskit 是本地透明代理。阻断请求的那一刻，用户的微信机器人 / 编辑器助手 /
+#   CI 机器人就**整条不可用**，而用户往往几小时后才发现「原来是网关吃了请求」
+#   （上层应用只会报「上游 503 / 重试失败」）。
+# · 漏一个值的代价是**一个值出网**（可事后补救：日志、取证、改规则）；
+#   阻断一个请求的代价是**整条业务链路不可用**（不可补救）。
+#
+# 所以复检的角色是「告警 + 取证」，不是「闸门」。`FAIL_CLOSED` 管的是「脱敏管线
+# **抛异常**、不知道遮没遮」—— 那种情况放行等于必然明文出网，阻断是对的；
+# 复检看到的是「脱敏成功、但某处残留」，那大概率是规则**主动放过**的正常输出
+# （2026-10-26 真机 12 条 503 全部如此），升级成硬失败是把「可能漏一个值」
+# 换成「整条链路不可用」。
+#
+# 需要旧行为（命中就拦）的用户显式设 `MASKIT_EGRESS_BLOCK=1`。
+_MASK_EGRESS_BLOCK = is_true(os.environ.get("MASKIT_EGRESS_BLOCK", "0"))
+
+
+# 复检的「同口径复判」表：label -> (规则正则, 捕获组, 值校验)。
+#
+# 为什么必须有（2026-10-26 真机 12 条 503 的根因）：复检旧实现是**裸精确子串**，
+# 于是「规则看过并明确决定不遮」的位置也被判成泄漏 ——
+#   · `139…5050` 落在 `139…50501`（12 位）里 → ID_BOUND_R 不满足，规则主动拒绝；
+#   · `139…5050` 落在 `ID139…5050X` 里 → 两侧字母边界都不满足；
+#   · 邮箱落在 `https://<user>@<host>…` 与 `…<host>.` 里 →
+#     EMAIL 的右边界排除 `.`、左边界排除 `:` 与词法字符。
+# 这些残留是规则的**正常输出**，不是漏检。把「AI 在正文里讨论过某个号码」这件事
+# 判成泄漏，会让请求恒定 503（真机就是这样：模型分析文本里写了 12 位示例）。
+#
+# 判据：needle 的每个出现位置，用**该 needle 自己的 label** 对应的规则去复判 ——
+# 规则在该位置会匹配、且值校验通过，才算「该遮没遮」。
+#
+# 非内置标签（自定义词 TERM/编号/密级、NER 的 NAME/ORG/ADDR）**不在此表**：
+# 它们的语义本来就是无边界子串匹配（`_literal_word_pattern` 对 >=2 字词无边界），
+# 所以精确子串命中即泄漏，行为保持不变。
+_MASK_EGRESS_LABEL_RX = {}
+# 建表锁（2026-10-26 复核发现）：`_mask_egress_verify` 跑在 `_MASK_POOL`
+# 专职线程里（并发宽度可配），两个 worker 可能同时首次调用。原实现是
+# 「判非空 → 逐条 append」，于是第二个线程会看到**非空但残缺**的表就返回 ——
+# 那个 label 查不到 matcher 就落到 `return True`（判泄漏）。方向是误报不是漏报，
+# 但配上 `MASKIT_EGRESS_BLOCK=1` 就是假 503。改成锁内建到局部、最后一次发布。
+_MASK_EGRESS_LABEL_LOCK = threading.Lock()
+
+
+def _mask_egress_label_matchers():
+    """构建（并缓存）label -> (正则, 捕获组, 值校验) 表。
+
+    懒构建的原因：`RULES` 与 `_xxx_ok` 都在本模块后面的位置定义，模块导入期
+    取不到；而且这份表**只读**，构建一次即可（`RULES` 是模块常量，不热重载）。
+
+    值校验必须与扫描侧同一批函数（`_phone_ok` / `_email_ok` / …）：漏一个就是
+    第二套口径 —— 复检认为「规则会遮」，扫描侧却因校验拒绝而不遮，反而制造
+    假阴性（真泄漏被放过）。
+    """
+    if _MASK_EGRESS_LABEL_RX:
+        return _MASK_EGRESS_LABEL_RX
+    with _MASK_EGRESS_LABEL_LOCK:
+        # 双重检查：另一个线程可能已经建好了（锁外那次快查是为了不付锁代价）
+        if _MASK_EGRESS_LABEL_RX:
+            return _MASK_EGRESS_LABEL_RX
+        try:
+            validators = {
+                "CARD": _card_ok,
+                "IDCARD": _idcard_ok,
+                "PHONE": _phone_ok,
+                "LANDLINE": _landline_ok,
+                "EMAIL": _email_ok,
+                "IBAN": _iban_ok,
+                "JWT": _jwt_ok,
+                "IP_PUBLIC": _ip_public_ok,
+                "IPV6_PRIVATE": _ipv6_private_ok,
+                "USCC": _uscc_ok,
+            }
+            built = {}
+            for rx, label, group_idx in RULES:
+                # 同名 label 有多条规则时（IP_PRIVATE 就有两条）：
+                # 任一规则能命中即视为「规则会遮」，所以存成列表。
+                built.setdefault(label, []).append(
+                    (rx, group_idx, validators.get(label)))
+            # **建完再一次性发布**：并发线程不会看到「非空但残缺」的表。
+            _MASK_EGRESS_LABEL_RX.update(built)
+        except Exception:
+            # 表建不起来 → 复检退回「裸精确子串」（保守方向：宁可误报也不漏报）。
+            # 不静默：调用点拿到的空表就是退化信号（本函数只在首次调用时跑，
+            # 异常即代码缺陷）。
+            return {}
+    return _MASK_EGRESS_LABEL_RX
+
+
+def _mask_egress_span_is_rule_owned(text, needle, pos, label):
+    """该 needle 在 `pos` 处的这次出现，**扫描规则会不会遮它**？
+
+    返回 True = 规则在该位置会匹配并遮住（所以残留是真泄漏）；
+    False = 规则主动拒绝（形态合法地不该遮），不算泄漏。
+
+    判定必须在 `pos` **附近**重新跑一遍规则，而不是只看子串：边界断言
+    （`ID_BOUND_L/R`）、分隔符反向引用、以及 `_xxx_ok` 的值语义都要一起生效。
+    搜索窗口取 `[pos - 窗口, pos + len(needle) + 窗口]`：边界断言最多看 1 个字符，
+    但 EMAIL/CONNSTR 这类规则可能从更早的位置起匹配，给 120 字符足够覆盖
+    （needle 自身长度已含在内）。
+    """
+    matchers = _mask_egress_label_matchers().get(label)
+    if not matchers:
+        # 非内置标签（自定义词 / NER）：语义就是无边界子串匹配 → 命中即泄漏
+        return True
+    end = pos + len(needle)
+    start = max(0, pos - 120)
+    # 窗口右界必须**封顶**（2026-10-26）：`finditer` 没有 endpos 时，只要该位置
+    # 之后再无匹配就会一路扫到文本末尾 —— 真机 984KB × 24 needle × 多次命中
+    # 实测 473ms（超过脱敏本身）。真正要看的是「从 `start` 起、能否有一个匹配
+    # 覆盖到 `pos`」，所以右界取 `end + 120` 就够：边界断言最多看 1 字符，
+    # EMAIL/CONNSTR 这类规则不会需要更长前瞻。
+    stop = min(len(text), end + 120)
+    for rx, group_idx, validator in matchers:
+        try:
+            for m in rx.finditer(text, start, stop):
+                if m.start() > pos:
+                    break
+                gs, ge = m.span(group_idx)
+                if gs <= pos and ge >= end:
+                    # 规则覆盖了这个位置：只有值校验也通过，扫描侧才真的会遮它
+                    if validator is None:
+                        return True
+                    try:
+                        if validator(m.group(group_idx)):
+                            return True
+                    except Exception:
+                        # 校验器自身异常 → 按「会遮」处理（保守：宁可报泄漏）
+                        return True
+        except Exception:
+            continue
+    return False
+
+
+def _leaked_values(masked_text, needles, labels, limit=8):
+    """列出复检命中的值（**掩码预览 + 条数**，不写原文）。
+
+    为什么事件里要有它：只记一条「有泄漏」等于让用户自己重放整包去猜。
+    真机 2026-10-26 的事故里，用户看到 503 后完全不知道是哪个值、哪个规则 ——
+    只能让 AI 回放事件库才能定位。
+
+    安全：残留值本身就是已经出网的明文，但事件库是本地、只有用户自己能看，
+    而且它不进 MASK 的 items（那份受 `CREDENTIAL_LABELS` 保护）。所以这里只给
+    **label + 长度 + 掩码预览**，不给原文 —— 与 SCAN_WARN 同一口径。
+
+    `labels` 由调用方传入（不读全局/会话状态）：本函数可能在专职线程里被并发
+    调用，从全局或会话反查 sid 会拿到别人的数据。
+    """
+    out = []
+    try:
+        labels = labels or {}
+        for n in needles:
+            if len(out) >= limit:
+                break
+            try:
+                cnt = masked_text.count(n)
+            except Exception:
+                continue
+            if not cnt:
+                continue
+            _lbl = str(labels.get(n) or "")
+            out.append({
+                "label": _lbl[:24],
+                "length": len(n),
+                "count": cnt,
+                "preview": _preview(n, _lbl),
+            })
+    except Exception:
+        pass
+    return out
+
+
+def _mask_egress_note_pass(sid, n):
+    """记录「复检命中了 needle、但按规则同口径判定为不该遮」的条数。
+
+    为什么必须留痕（与 `egress_skipped` 同一纪律，AGENTS.md §3.8）：
+    「复检放过了某处残留」是**漏检路径的豁免**。静默放行等于用户以为复检
+    什么都没看到，而实际上它看到了 N 处并主动不报 —— 将来规则改坏时，
+    用户无法区分「复检没跑」与「复检跑了但全放行」。
+
+    累加在会话上、由 MASK 事件取走并清零，语义是「本次请求」。
+    """
+    s = _session_get(sid) if sid else None
+    if isinstance(s, dict) and n:
+        s["egress_passed"] = int(s.get("egress_passed") or 0) + int(n)
+
+
+def _take_egress_pass(sid):
+    """取走本轮的「复检放过」计数并清零（**请求级**语义）。"""
+    s = _session_get(sid) if sid else None
+    if not isinstance(s, dict):
+        return 0
+    return int(s.pop("egress_passed", 0) or 0)
+
 
 def _mask_egress_note_skip(sid, reason):
     """记录「本轮复检被跳过」及原因（**必须留痕**，不能静默）。
@@ -2991,9 +3188,8 @@ def _mask_egress_verify(masked_text, values, sid=""):
 
     判据顺序（每一步都必要）：
       1. 预算：needle 数 / body 大小超限 → 记 `egress_skipped` 并返回 False（不阻断）；
-      2. 剥占位符：`_PLACEHOLDER_RX.sub("")` —— 占位符是**已脱敏**形态，
-         不剥会把「值恰好是标签的一部分」误判成泄漏；
-      3. 精确子串：单次 alternation 复合正则（实测比逐个 `in` 快一个数量级）。
+      2. 占位符位置填**分隔符**（不是删掉，见下），占位符是**已脱敏**形态；
+      3. 逐 needle 定位 + 同口径规则复判（`_mask_egress_span_is_rule_owned`）。
 
     绝不抛异常（热路径）：出错按「没发现泄漏」处理并留痕，因为阻断的代价
     远大于漏这一道网（fail-closed 主闸仍在前面）。
@@ -3011,8 +3207,18 @@ def _mask_egress_verify(masked_text, values, sid=""):
         if len(masked_text) > _MASK_EGRESS_MAX_BYTES:
             _mask_egress_note_skip(sid, "body_over_budget")
             return False
-        # 剥掉占位符：它是已脱敏形态，不能算泄漏
-        stripped = _PLACEHOLDER_RX.sub("", masked_text)
+        # 占位符是已脱敏形态，不能参与泄漏判定；但**必须换成不可拼接的分隔符**，
+        # 不能直接删掉。
+        #
+        # 为什么（2026-10-26 真机第二类 503 的根因）：`sub("")` 会让占位符两侧的
+        # 文本拼在一起 —— AI 在正文里写「部分被遮」的示例
+        # `13996{{PHONE_xxxxxx}}825050` 时，删掉占位符就拼出了完整号码，复检
+        # 报泄漏、请求 503。而实际上行的那份字节里中间是占位符，号码**并没有**
+        # 明文出网 —— 那是删占位符造出来的假阳性。
+        #
+        # NUL 选为分隔符：不在任何 needle 里（needle 是正常文本），也不是
+        # `[A-Za-z0-9]` 等边界字符类的一员，所以不会改变规则的边界判定。
+        stripped = _PLACEHOLDER_RX.sub("\x00", masked_text)
         if not stripped:
             return False
         # 剔除**按协议契约整块豁免**的区域（签名思考块 / 密文句柄）：它们本就要
@@ -3035,10 +3241,34 @@ def _mask_egress_verify(masked_text, values, sid=""):
                 if _total - _in_exempt > 0:
                     _leaks.append(_n)
             return bool(_leaks)
-        # 精确子串：单次扫描。needle 来自本次请求的 fwd（长度 >= 8），
-        # 单个 needle 的 re.escape 保证不做正则解释。
-        pat = re.compile("|".join(re.escape(n) for n in needles))
-        return pat.search(stripped) is not None
+        # 逐 needle 定位，再对每个位置做「同口径复判」（见
+        # `_mask_egress_span_is_rule_owned`）。
+        #
+        # 为什么不再用单条 alternation 一次扫完：`str.find` 循环本身是 C 速度，
+        # 命中位置通常只有几十处，复判只在命中处跑规则，成本远低于「扫全量 + 全部
+        # 当泄漏」。真机长会话实测：24 needle / 790KB → 判完 < 20ms。
+        #
+        # 需要 label 才能复判，所以这里直接从 needle 原文反查 label；
+        # 反查不到（理论上不会发生）按「会遮」处理 —— 保守方向是报泄漏。
+        labels_map = None
+        _passed = 0
+        for _n in needles:
+            _pos = stripped.find(_n)
+            if _pos < 0:
+                continue
+            if labels_map is None:
+                _s = _session_get(sid) if sid else None
+                labels_map = (_s.get("labels") or {}) if isinstance(_s, dict) else {}
+            _label = labels_map.get(_n) or ""
+            while _pos >= 0:
+                if _mask_egress_span_is_rule_owned(stripped, _n, _pos, _label):
+                    return True
+                # 这处残留被判定为「规则主动放过」→ 计入留痕（不静默豁免）
+                _passed += 1
+                _pos = stripped.find(_n, _pos + 1)
+        if _passed:
+            _mask_egress_note_pass(sid, _passed)
+        return False
     except Exception as e:
         # 复检自身出错 → 按「没发现」处理并留痕。**不阻断**：主闸（fail-closed）
         # 已经在前面，这里只是加一道网；把复检的 bug 变成 503 是反向伤害。
@@ -6142,6 +6372,17 @@ def _mask_text(text, sid):
                         _ok = _uscc_ok(_hit_v)
                     elif _lbl == "SECRET":
                         _ok = _secret_value_ok(_hit_v, _nview[_m.start():_m.start(_gi)])
+                    # IP 两条必须在这里补上（2026-10-26 修）：主扫描有、归一化扫描没有，
+                    # 于是同一段文本仅因为含变形字符（全角数字/零宽）就让环回地址
+                    # 127.0.0.1 / 私网段被当 IP_PUBLIC 遮掉，而纯 ASCII 叶子按
+                    # `_ip_public_ok` 拒绝不遮 —— 两套口径 → 出口复检报泄漏 → 503。
+                    # 这正是“归一化路径比主路径宽松”的第二套口径，本段注释早已明令禁止。
+                    elif _lbl == "IP_PUBLIC":
+                        _ok = _ip_public_ok(_hit_v)
+                    elif _lbl == "IPV6_PRIVATE":
+                        _ok = _ipv6_private_ok(_hit_v)
+                    elif _lbl == "CONNSTR":
+                        _ok = _connstr_ok(_hit_v, _m, _nview)
                     if not _ok:
                         continue
                     _rng = _normalize_map_range(_nmap, _m.start(_gi), _m.end(_gi))
@@ -10395,10 +10636,16 @@ async def _request_impl(flow: http.HTTPFlow):
         ner_skips = _res.ner_skips
         ner_metrics = _res.ner_metrics or {}
         # ── 出口前复检（最后一道网）───────────────────────────────────────
-        # 脱敏后的字节回头再扫一遍：仍能匹配到本次登记的原文就阻断。
+        # 脱敏后的字节回头再扫一遍：仍能匹配到本次登记的原文就**记录**（默认）。
         # 抓的是「规则漏了 / 路径豁免错了 / 覆盖项算错了」这类已知会发生的
-        # 缺陷（不是假想风险）。超预算时跳过并留痕，**不阻断** ——
-        # 否则大 body 会恒定 503，把可用性问题变成不可用。
+        # 缺陷（不是假想风险）。超预算时跳过并留痕。
+        #
+        # ⚠️ **默认不阻断**（用户第一准则，2026-10-26 定案，详见
+        # `_MASK_EGRESS_BLOCK` 的注释）：Maskit 是本地透明代理，阻断请求等于
+        # 让用户的整条业务链路不可用（微信机器人 / 编辑器助手 / CI 都会只看到
+        # 「上游 503」）。漏一个值的代价可事后补救，断链不可。所以这里默认
+        # 只记事件 + 取证，请求照常上行；需要旧行为（命中就拦）的用户显式设
+        # `MASKIT_EGRESS_BLOCK=1`。
         #
         # ⚠️ 必须在 `masked_bytes is None` 时**也跑**（2026-10-25 复核发现）：
         # 原实现整块包在 `if _res.masked_bytes is not None:` 里，于是**零改写**
@@ -10423,22 +10670,32 @@ async def _request_impl(flow: http.HTTPFlow):
             except Exception:
                 _leaked = False
             if _leaked:
+                # 默认只记录；显式开启 `MASKIT_EGRESS_BLOCK=1` 才真的拦。
+                # `decision` 字段必须如实区分两种形态 —— 前端与统计靠它归因，
+                # 把「flagged」写成「blocked」会让用户以为请求被拦了（它明明上行成功）。
+                _blocking = bool(_MASK_EGRESS_BLOCK)
                 _emit("BLOCK", host=host, method=method,
                       path=path.split("?")[0], sid=sid,
                       reason="egress_verify", block_source="egress",
                       bytes=len(_egress_body),
-                      msg="脱敏后仍能匹配到本次登记的原文，请求已阻断（未上行）",
+                      decision="blocked" if _blocking else "flagged",
+                      leaked=_leaked_values(_egress_body, _needles,
+                                             _sess_now.get("labels") or {}),
+                      msg=("脱敏后仍能匹配到本次登记的原文，请求已阻断（未上行）"
+                           if _blocking else
+                           "脱敏后仍能匹配到本次登记的原文（仅记录，请求照常上行）"),
                       upstream=up_name, **source)
-                flow.response = http.Response.make(
-                    503,
-                    json.dumps(
-                        {"error": {"code": "shield_egress_unmasked",
-                                   "reason": "egress_verify"}},
-                        ensure_ascii=False,
-                    ).encode("utf-8"),
-                    {"content-type": "application/json", "x-should-retry": "false"},
-                )
-                return
+                if _blocking:
+                    flow.response = http.Response.make(
+                        503,
+                        json.dumps(
+                            {"error": {"code": "shield_egress_unmasked",
+                                       "reason": "egress_verify"}},
+                            ensure_ascii=False,
+                        ).encode("utf-8"),
+                        {"content-type": "application/json", "x-should-retry": "false"},
+                    )
+                    return
         # 脱敏取证（C-2）：记一条「厂商实际收到的 body」（内存、有界、不含凭据原文）。
         # 用户想核对「发出去的是不是占位符」只能抓包，这条缓冲是唯一的本地证据。
         #
@@ -10631,6 +10888,7 @@ async def _request_impl(flow: http.HTTPFlow):
     _warned_n, _warned_labels = _take_warned(sid)
     _known_n = _take_known_hits(sid)
     _egress_skipped, _egress_skip_reason = _take_egress_skip(sid)
+    _egress_passed = _take_egress_pass(sid)
     _emit(
         "MASK",
         host=host,
@@ -10648,6 +10906,9 @@ async def _request_impl(flow: http.HTTPFlow):
         # 出口复检被跳过（B-2）：「超预算跳过必须留痕」这条承诺的唯一落点。
         **({"egress_skipped": True, "egress_skip_reason": _egress_skip_reason}
             if _egress_skipped else {}),
+        # 出口复检「命中了但按规则同口径判定不该遮」的条数：豁免不能静默
+        # （AGENTS.md §3.8）。用户看到它就能区分「复检没跑」与「跑了但全放行」。
+        **({"egress_passed": _egress_passed} if _egress_passed else {}),
         masked_total=len(fwd),    # 会话累计脱敏的唯一值总数（历史会增长）
         items=items,
         upstream=matched_up["name"] if matched_up else "",

@@ -502,6 +502,14 @@ class EmittedFieldRegistrationTests(unittest.TestCase):
         # 统一口径里唯一不外传的一项：标记是用户粘进来的**短效凭据**。
         # `onboarding.scrub(diagnostic=True)` 为诊断包剔的就是它，导出走同一口径。
         "verification": "接入验证证据（含入口标记与弱关联元数据）：标记不得外传（§E）",
+        # 出口复检的残留明细（label + 长度 + 掩码预览 + 条数）。刻意不进导出：
+        # 它描述的是「哪些值没遮住」，虽然只有掩码预览，但配合 length/preview
+        # 仍比其它诊断字段更容易反推原文；留在本机事件库供用户自查即可。
+        "leaked": "出口复检残留明细（label/长度/掩码预览）：仅本机自查，不导出",
+        # `egress_skipped` / `egress_skip_reason` 刻意**不在这里**：它们在
+        # `event_store._SUMMARY_KEEP_FIELDS` 里（可入库的诊断字段），列进
+        # NOT_EXPORTED 会自相矛盾（那条用例会红）。
+        "egress_passed": "出口复检「命中但按规则判定不该遮」的条数：仅诊断",
     }
 
     def _emitted_fields(self):

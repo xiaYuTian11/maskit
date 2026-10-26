@@ -270,7 +270,7 @@ export interface ShieldEvent {
    * 批次 2 统一检测口径：本次请求的处置结论。四种状态此前在列表里都表现为「0 命中」，
    * 现在分开：已脱敏 / 已扫描未命中 / 主动阻断 / 明确直通（未脱敏）。
    */
-  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'passthrough'
+  decision?: 'masked' | 'scanned_clean' | 'blocked' | 'flagged' | 'passthrough'
   /** 所配置的检测执行到什么程度；complete 只表示「已执行完」，不保证现实无漏检。 */
   completeness?: 'complete' | 'partial' | 'failed' | 'not_applicable' | 'unknown'
   /** 原因码计数（NER 降级 / 协议契约豁免 / 阻断原因），键见 EventDetailDialog 的标签表。 */

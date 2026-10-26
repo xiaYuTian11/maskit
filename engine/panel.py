@@ -7189,15 +7189,24 @@ def api_ext_warn():
         return jsonify({"ok": False, "error": "engine_error"})
 
 
-def _emit_ext_block(reason, sid, needles=None):
-    """扩展链路阻断事件（与代理链路的 `_emit("BLOCK", ...)` 同口径）。
+def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None):
+    """扩展链路阻断/告警事件（与代理链路的 `_emit("BLOCK", ...)` 同口径）。
 
     为什么单独一个函数：扩展链路没有 mitmproxy 的 `flow`，`_emit` 需要的
     host/method/path/source 都得自己造；把造法集中一处，免得两个阻断点
     （egress_verify / 将来其它）各写一份、字段慢慢漂移。
+
+    `decision` 必须如实区分（2026-10-26 用户第一准则）：`blocked` = 真的没上行，
+    `flagged` = 只记录、请求照常上行。写成同一个值会让用户以为请求被拦了。
     """
     try:
         import transparent as tr
+        _blocking = decision == "blocked"
+        # `report_for_skip` **已经带 `decision`**（它自己算一份）。所以这里的
+        # `decision` 只能叠在后面覆盖它 —— 两个位置都传关键字会撞成
+        # `TypeError: got multiple values`，被下面的 `except` 吞掉，事件根本不落库
+        # （实测：改成 flagged 后 test_block_is_logged 直接红，就是因为这个）。
+        _report = inspection.report_for_skip(reason="pipeline_error", blocked=_blocking)
         tr._emit(
             "BLOCK",
             ingress="ext",
@@ -7205,8 +7214,11 @@ def _emit_ext_block(reason, sid, needles=None):
             reason=reason,
             block_source="egress",
             count=len(needles or []),
-            msg="脱敏后仍能匹配到本次登记的原文，已在本机阻断（扩展链路）",
-            **inspection.report_for_skip(reason="pipeline_error", blocked=True),
+            **(({"leaked": leaked}) if leaked else {}),
+            msg=("脱敏后仍能匹配到本次登记的原文，已在本机阻断（扩展链路）"
+                 if _blocking else
+                 "脱敏后仍能匹配到本次登记的原文（仅记录，请求照常上行，扩展链路）"),
+            **{**_report, "decision": decision},
         )
     except Exception:
         pass
@@ -7279,15 +7291,24 @@ def api_ext_mask():
             _sess_now.get("new_orig") or set(),
         )
         if _needles and tr._mask_egress_verify(masked, _needles, sid):
-            _emit_ext_block("egress_verify", sid, _needles)
-            return jsonify({
-                "ok": False,
-                "error": "egress_unmasked",
-                "blocking": True,
-                "hint": "脱敏后仍能匹配到本次登记的原文，已在本机阻断、未上行；"
-                        "这是引擎缺陷，请提交反馈并附诊断包。",
-                **inspection.report_for_skip(reason="pipeline_error", blocked=True),
-            }), 503
+            # 与代理链路**同一条准则**（2026-10-26 用户第一准则）：默认只记录、
+            # 不阻断。扩展链路是明文直通的，阻断它同样会把用户的网页工具链打停；
+            # 而残留大概率是规则主动放过的正常输出。
+            _blocking = bool(getattr(tr, "_MASK_EGRESS_BLOCK", False))
+            _leaked = tr._leaked_values(
+                masked, _needles, _sess_now.get("labels") or {})
+            _emit_ext_block("egress_verify", sid, _needles,
+                            decision="blocked" if _blocking else "flagged",
+                            leaked=_leaked)
+            if _blocking:
+                return jsonify({
+                    "ok": False,
+                    "error": "egress_unmasked",
+                    "blocking": True,
+                    "hint": "脱敏后仍能匹配到本次登记的原文，已在本机阻断、未上行；"
+                            "这是引擎缺陷，请提交反馈并附诊断包。",
+                    **inspection.report_for_skip(reason="pipeline_error", blocked=True),
+                }), 503
         # ── per-kind `block` 三态（与代理链路同口径，2026-10-25 补齐）─────
         # 取走即清（请求级语义，见 `transparent._take_rule_block` 的注释）。
         _blk, _blocked_labels = tr._take_rule_block(sid)

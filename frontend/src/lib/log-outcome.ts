@@ -128,7 +128,12 @@ export function deriveOutcome(row: OutcomeInput, nowSec: number): OutcomeKey {
 
   // 折叠后的终态优先：脱敏行折进 CANCEL/ERR 时 type 仍是 MASK，必须看 terminal
   if (row.terminal === 'CANCEL' || type === 'CANCEL') return 'canceled'
-  if (row.terminal === 'ERR' || type === 'ERR' || type === 'BLOCK') return 'failed'
+  if (row.terminal === 'ERR' || type === 'ERR') return 'failed'
+  // BLOCK 事件有两种形态（2026-10-26 用户第一准则）：
+  //   · decision='blocked' —— 真拦截，请求没上行 → 失败
+  //   · decision='flagged' —— 出口复检**只记录**（请求照常上行）→ 告警而非失败
+  // 一律判 failed 会让用户以为请求被拦了（它明明成功），而且列表满屏红色。
+  if (type === 'BLOCK') return row.decision === 'flagged' ? 'warn' : 'failed'
 
   // 没有走脱敏管线的事件：透传 / 绕过 / 跳过
   if (type === 'PASS' || type === 'BYPASS' || type === 'SKIP') return 'passthrough'
