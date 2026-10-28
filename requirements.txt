@@ -2,7 +2,7 @@ flask>=3.1,<3.2
 mitmproxy==12.2.3
 # body_buffer.py 直接 import brotli / zstandard 做有界解码；zstandard 目前由
 # mitmproxy 传递提供，显式声明避免哪天传递依赖收紧后打包态才炸。
-Brotli==1.2.0
+Brotli==1.2.1
 zstandard>=0.25,<0.26
 onnxruntime>=1.20,<2.0
 tokenizers>=0.20,<1.0
