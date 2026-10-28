@@ -188,6 +188,12 @@ _CJK_RX = re.compile("[\u4e00-\u9fff]")
 # 本来就只负责**中文**人名/机构/地址；英文人名（`John Smith`）含空格不受影响，
 # 首字母大写的单个英文词（`John`）也仍交给模型判断。
 _IDENT_RX = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+# 全小写的 ASCII 复合词（`hugging-face` / `home-assistant` / `next.js`）：域名、包名、
+# 项目名形态。`-` 故意**不**进 `_CODE_PUNCT`（否则 `Jean-Luc` / `O'Brien` 这类首字母
+# 大写的英文人名会被一起误伤），代价是 `hugging-face` 这种全小写串会漏到模型里被判
+# 成人名（2026-10-28 真机：长度 12、全小写、单 `-` 的英文复合词被判 NAME，
+# 连续 35 轮打码 + 出口复检 flagged）。本判据只收**全小写**形态，与步骤 3 互补。
+_LOWER_COMPOUND_RX = re.compile(r"^[a-z0-9]+(?:[._-][a-z0-9]+)+$")
 # 只在**不含汉字**的串上生效的「代码标点」：刻意不收 `- , ; ' "`，
 # 它们在自然文本/英文人名（`Jean-Luc`、`O'Brien`）里也常见，收了会误伤。
 _CODE_PUNCT = "._$`()[]{}<>/\\:=+*&|!#%@^~"
@@ -208,6 +214,8 @@ def _looks_like_code_identifier(text) -> bool:
         return False
     if any(ch in t for ch in " \t\r\n"):
         return False
+    if _LOWER_COMPOUND_RX.match(t):
+        return True
     if any(ch in _CODE_PUNCT for ch in t):
         return True
     if not _IDENT_RX.match(t):

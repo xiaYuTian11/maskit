@@ -4,6 +4,26 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.12.2] - 2026-10-28
+
+### 更新摘要 / Summary
+- 日志页不再满屏黄色告警：同一个值在别处重复出现时，不再逐条记成残留。
+- 中文姓名识别更准：普通词不再被替换成占位符，正文和代码保持原样。
+- 长对话里语义识别不再被整段跳过，检测结果更可靠。
+- Fewer yellow warnings in the logs: repeated occurrences of the same value are no longer logged one by one as leftovers.
+- Chinese names are recognised more accurately: ordinary words are no longer replaced with placeholders.
+- Semantic detection is no longer skipped wholesale in long conversations, so results are more reliable.
+
+### 修复
+- 中文人名检测不再把「简洁」「边界」「项目规」这类普通词当成姓名打码：此前它们会把正文换成占位符，模型据此分析或改代码必然出错。
+- Chinese name detection no longer masks ordinary words (common two-to-three-character terms) as personal names, which used to rewrite the text the model reads.
+- 形如 `hugging-face` 的全小写英文复合词不再被当成人名打码。
+- Lowercase English hyphenated words such as `hugging-face` are no longer masked as personal names.
+- 出口复检不再对同一个长值在别处的重复出现逐条报「有残留」：本轮已判定为敏感值就全文一并遮盖。
+- The egress recheck no longer reports a leftover for every repeat of the same long value: once a value is classified as sensitive this turn, every occurrence is masked.
+- 修复长会话里语义识别被整段跳过的问题（已知值正向打码后坐标映射失同步），「检测不完整」告警相应减少。
+- Fixed semantic detection being skipped entirely in long conversations (the offset map lost sync after known-value masking), which also cuts the "incomplete scan" warnings.
+
 ## [0.12.1] - 2026-10-26
 
 ### 更新摘要 / Summary

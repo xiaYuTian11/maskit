@@ -204,6 +204,8 @@ const NER_SKIP_ITEMS: { key: string; labelKey: string }[] = [
   // C-1（2026-10-25）：中文姓名启发层降级。
   { key: 'zh_names', labelKey: 'settings.sw.nerSkipZhNames' },
   { key: 'zh_names_truncated', labelKey: 'settings.sw.nerSkipZhNamesTruncated' },
+  // 2026-10-28：短中文姓名降噪（无角色词/称谓佐证 → 按误报跳过，不打码）
+  { key: 'short_name_no_context', labelKey: 'settings.sw.nerSkipShortName' },
 ]
 
 function detectClientType(u: UpstreamConfig): string {

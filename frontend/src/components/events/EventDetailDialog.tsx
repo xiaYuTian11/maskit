@@ -82,6 +82,8 @@ const NER_SKIP_LABELS: Record<string, string> = {
   // C-1（2026-10-25）：中文姓名启发层降级（NER 后处理出错，本轮未做姓名补漏/剔误）。
   zh_names: 'reason.zhNames',
   zh_names_truncated: 'reason.zhNamesTruncated',
+  // 2026-10-28：短中文姓名降噪（无角色词/称谓佐证 → 按误报跳过，不打码）。
+  short_name_no_context: 'reason.shortNameNoContext',
   request_too_large: 'reason.requestTooLarge',
   engine_busy: 'reason.engineBusy',
   engine_timeout: 'reason.engineTimeout',

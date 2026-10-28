@@ -238,6 +238,29 @@ def _has_verb_before(text: str, start: int) -> bool:
     return _tail_hits(head, _ZH_VERBS_BY_LEN)
 
 
+# 强证据用的前置动词：**只收双字及以上**（如双字的「联系」「转给」「告诉」「麻烦」）。
+#
+# 为什么排除单字（2026-10-28 真机）：单字动词（「请」「给」「和」）的上下文太泛，
+# 普通技术句子的「请……」「给……」就能满足。`has_strong_context` 用它决定要不要
+# 掩 2~3 字候选，而误掩会把正文换成占位符（模型据此分析代码必然出错）。
+# 双字动词仍覆盖「动词短语 + 受事（人）」这类真实句式。
+_ZH_STRONG_VERBS_BY_LEN = {ln: ws for ln, ws in _ZH_VERBS_BY_LEN.items() if ln >= 2}
+
+
+def _has_strong_verb_before(text: str, start: int) -> bool:
+    """实体前 8 字内是否出现**双字**前置动词（不要求紧贴尾部）。
+
+    「请联系甲方某甲」里实体前是「甲方」，只查尾部会漏掉「联系」；而头部子串查找
+    不会引入单字动词那类噪声（表里只剩双字词）。
+    """
+    head = text[max(0, start - 8):_trim_separators(text, start, limit=2)]
+    for words in _ZH_STRONG_VERBS_BY_LEN.values():
+        for w in words:
+            if w in head:
+                return True
+    return False
+
+
 def _given_len_ok(text: str, gstart: int, gend: int) -> bool:
     """名的部分是否合法：1~2 字，且不含虚词/句读。"""
     given = text[gstart:gend]
@@ -340,6 +363,36 @@ def find_names(text, return_truncated=False):
         return _ret(out, _truncated)
     except Exception:
         return _ret([])
+
+
+def is_han(ch: str) -> bool:
+    """公共别名：外部（如 `transparent._short_name_without_context`）需要与姓氏判定
+    同一套汉字口径，不要另写一份码位区间。"""
+    return _is_han(ch)
+
+
+def has_strong_context(text, start, end):
+    """实体区间是否有**强**上下文证据：角色词 / 后置称谓 / 自身以称谓结尾。
+
+    为什么只收强证据（2026-10-28 真机事件库）：`_has_verb_before` 的窗口只有 5 字
+    且收单字动词（`给`/`请`/`和`），`请保持简洁` 这类普通句子就能满足 —— 据此
+    保留 2~3 字候选，等于把高频词全打成占位符。当日 NAME 命中 65103 次，其中
+    62141 次是 ≤3 字中文普通词（`简洁` 4990 / `时直` 4987 / `边界` 4800 / `项目规` 4564），
+    模型看到的正文被替换成占位符。强证据判据不用于提高召回，只用于回答「这个短候选
+    值不值得冒误掩码的风险」。
+    """
+    try:
+        if not isinstance(text, str) or start < 0 or end > len(text) or end <= start:
+            return False
+        if _has_role_before(text, start) or _has_title_after(text, end):
+            return True
+        # 双字前置动词（如「联系」「转给」）：单字动词不算强证据。
+        if _has_strong_verb_before(text, start):
+            return True
+        # `张经理` / `王主任`：称谓包在实体自身尾部（NER 常把称谓一起标进实体）
+        return _tail_hits(text[start:end], _ZH_AFTER_BY_LEN)
+    except Exception:
+        return False
 
 
 def rejected_spans(text, ner_spans):

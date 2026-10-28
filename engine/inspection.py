@@ -63,6 +63,10 @@ REASON_CODES = {
     # 方向性：把「加分项没跑完」当「检测不完整」是把保守方向用反了——
     # 它制造的不是安全，是噪声。
     "zh_names_truncated": ("partial_scope", "中文姓名启发层只扫了前 32KB"),
+    # 短名降噪（2026-10-28）：2~3 字中文 NAME 在没有角色词/称谓佐证时按误报跳过。
+    # 与 `zh_names_truncated` 同归 partial_scope：这是**减噪**，不是「检测没跑完」，
+    # 所以不降完整度、不触发严格模式阻断，但必须可见（不静默）。
+    "short_name_no_context": ("partial_scope", "短中文姓名无上下文佐证，按误报跳过"),
     # 协议契约豁免
     "signed_blocks_skipped": ("exempt", "签名/密文思考块按协议契约整块未扫描"),
     # 主动阻断

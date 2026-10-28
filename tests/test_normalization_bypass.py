@@ -249,9 +249,12 @@ class ValidatorParityTests(_IsolatedCase):
             r"for rx, label, group_idx in RULES:\s*\n\s*if not _rule_enabled\(label\):"
             r".*?\n        if matched:", src, re.S)
         self.assertIsNotNone(m1, "没找到主扫描块（源码结构变了，请同步本用例）")
-        # 归一化补充扫描块
-        m2 = re.search(r"归一化补充扫描（2026-10-25.*?text = _mask_by_spans\(text, _norm_spans\)",
-                       src, re.S)
+        # 归一化补充扫描块。锚点必须容忍「要同步 OffsetMap」后的新形态：
+        # 2026-10-28 起这趟走 `_mask_by_spans_ed` 并把 Edit 交给 `_update_om`
+        # （否则 NER 的原文→伤疤坐标映射会整体错位）。
+        m2 = re.search(
+            r"归一化补充扫描（2026-10-25.*?text, _norm_edits = _mask_by_spans_ed\(text, _norm_spans\)",
+            src, re.S)
         self.assertIsNotNone(m2, "没找到归一化补充扫描块（源码结构变了，请同步本用例）")
         main = self._validator_labels(m1.group(0))
         norm = self._validator_labels(m2.group(0))

@@ -5665,6 +5665,32 @@ def _zh_name_spans(text, ner_entities):
         return [], [], False
 
 
+def _mask_by_spans_ed(text, spans):
+    """同 `_mask_by_spans`，额外返回本次重建的 `Edit` 列表（坐标为**入参** text）。
+
+    为什么必须同时给 Edit（2026-10-28 真机 `om_compose` 的根因）：旧实现只重建
+    text、不让调用方更新 `OffsetMap`，于是下一次 `_update_om(edits, curr_len)` 里
+    `om.dst_len != curr_len` → `compose` 抛 ValueError → `om_broken` → 这条请求
+    **整段跳过语义识别**。known 正向打码在长会话第二轮起必然命中，实测 10-28
+    有 3025/5800 条 MASK 事件因此被记成 `om_compose` 降级（partial）。
+    调用方拿到 Edit 后必须 `_update_om(edits, len(text) 替换前)`。
+    """
+    if not spans:
+        return text, []
+    out = []
+    edits = []
+    cursor = 0
+    for start, end, repl in spans:
+        if start < cursor:
+            continue          # 与已接受区间重叠：整段跳过，防错位且防还原重复吐字
+        out.append(text[cursor:start])
+        out.append(repl)
+        edits.append(Edit(start, end, repl))
+        cursor = end
+    out.append(text[cursor:])
+    return "".join(out), edits
+
+
 def _mask_by_spans(text, spans):
     """按 [start, end, repl) 区间一次性重建文本（spans 须已按 start 排序）。
 
@@ -5673,19 +5699,11 @@ def _mask_by_spans(text, spans):
     - 绝不能将重叠区间截断为 [cursor, end) 替换，因为 repl 绑定的完整原文在还原
       (restore) 时会将前序已覆盖的明文重复吐出，导致文本严重错位与破坏性重复。
     - 上游实体抽取层（ner_engine / _ner_entity_spans）负责确保实体区间两两不交。
+
+    只需结果、不需要维护坐标映射的调用方用它；会继续改写文本的调用方用
+    `_mask_by_spans_ed` 并把 Edit 交给 `_update_om`。
     """
-    if not spans:
-        return text
-    out = []
-    cursor = 0
-    for start, end, repl in spans:
-        if start < cursor:
-            continue          # 与已接受区间重叠：整段跳过，防错位且防还原重复吐字
-        out.append(text[cursor:start])
-        out.append(repl)
-        cursor = end
-    out.append(text[cursor:])
-    return "".join(out)
+    return _mask_by_spans_ed(text, spans)[0]
 
 
 class OffsetMap:
@@ -5877,6 +5895,95 @@ def _ner_entity_spans(text, entities):
         if cursor < end:
             spans.append((cursor, end, label))
     return spans
+
+
+# 2~3 字纯中文 NAME 若没有强上下文佐证，按误报处理（不遮）。
+# 上界选 3 而不是 4：真名多为 2~3 字，而 4 字以上更可能是机构/地址，不应在此降噪。
+_SHORT_NAME_MAX_CHARS = 3
+
+
+def _short_name_without_context(text, start, end, frag, label):
+    """短中文 NAME 的强上下文复核：True = 判为误报，不遮。
+
+    为什么（2026-10-28 真机事件库）：近 3 天 NAME 命中 65103 次，其中 62141 次
+    （95%）是 ≤3 字中文普通词 —— `简洁` 4990 / `时直` 4987 / `边界` 4800 /
+    `项目规` 4564 / `时明` 4266。它们把正常正文改成占位符，模型据此分析代码必然出错，
+    用户只看到「AI 答得不对」。代价取向与 `ner_engine._looks_like_code_identifier`
+    同一条：**宁可漏掩一个短名，不可误掩普通词**；跳过会计数上报
+    （`short_name_no_context`），不静默。
+    """
+    try:
+        if label not in ("NAME", "PERSON"):
+            return False
+        if not (2 <= len(frag) <= _SHORT_NAME_MAX_CHARS):
+            return False
+        import zh_names
+        if any(not zh_names.is_han(ch) for ch in frag):
+            return False
+        # 用户显式配置的词不接受启发式降噪（词表是用户意图，不是模型猜测）
+        if frag in CUSTOM_WORDS:
+            return False
+        return not zh_names.has_strong_context(text, start, end)
+    except Exception:
+        return False
+
+
+def _range_overlaps(ranges, s, e):
+    """`[s, e)` 是否落在给定区间列表中的某一个区间内（区间数很小，线性即可）。"""
+    for a, b in ranges:
+        if b > s and a < e:
+            return True
+    return False
+
+
+def _expand_long_entity_spans(text, planned, per_needle=64, total=512):
+    """把已判定为实体的**长值**在全文所有出现处一并打码。
+
+    为什么（2026-10-28 真机 2280 条 `egress_verify` flagged）：NER 是 **span 级**
+    替换（只遮模型标出的那几处），而出回复检是**全文精确子串**比对
+    （`_mask_egress_verify`）。同一个长值在长会话里出现多次时，未被 span 覆盖的
+    位置必然让复检报「有残留」—— 不是真泄漏，是两套口径不一致，且逐条打黄整个
+    日志页。既然本轮已经判定该字面是敏感实体，就没有理由在别处留明文。
+
+    短值不扩展（阈值与复检同口径 `_MASK_EGRESS_MIN_NEEDLE`）：2~3 字高频词的
+    误掩码代价远大于收益，它们由上面的强上下文复核处理。
+
+    上限 `per_needle` / `total` 是热路径护栏：`str.find` 是 C 速度，但长会话里
+    同一串可能重复上千次，无界扩展会把结果区间数推到万级，拖慢 `_mask_by_spans`。
+    """
+    if not planned:
+        return planned
+    ph = [(m.start(), m.end()) for m in _PLACEHOLDER_RX.finditer(text)]
+    out = list(planned)
+    taken = sorted((s, e) for s, e, _ in planned)
+    seen = set()
+    added = 0
+    for s, e, tok in planned:
+        if e - s < _MASK_EGRESS_MIN_NEEDLE:
+            continue
+        needle = text[s:e]
+        if not needle or needle in seen:
+            continue
+        seen.add(needle)
+        hits = 0
+        pos = 0
+        while hits < per_needle and added < total:
+            i = text.find(needle, pos)
+            if i < 0:
+                break
+            pos = i + 1
+            j = i + len(needle)
+            # 已有占位符区间不能被二次替换（会劈开 token），已规划区间不重复
+            if _range_overlaps(ph, i, j) or _range_overlaps(taken, i, j):
+                continue
+            out.append((i, j, tok))
+            taken.append((i, j))
+            taken.sort()
+            added += 1
+            hits += 1
+    if added:
+        out.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    return out
 
 
 def mask(text, sid):
@@ -6174,7 +6281,12 @@ def _mask_text(text, sid):
                 if cur_tok:
                     repl.append((_s0, _e0, cur_tok))
             if repl:
-                text = _mask_by_spans(text, repl)
+                _known_len = len(text)
+                text, _known_edits = _mask_by_spans_ed(text, repl)
+                # om 必须跟着走：少了这一步，后面的 `_update_om` 会因
+                # `om.dst_len != curr_len` 抛 ValueError，整条请求跳过 NER
+                # （2026-10-28 真机 3025 条 om_compose 的真因）。
+                _update_om(_known_edits, _known_len)
             s["known_hits"] = int(s.get("known_hits") or 0) + len(_spans)
     except Exception as _e:
         # known/sent 是**增强**，出错不能影响主链路（fail-open 到「不做正向打码」），
@@ -6408,7 +6520,12 @@ def _mask_text(text, sid):
                 # 与已有占位符区间重叠的整段丢弃（`_mask_by_spans` 的契约），
                 # 所以这里先按起点排序、长区间优先，再交给它。
                 _norm_spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
-                text = _mask_by_spans(text, _norm_spans)
+                _norm_len = len(text)
+                text, _norm_edits = _mask_by_spans_ed(text, _norm_spans)
+                # NER 段用 `om.map_range` 把**原文**坐标翻到伤疤坐标。旧实现只改
+                # text 不改 om，于是归一化命中过的请求里 NER 实体整体错位
+                # （不是崩溃，是静默遮错位置）。
+                _update_om(_norm_edits, _norm_len)
 
     # ── 高熵凭据检测（C-3，默认关）──────────────────────────────────────
     # 覆盖「无前缀、无标签」的随机串。开启后默认只 **warn**（提醒、不改写）：
@@ -6433,6 +6550,31 @@ def _mask_text(text, sid):
     # 结果才允许进叶子缓存 —— 残缺结果一旦入库就等于把漏检永久固化（与 NER 负缓存
     # 同一类坑）。判据是 `skip_epoch()` 前后是否变化：它只统计「结果残缺」类原因
     # （见 ner_engine._CACHE_POISON_SKIPS），`model_unavailable` 不在其中。
+    # 短名强上下文复核的计数（本叶子）：循环外统一记录，不在热路径上反复调
+    _short_name_skips = [0]
+
+    def _plan_entity(s0, e0, lbl):
+        """实体区间 → planned 条目（None = 跳过）。收窄边界、短名复核、登记映射。"""
+        raw_frag = text[s0:e0]
+        frag = raw_frag.strip()
+        if len(frag) < 2:
+            return None
+        # 区间两端可能带空白，收窄到 strip 后的边界，免得把空格/换行一起换成占位符
+        # （还原后会丢排版）。
+        lead = len(raw_frag) - len(raw_frag.lstrip())
+        a, b = s0 + lead, s0 + lead + len(frag)
+        if _short_name_without_context(text, a, b, frag, lbl):
+            _short_name_skips[0] += 1
+            return None
+        # 记账口径说明（易错，必须保留）：_hit() 必须传伤疤坐标系的残片 frag，
+        # 绝不能传原文实体。因为 restore() 会把占位符换回 fwd[TOKEN]，
+        # 出网文本在该位置只剩残片，注册成完整原文会导致还原时把占位符覆盖的部分重复吐出。
+        _hit(frag, lbl)
+        token = fwd.get(frag)
+        if not token:
+            return None
+        return (a, b, token)
+
     _ner_clean = True
     _ner_epoch0 = None
     if NER_ENABLED:
@@ -6462,17 +6604,12 @@ def _mask_text(text, sid):
                         pass
                 planned = []
                 for s0, e0, lbl in _ner_entity_spans(text, _zh_extra):
-                    raw_frag = text[s0:e0]
-                    frag = raw_frag.strip()
-                    if len(frag) < 2:
-                        continue
-                    lead = len(raw_frag) - len(raw_frag.lstrip())
-                    _hit(frag, lbl)
-                    token = fwd.get(frag)
-                    if token:
-                        planned.append((s0 + lead, s0 + lead + len(frag), token))
+                    item = _plan_entity(s0, e0, lbl)
+                    if item:
+                        planned.append(item)
                 if planned:
                     planned.sort(key=lambda x: (x[0], -x[1]))
+                    planned = _expand_long_entity_spans(text, planned)
                     text = _mask_by_spans(text, planned)
             else:
                 entities = ner_engine.extract_entities(original)
@@ -6521,27 +6658,28 @@ def _mask_text(text, sid):
                 if _zh_extra:
                     translated_entities.extend(_zh_extra)
                 for s0, e0, lbl in _ner_entity_spans(text, translated_entities):
-                    raw_frag = text[s0:e0]
-                    frag = raw_frag.strip()
-                    if len(frag) < 2:
-                        continue
-                    # 实体区间两端可能带空白，收窄到 strip 后的边界，
-                    # 免得把空格/换行一起换成占位符（还原后会丢排版）。
-                    lead = len(raw_frag) - len(raw_frag.lstrip())
-                    # 记账口径说明（易错，必须保留）：_hit() 必须传伤疤坐标系的残片 frag，
-                    # 绝不能传原文实体。因为 restore() 会把占位符换回 fwd[TOKEN]，
-                    # 出网文本在该位置只剩残片，注册成完整原文会导致还原时把占位符覆盖的部分重复吐出。
-                    _hit(frag, lbl)
-                    token = fwd.get(frag)
-                    if token:
-                        planned.append((s0 + lead, s0 + lead + len(frag), token))
+                    item = _plan_entity(s0, e0, lbl)
+                    if item:
+                        planned.append(item)
                 if planned:
                     # 起点相同时贪心优先覆盖更长的区间，防止短区间覆盖导致长区间残片明文泄漏
                     planned.sort(key=lambda x: (x[0], -x[1]))
+                    planned = _expand_long_entity_spans(text, planned)
                     text = _mask_by_spans(text, planned)
         except Exception as e:
             _ner_warn_once("runtime", "NER 识别降级，本次未做实体识别: %s: %s" % (type(e).__name__, e))
         _ner_clean = _ner_skip_epoch() == _ner_epoch0
+        if _short_name_skips[0]:
+            # 误报降噪必须可见（不静默），但归类为 partial_scope：它是**减噪**，
+            # 不代表「所配置的检测没跑完」，不能把日志打黄（与 zh_names_truncated 同口径）。
+            try:
+                import ner_engine as _ne_short
+                _ne_short.record_skip(
+                    "short_name_no_context",
+                    "短中文姓名无角色词/称谓佐证，按误报跳过 %d 处" % _short_name_skips[0],
+                )
+            except Exception:
+                pass
 
     # last_hits / new_orig 累积而非覆盖：mask() 被 _mask_tree 对每个字符串叶子
     # 各调一次，覆盖会让 count 只反映最后一个叶子的命中（曾导致 MASK 行
