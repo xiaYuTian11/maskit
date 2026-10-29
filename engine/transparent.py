@@ -12553,8 +12553,9 @@ def _response_has_placeholder_shape(text):
     1069/4109 = 26% 都来自这里）。
 
     已知漏检面：hex6 老格式不进签发台账（`_suffix_indexable` 只收纯辅音），
-    所以「裸的 hex6 占位符被模型剥了花括号」不再被识别 —— 方向保守，
-    优先消除假阳性。
+    所以「裸的 hex6 占位符被模型剥了花括号」不再被识别；hex6 后缀恰好全数字的
+    那一小部分（`(10/16)^6`，约 6%）连带花括号也会被 `isdigit` 判掉 —— 方向
+    保守，优先消除假阳性。
     """
     try:
         if not text or not isinstance(text, str):
@@ -12565,7 +12566,9 @@ def _response_has_placeholder_shape(text):
             head = re.match(r"[a-z]+", label.lower())
             if head and head.group(0) in _LOOSE_SHAPE_DENY:
                 continue
-            # 纯数字后缀不可能是签发 token：`call_417868` / `gen-179315`
+            # 新格式后缀是纯辅音、绝不含数字，全数字只可能来自工具调用 ID / 版本号
+            # （`call_417868` / `gen-179315`）。hex6 老格式有约 6% 概率后缀恰好全数字
+            # （`(10/16)^6`），这一小类归因会漏检——方向保守，不为它放宽判据。
             if suffix.isdigit():
                 continue
             # 带花括号 = 模型明确在写占位符，端到端形态已足够，不要求台账
