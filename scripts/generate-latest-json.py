@@ -124,6 +124,12 @@ def main():
             or any(k in s.name.lower() for k in ("amd64", "x86_64", "aarch64", "arm64"))
         )
     ]
+    # updater 只认 `.app.tar.gz`，`.dmg` 是首次安装用的；取错会让自动更新 404。
+    # 必须**显式排序**：`root.glob()` 的枚举顺序由文件系统决定（2026-10-29 实测
+    # 同一份代码本地绿、CI 红，根因就是 dmg 恰好在前面），直接取 `[0]` 会让同一份
+    # release 在不同机器上产出不同的 latest.json。排序键让 `.app.tar.gz` 恒优先，
+    # `.dmg` 只在没有 updater 载体时兜底。
+    mac_sigs.sort(key=lambda s: (0 if s.name.endswith(".app.tar.gz.sig") else 1, s.name))
 
     # deb 是「系统包管理器安装」形态，与 AppImage 不是同一个更新载体，必须拆开。
     # 为什么不能共用 `linux-x86_64`：那条给 AppImage 用，deb 安装的客户端会先按

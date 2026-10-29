@@ -15,6 +15,8 @@
 - Restore attribution no longer counts ordinary identifiers (`call_417868`, `gen-179315`, `V19511040_202211`, credential fragments such as `garKuE-DnrfcP`) as rewritten placeholders; loose matches now require a locally issued suffix, so these requests fall back to "not mentioned".
 - `SECURITY.md` 补注：出口复检的 `type=BLOCK` 事件含 `decision=flagged`（已放行）与 `decision=blocked`（真阻断）两种，统计阻断数须按 `decision` 过滤。
 - `SECURITY.md` now documents that egress-recheck `type=BLOCK` events carry both `decision=flagged` (forwarded) and `decision=blocked`; blocking counts must filter by `decision`.
+- 自动更新元数据固定优先取 macOS 的 `.app.tar.gz`：此前按目录枚举顺序取第一个，`.dmg` 排在前面时会生成错误条目，客户端点更新直接 404。
+- macOS update metadata now always prefers `.app.tar.gz`; previously the first directory entry won, so a `.dmg` sorting first produced a broken entry and clients hit 404 on update.
 
 ## [0.12.2] - 2026-10-28
 
