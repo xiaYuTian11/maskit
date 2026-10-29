@@ -63,6 +63,10 @@ REASON_CODES = {
     # 方向性：把「加分项没跑完」当「检测不完整」是把保守方向用反了——
     # 它制造的不是安全，是噪声。
     "zh_names_truncated": ("partial_scope", "中文姓名启发层只扫了前 32KB"),
+    # 媒体/内联二进制整块未扫（2026-10-29）：图片、音视频、Office/PDF 容器的 data URL
+    # 与媒体地址。改了必然破上游解码，而 base64 里不承载可脱敏文本；归 partial_scope
+    # 的理由与上一条相同——它是**保护范围外的载体**，不是「该跑的检测没跑完」。
+    "media_skipped": ("partial_scope", "内联二进制/媒体地址整块未扫描"),
     # 短名降噪（2026-10-28）：2~3 字中文 NAME 在没有角色词/称谓佐证时按误报跳过。
     # 与 `zh_names_truncated` 同归 partial_scope：这是**减噪**，不是「检测没跑完」，
     # 所以不降完整度、不触发严格模式阻断，但必须可见（不静默）。
@@ -142,15 +146,22 @@ def decision_of(*, changed: bool, blocked: bool = False, passthrough: bool = Fal
     return DECISION_MASKED if changed else DECISION_SCANNED_CLEAN
 
 
-def report_for_mask(*, changed: bool, ner_skips: dict | None = None, signed_skipped: int = 0) -> dict:
+def report_for_mask(*, changed: bool, ner_skips: dict | None = None, signed_skipped: int = 0,
+                    media_skipped: int = 0) -> dict:
     """MASK 事件 / `/api/ext/mask` 响应的统一上报口径。
 
     `signed_skipped` 是「签名思考块整块未扫描」的块数（exempt 类）：它不把完整度降成
     `partial`（属协议契约内的显式不扫面），但必须出现在 `reason_codes` 里保持可见。
+
+    `media_skipped` 是「媒体/内联二进制整块未扫」的块数（partial_scope 类）：同理不降级、
+    不阻断，但必须可见——不然用户不知道图片/文件内容不在保护范围内（2026-10-29 真机：
+    Excel 图表 PNG 的 base64 被当文本改写后上游 400）。
     """
     reasons = dict(ner_skips or {})
     if signed_skipped:
         reasons["signed_blocks_skipped"] = int(signed_skipped)
+    if media_skipped:
+        reasons["media_skipped"] = int(media_skipped)
     return build_report(decision=decision_of(changed=changed), reasons=reasons)
 
 

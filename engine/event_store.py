@@ -547,7 +547,7 @@ _SUMMARY_KEEP_FIELDS = frozenset({
     # 检测结论与原因码（§B 状态通道；枚举/数字，不含正文）
     "decision", "completeness", "reasons", "reason_codes", "blocked", "failed",
     "reason", "block_source", "ner_truncated", "ner_skip_reasons",
-    "signed_blocks_skipped", "bytes", "error_code", "failure_phase",
+    "signed_blocks_skipped", "media_skipped", "bytes", "error_code", "failure_phase",
     # 失败归因（批次 8 / P0-5）：责任方与异常类名。前者让用户一眼看出该查谁
     # （引擎/上游/客户端/DNS/出口代理），后者让同一类断开能聚合计数。
     # 两者都是短枚举字符串，不含正文。

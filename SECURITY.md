@@ -324,6 +324,20 @@ NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的固定�
 
 窗口外的姓名不会被这一层识别——长对话里 32KB 之后的正文属于未覆盖面，由 NER 本体（它有自己的分段与预算）负责。
 
+### 媒体与内联二进制（2026-10-29 新增）
+
+图片/音视频/Office/PDF 的内联数据（data URL）与媒体地址**整块不扫描**，原样上行：
+
+| 项 | 说明 |
+|---|---|
+| 豁免判据 | 媒体专属键（`image_url` / `file_data` / `file_url` / `file_id` / `input_image` / `b64_json`）下的**二进制 MIME** data URL，与 http(s) 地址 |
+| 为何必须豁免 | 改写 base64 必然让上游解码失败（`Only base64 data is allowed` 400）；而 base64 里不承载可脱敏的自然语言。真机事故（2026-10-29）：Codex 上传含图表的 Excel，图表 PNG 的 base64 被自定义短词命中并替换，坏数据还被客户端存进历史，之后每轮重发都 400 |
+| **不**豁免 | `data:text/*`、`+xml`、`+json`（可能藏 PII）；以及业务区里的同名字段（`{"type":"redacted_thinking","data":…}` 必须照常扫描，`tests/test_protocol_contracts.py` 锁死） |
+| 可见性 | 每次豁免计数进 MASK 事件 `media_skipped`、`reason_codes` 原因码（`partial_scope`，不降完整度、不阻断），并进导出白名单；不静默跳过 |
+| **尚未覆盖** | 图片像素里的文字（图表标题/图例/截图文字）。任何链路都不做 OCR，因此这类内容不在脱敏范围内 |
+
+代理链路（`transparent.py`）**不解析** Office 文件：Excel 以 base64 塞进 JSON 时，表格内容属于上述「未覆盖」范围，等于明文上行。需要文件内容脱敏时用浏览器扩展的 `/api/ext/mask-file`（支持 `.docx/.xlsx/.pptx`，只处理文本 run）。
+
 ### 脱敏取证与还原失败归因（2026-10-25 新增）
 
 **取证**：内存环形缓冲留最近 50 条「厂商实际收到的 body」（单条最多 8KB），`GET /api/logs/egress-preview` 可取。仅内存、重启即清、不落盘；存的是**脱敏后**的正文（占位符形态），不碰原文。

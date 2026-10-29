@@ -17,6 +17,8 @@
 - `SECURITY.md` now documents that egress-recheck `type=BLOCK` events carry both `decision=flagged` (forwarded) and `decision=blocked`; blocking counts must filter by `decision`.
 - 自动更新元数据固定优先取 macOS 的 `.app.tar.gz`：此前按目录枚举顺序取第一个，`.dmg` 排在前面时会生成错误条目，客户端点更新直接 404。
 - macOS update metadata now always prefers `.app.tar.gz`; previously the first directory entry won, so a `.dmg` sorting first produced a broken entry and clients hit 404 on update.
+- 图片与文件附件不再被当文本脱敏：此前上传带图表的 Excel 时，图表转成的图片数据会被替换成占位符，上游直接拒收整条请求；现在这类内联数据原样上行，日志里也标出哪些内容未扫描。
+- Images and file attachments are no longer masked as text: picture data from an uploaded spreadsheet used to be rewritten, making upstream reject the whole request; such inline data now passes through unchanged and the log shows what was skipped.
 
 ## [0.12.2] - 2026-10-28
 

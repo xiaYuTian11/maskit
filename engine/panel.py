@@ -6860,6 +6860,9 @@ _EXPORT_KEEP_FIELDS = {
     # `test_attribution` 的 AST 扫描看不见它们 —— 漏登记不会报错，只会静默少一列。
     "decision", "completeness", "reasons", "reason_codes", "blocked", "failed",
     "error_code", "ner_truncated", "ner_skip_reasons", "signed_blocks_skipped",
+    # 媒体/内联二进制整块豁免计数（2026-10-29）：与 signed_blocks_skipped 同理，
+    # 豁免是漏检路径，导出里必须看得见。
+    "media_skipped",
     # ---- 审计结果（计数/枚举，不含正文）----
     # `audit_scan_truncated` 是审计结论本身（“没扫完整包”），与 NER 的 truncated 同理。
     "audit_ms", "audit_scan_bytes", "audit_scan_truncated",

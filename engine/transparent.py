@@ -4875,6 +4875,12 @@ def _custom_word_regex(word):
     if len(word) == 1:
         rx = re.compile(rf"(?<![{_SINGLE_WORD_BOUND}]){esc}(?![{_SINGLE_WORD_BOUND}])", re.IGNORECASE)
     else:
+        # 刻意**不加**词边界（2026-10-29 实测否决）：试过给纯 ASCII 词加
+        # `(?<![A-Za-z0-9_])` 边界，结果 20 条协议契约测试全红——它们锁的是
+        # 「同名键出现在编码块/标识符里也必须照常扫描」（`acme` 嵌在 base64 里
+        # 必须被替换，`tests/test_protocol_contracts.py`）。
+        # 编码块被改坏的根因是「媒体字段没有豁免」，不是词边界：修在
+        # `_media_value_exempt`，不要动这里的子串语义。
         rx = re.compile(esc, re.IGNORECASE)
     _CUSTOM_WORD_RX_CACHE[word] = rx
     return rx
@@ -4892,6 +4898,8 @@ def _literal_word_pattern(word):
     if len(word) == 1 or word in SENSITIVE_WORD_WHOLE:
         bound = _SINGLE_WORD_BOUND if len(word) == 1 else _WHOLE_WORD_BOUND
         return rf"(?<![{bound}]){esc}(?![{bound}])"
+    # 不加 ASCII 词边界：理由见 `_custom_word_regex` 同位置注释（20 条协议契约测试
+    # 锁住「编码块/标识符里也要扫」）。两条路径必须**同口径**，否则单测过、线上漂。
     return esc
 
 
@@ -7730,6 +7738,57 @@ _MASK_PROTOCOL_PARENTS = {
     "input",
 }
 _MASK_SKIP_KEYS = {"id", "tool_call_id", "tool_use_id", "name", "url", "data", "b64_json", "namespace"}
+
+# 内联二进制（data URL）与媒体地址：改了必然破上游解码（图片/音视频/Office 容器），
+# 而 base64 里不承载可脱敏的自然语言。
+_DATA_URL_MIME_RX = re.compile(r"^data:([a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*)", re.I)
+# 这些**媒体专属**键的 http(s) 地址不再当文本扫。不把 `url`/`data` 放进来：它们在
+# 业务区里可能是正文（`{"data": "..."}`），扩大豁免面会变成真漏检。
+_MASK_MEDIA_VALUE_KEYS = frozenset({
+    "image_url", "file_data", "file_url", "file_id", "input_image", "b64_json",
+})
+
+
+def _is_binary_data_url(value):
+    """`data:<非文本 MIME>...` → True。文本类 data URL 不豁免（可能藏 PII）。"""
+    m = _DATA_URL_MIME_RX.match(value)
+    if not m:
+        return False
+    mime = m.group(1).lower()
+    return not (mime.startswith("text/") or mime.endswith("+xml") or mime.endswith("+json"))
+
+
+def _media_value_exempt(key, value):
+    """媒体值豁免：返回原因码（空串 = 不豁免）。
+
+    **为什么必须有**（2026-10-29 真机事故）：Codex 把含图表的 Excel 渲染成 PNG，
+    base64 塞进 `input[].output[].image_url`；该字段不在任何豁免集合里（`image_url`
+    不在 `_MASK_SKIP_KEYS`，`_MASK_MEDIA_PARENTS` 只盖住 `{"image_url": {"url":…}}`
+    这种嵌套形态），于是整段 base64 被当文本扫。用户自定义词表里的 3 字 ASCII 短词
+    （无边界子串匹配）在几十万字符的 base64 里必然命中，替换成 `{{TERM_xxx}}` 后
+    上游直接 `Only base64 data is allowed` 400——而且客户端会把这份**已被改坏的
+    请求**存进历史，之后每轮重发都 400。
+
+    判据只看**值形态**（不看键名），所以 `input[].output[]`、`input[].content[]`、
+    工具参数里的同名字段都能覆盖：
+      · 任何位置的二进制 data URL（图片/音视频/Office/PDF/octet-stream）；
+      · 媒体专属键的 http(s) 地址（改了同样让上游取不到图）。
+
+    豁免是**漏检路径**，调用方必须计数上报（`media_skipped`），不得静默。
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    # 只在**媒体专属键**上豁免：值级无差别豁免会变成一处真漏检——
+    # `{"type":"redacted_thinking","data":"data:image/…"}` 这类业务区字段
+    # 按契约必须扫描（`tests/test_protocol_contracts.py` 锁死）。
+    if key not in _MASK_MEDIA_VALUE_KEYS:
+        return ""
+    if _is_binary_data_url(value):
+        return "data_url"
+    head = value[:8].lower()
+    if head.startswith("http://") or head.startswith("https://"):
+        return "media_url"
+    return ""
 # 工具调用关联 ID：上游生成的不透明句柄，客户端靠它把工具结果连回上一轮函数调用。
 # 这组**不分业务区一律豁免**（判定点在 _mask_tree 的 in_business 之前），
 # 因为脱敏它必然断链且保护不了任何东西。call_id 是 OpenAI Responses API 的形式，
@@ -8032,6 +8091,29 @@ _DEFINITION_TEXT_KEYS = frozenset({
 })
 
 
+def _note_media_skip(sid, kind):
+    """记一次「媒体/内联二进制整块未扫描」（本轮计数，按原因码分开）。
+
+    与 `_note_signed_block_skip` 同一纪律：豁免是**漏检路径**，静默豁免等于用户
+    以为扫了、其实没扫。累加在会话上、由 MASK 事件取走并清零，语义是「本次请求」。
+    """
+    s = _session_get(sid)
+    if isinstance(s, dict):
+        s["media_skipped"] = int(s.get("media_skipped") or 0) + 1
+        kinds = s.setdefault("media_skip_kinds", {})
+        if isinstance(kinds, dict):
+            kinds[kind] = int(kinds.get(kind) or 0) + 1
+
+
+def _take_media_skips(sid):
+    """取走本轮媒体豁免计数并清零（请求级语义）。"""
+    s = _session_get(sid)
+    if not isinstance(s, dict):
+        return 0
+    s.pop("media_skip_kinds", None)
+    return int(s.pop("media_skipped", 0) or 0)
+
+
 def _note_definition_skip(sid):
     """记一次「定义区字符串未扫描」（本轮计数）。
 
@@ -8216,6 +8298,12 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None, rol
         # （审计实测：input.type 放手机号曾原文上行）。只有业务区外的协议位置才跳过。
         # 判据抽到 `_leaf_exempt`：数值分支必须用同一套，否则两边行为会漂。
         if _leaf_exempt(key, parent, in_business):
+            return obj
+        # 媒体/内联二进制豁免（2026-10-29）：必须在 `_mask_hit` 之前，否则整段
+        # base64 会被规则与自定义词扫到、改坏后上游解码失败（详见函数 docstring）。
+        _media_kind = _media_value_exempt(key, obj)
+        if _media_kind:
+            _note_media_skip(sid, _media_kind)
             return obj
         return _mask_hit(obj, sid, flag)
     # bool 是 int 的子类，必须先判掉：否则 True/False 会被 str() 成 "True"/"False"
@@ -10994,6 +11082,7 @@ async def _request_impl(flow: http.HTTPFlow):
     except Exception:
         pass
     _s_signed = _take_signed_skips(sid)
+    _media_skipped = _take_media_skips(sid)
     # 严格模式闸门（§B3）必须在**请求出网前**生效：此时脱敏已完成（命中/占位符已定），
     # 只差回写与放行。判据用 inspection 的类别表：exempt（签名块按契约不扫）与 info
     # （取消/直通）不阻断，只有「检测没跑完」类降级才阻断。
@@ -11078,9 +11167,12 @@ async def _request_impl(flow: http.HTTPFlow):
         # 签名思考块整块豁免计数（本轮）：静默豁免必须可见，否则用户会以为全扫过了。
         # 缺省不加字段，避免常态噪声（与 ner_truncated 同一做法）。
         **({"signed_blocks_skipped": _s_signed} if _s_signed else {}),
+        # 媒体/内联二进制整块豁免计数（本轮）：同上，静默豁免不可接受。
+        **({"media_skipped": _media_skipped} if _media_skipped else {}),
         # 统一检测口径（§B1）：处置结论 + 完整度 + 原因码，与扩展桥接同源。
         **inspection.report_for_mask(changed=bool(hit_count), ner_skips=ner_skips,
-                                     signed_skipped=_s_signed),
+                                     signed_skipped=_s_signed,
+                                     media_skipped=_media_skipped),
         **source,
     )
 
