@@ -8116,17 +8116,13 @@ def _note_media_skip(sid, kind):
     s = _session_get(sid)
     if isinstance(s, dict):
         s["media_skipped"] = int(s.get("media_skipped") or 0) + 1
-        kinds = s.setdefault("media_skip_kinds", {})
-        if isinstance(kinds, dict):
-            kinds[kind] = int(kinds.get(kind) or 0) + 1
 
 
 def _take_media_skips(sid):
     """取走本轮媒体豁免计数并清零（请求级语义）。"""
-    s = _session_get(sid)
+    s = _session_get(sid) if sid else None
     if not isinstance(s, dict):
         return 0
-    s.pop("media_skip_kinds", None)
     return int(s.pop("media_skipped", 0) or 0)
 
 

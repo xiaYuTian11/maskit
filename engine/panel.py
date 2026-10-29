@@ -7337,10 +7337,14 @@ def api_ext_mask():
             _EXT_STATS["mask"] += 1              # += 是读改写三步，必须在锁内
             # 签名块豁免计数（本轮）：取走即清零，与代理路径同语义
             _signed = tr._take_signed_skips(sid)
+            # 媒体/内联二进制豁免计数：同口径取走（扩展链路 mask_body 走 _mask_tree，
+            # 同样会命中图片/文件字段）。
+            _media = tr._take_media_skips(sid)
         hit_count = len(s.get("last_hits") or set())
         # 统一检测口径（§B4）：扩展链路与代理路径**同源**，否则扩展用户永远只看到“0 命中”
         _report = inspection.report_for_mask(changed=hit_count > 0, ner_skips=ner_skips,
-                                             signed_skipped=_signed)
+                                             signed_skipped=_signed,
+                                             media_skipped=_media)
         # 仅当真实命中敏感词并发生打码时才产生 MASK 事件，彻底消除大量 0 命中的空白噪声日志。
         # 例外：本轮发生语义识别降级时即使 0 命中也要记 —— 降级意味着「本该识别出人名/
         # 机构/地址的文本没被识别」，而这恰好是最可能漏码的情形，不记就等于静默降级。
@@ -7367,6 +7371,8 @@ def api_ext_mask():
                      **({"ner_truncated": True, "ner_skip_reasons": ner_skips}
                         if ner_skips else {}),
                      **(({"signed_blocks_skipped": _signed} if _signed else {})),
+                     # 媒体整块豁免计数（与代理链路同字段名）：扩展链路也要看得见
+                     **(({"media_skipped": _media} if _media else {})),
                      # warn 三态（B-4）：与代理链路同口径，取走即清
                      **(({"warned": _warned_n, "warned_labels": _warned_labels}
                         if _warned_n else {})),
