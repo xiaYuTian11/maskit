@@ -4,6 +4,18 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 日志页不再把工具调用编号、版本号这些普通标识符当成「占位符被改写」：正常请求不再被标成异常，真正需要关注的情况也更显眼。
+- The log page no longer labels tool-call IDs and version strings as rewritten placeholders, so healthy requests stop looking broken and real cases stand out.
+
+### 修复
+- 还原失败归因不再把普通标识符当占位符：`call_417868`、`gen-179315`、`V19511040_202211`、凭据片段 `garKuE-DnrfcP` 这类裸串此前会被宽松形态匹配计入「占位符被改写」。真机回放 2026-10-27 / 10-28 各 200 条该状态样本，命中全部是假阳性；现在裸形态只认本机签发过的后缀，这类请求回落为「模型没提」。
+- Restore attribution no longer counts ordinary identifiers (`call_417868`, `gen-179315`, `V19511040_202211`, credential fragments such as `garKuE-DnrfcP`) as rewritten placeholders; loose matches now require a locally issued suffix, so these requests fall back to "not mentioned".
+- `SECURITY.md` 补注：出口复检的 `type=BLOCK` 事件含 `decision=flagged`（已放行）与 `decision=blocked`（真阻断）两种，统计阻断数须按 `decision` 过滤。
+- `SECURITY.md` now documents that egress-recheck `type=BLOCK` events carry both `decision=flagged` (forwarded) and `decision=blocked`; blocking counts must filter by `decision`.
+
 ## [0.12.2] - 2026-10-28
 
 ### 更新摘要 / Summary

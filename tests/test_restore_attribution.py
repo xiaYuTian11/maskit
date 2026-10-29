@@ -131,9 +131,49 @@ class EventFieldTests(unittest.TestCase):
         self.assertTrue(tr._response_has_placeholder_shape("见 {{PHONE_abcdef}}"))
         self.assertTrue(tr._response_has_placeholder_shape("见 {{PHONE_abcd12}}"))
 
-    def test_detects_loose_placeholder(self):
-        """模型常剥掉花括号：`PHONE_abcdef` 也算「提了」。"""
-        self.assertTrue(tr._response_has_placeholder_shape("见 PHONE_abcdef"))
+    def test_detects_loose_placeholder_only_for_issued_suffix(self):
+        """模型剥掉花括号时，只有**本机签发过**的后缀才算「提了」。
+
+        判据不能只看形态（2026-10-29 收紧）：后缀分支包含 `[0-9a-fA-F]{6}`，
+        裸形态 + 未知后缀会把 `call_417868` 这类工具调用 ID 也吃进来，
+        真机回放 2026-10-27 单日 1069 条 `placeholder_rewritten` 全是这种假阳性。
+        """
+        sfx = "zwndfk"
+        with tr._STATE_LOCK:
+            tr._ISSUED_SUFFIXES.pop(sfx, None)
+        self.assertFalse(
+            tr._response_has_placeholder_shape("见 PHONE_%s" % sfx),
+            "未签发过的后缀不能算占位符（否则普通标识符全被误报）",
+        )
+        with tr._STATE_LOCK:
+            tr._note_issued_suffix(sfx)
+        try:
+            self.assertTrue(tr._response_has_placeholder_shape("见 PHONE_%s" % sfx))
+            self.assertTrue(tr._response_has_placeholder_shape("见 PHONE-%s" % sfx))
+        finally:
+            with tr._STATE_LOCK:
+                tr._ISSUED_SUFFIXES.pop(sfx, None)
+
+    def test_ignores_identifiers_that_look_like_placeholders(self):
+        """工具调用 ID / 版本串 / 日期串 / 凭证片段不是占位符（真机假阳性回归）。
+
+        这些串都是 2026-10-27 / 10-28 的 `placeholder_rewritten` 样本里实际
+        出现过的：宽松正则的后缀分支把 6 位数字也算 hex6，于是它们全命中。
+        """
+        for text in (
+            "call_417868",
+            "gen-179315",
+            "V19511040_202211",
+            "garKuE-DnrfcP",
+            "aoTtG8K12roP_PvFkQQ",
+            "cMTharr6A-TKrfcP",
+            "QE5GY0-kPvrDf",
+            "{{call_417868}}",
+        ):
+            self.assertFalse(
+                tr._response_has_placeholder_shape(text),
+                "普通标识符被误判成占位符：%r" % text,
+            )
 
     def test_ignores_normal_text(self):
         for text in ("这里没有占位符", "UTF_8 编码", "HTTP_status 500", ""):

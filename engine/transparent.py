@@ -12517,13 +12517,14 @@ def _sse_stream_factory(flow, sid, host, method, emit_path, source, framing="sse
 # 「有没有真的漏还原」的判定（`unresolved` 仍是唯一告警态）。
 
 # 宽松形态：模型常把 `{{PHONE_abcdef}}` 写成 `PHONE_abcdef` / `{{ PHONE_abcdef }}` /
-# `{{phone_abcdef}}`。判据刻意宽松——这一层只用于**归因**（「模型提没提」），
-# 不参与还原决策（还原走 `restore()` 的严格/宽松/转义三遍）。
-# 注意花括号必须**整体可选**：模型最常犯的错就是把 `{{}}` 剥掉，写成裸的
-# `PHONE_abcdef`。写成 `\{\{?` 只让第二个括号可选，裸形态永远匹配不到。
+# `{{phone_abcdef}}`。**匹配**层面刻意宽松（花括号整体可选，裸形态也要能命中），
+# 但**判定**层面必须收紧，见 `_response_has_placeholder_shape` 的分级判据。
+# 这一层只用于归因（「模型提没提」），不参与还原决策（还原走 `restore()` 的
+# 严格/宽松/转义三遍）。
+# 两个捕获组分别是 label 与后缀，判定层要按后缀查签发台账。
 _LOOSE_SHAPE_RX = re.compile(
-    r"(?:\{\{?\s*)?[A-Za-z][A-Za-z0-9]{0,11}\s*[_\-]\s*"
-    r"(?:[0-9a-fA-F]{6}|[bcdfghjkmnpqrstvwxzBCDFGHJKMNPQRSTVWXZ]{6})"
+    r"(?:\{\{?\s*)?([A-Za-z][A-Za-z0-9]{0,11})\s*[_\-]\s*"
+    r"([0-9a-fA-F]{6}|[bcdfghjkmnpqrstvwxzBCDFGHJKMNPQRSTVWXZ]{6})"
     r"(?:\s*\}?\}?)?",
     re.IGNORECASE,
 )
@@ -12536,17 +12537,43 @@ def _response_has_placeholder_shape(text):
 
     只用于**归因**：区分「模型压根没提」与「模型提了但形态坏了」。
     绝不参与还原决策——那仍然只走 `restore()`。
+
+    判据分级（2026-10-29 收紧）：
+      · 带花括号（`{{X_sfx}}` / `{X_sfx}`）→ 认：模型明确在写占位符；
+      · 裸形态（`X_sfx` / `X-sfx`）→ 后缀必须**由本机签发过**
+        （`_ISSUED_SUFFIXES`），否则普通标识符会把归因污染掉；
+      · 后缀全是数字 → 一律不认。
+
+    为什么必须收紧：后缀分支 `[0-9a-fA-F]{6}` 把纯 6 位数字也当成后缀，于是
+    OpenAI 工具调用 ID `call_417868`、版本串 `gen-179315`、日期串
+    `V19511040_202211`、base62 凭证片段 `garKuE-DnrfcP` 全被记成「占位符被
+    改写」。用 2026-10-27 / 10-28 各 200 条 `placeholder_rewritten` 样本的
+    `resp_preview` 回放：命中 210 / 208 次，**零个真占位符** —— 该标签因此
+    完全失真，还把本应归为 `not_mentioned` 的请求错误标黄（10-27 单日
+    1069/4109 = 26% 都来自这里）。
+
+    已知漏检面：hex6 老格式不进签发台账（`_suffix_indexable` 只收纯辅音），
+    所以「裸的 hex6 占位符被模型剥了花括号」不再被识别 —— 方向保守，
+    优先消除假阳性。
     """
     try:
         if not text or not isinstance(text, str):
             return False
         for m in _LOOSE_SHAPE_RX.finditer(text):
-            label = re.sub(r"[^A-Za-z0-9]", "", m.group(0))[:12].lower()
+            whole, label, suffix = m.group(0), m.group(1), m.group(2).lower()
             # 取标签部分的字母前缀做排除（`UTF_8abc` 这类代码常量）
-            head = re.match(r"[a-z]+", label)
+            head = re.match(r"[a-z]+", label.lower())
             if head and head.group(0) in _LOOSE_SHAPE_DENY:
                 continue
-            return True
+            # 纯数字后缀不可能是签发 token：`call_417868` / `gen-179315`
+            if suffix.isdigit():
+                continue
+            # 带花括号 = 模型明确在写占位符，端到端形态已足够，不要求台账
+            if "{" in whole:
+                return True
+            # 裸形态：只认本机签发过的后缀
+            if _issued_suffix(suffix):
+                return True
         return False
     except Exception:
         return False
