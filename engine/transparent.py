@@ -7840,6 +7840,10 @@ _MASK_PROTECTED_KEY_NAMES = frozenset(
     | set(_MASK_PROTOCOL_PARENTS)
     | set(_MASK_PROTOCOL_ID_PARENTS)
     | set(_MASK_BUSINESS_KEYS)
+    # 媒体专属键（`file_data` 等）也必须进保护名单：它们不在 `_MASK_SKIP_KEYS`、
+    # 也不在 `_MASK_PROTOCOL_PARENTS` 里，曾经被当数据键名脱敏 ——
+    # 症状比改坏 base64 更直接：上游收到 `{"{{TERM_xxx}}": "data:…"}`，字段名直接没了。
+    | set(_MASK_MEDIA_VALUE_KEYS)
     | {
         # 对话协议骨架
         "role", "type", "content", "contents", "parts", "messages", "message",

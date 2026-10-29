@@ -155,5 +155,34 @@ class MediaSkipAttributionTests(unittest.TestCase):
             tr._refresh_custom_words_sorted()
 
 
+class MediaKeyNameTests(unittest.TestCase):
+    """媒体**字段名**本身不能被脱敏（比改坏 base64 更致命：字段直接没了）。
+
+    2026-10-29 自测发现：`file_data` 不在 `_MASK_PROTECTED_KEY_NAMES` 里，
+    自定义词表里出现 `file_data` 时键名会被替换成占位符，上游收到
+    `{"<占位符>": "data:…"}`，整个字段失效。
+    """
+
+    def test_media_key_names_are_protected(self):
+        old = dict(tr.CUSTOM_WORDS)
+        try:
+            tr.CUSTOM_WORDS.clear()
+            for w in ("file_data", "image_url", "file_url", "file_id"):
+                tr.CUSTOM_WORDS[w] = "编号"
+            tr._refresh_custom_words_sorted()
+            sid = "t-keyname-1"
+            tr._new_session(sid)
+            body = {"input": [{"type": "input_file", "file_data": XLSX_URL,
+                                "file_url": MEDIA_HTTP, "file_id": "file-1"}],
+                    "image_url": DATA_URL}
+            out = tr._mask_tree(json.loads(json.dumps(body)), sid)
+            self.assertEqual(set(out["input"][0]), {"type", "file_data", "file_url", "file_id"})
+            self.assertIn("image_url", out)
+        finally:
+            tr.CUSTOM_WORDS.clear()
+            tr.CUSTOM_WORDS.update(old)
+            tr._refresh_custom_words_sorted()
+
+
 if __name__ == "__main__":
     unittest.main()
