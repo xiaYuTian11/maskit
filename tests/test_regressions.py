@@ -5227,9 +5227,13 @@ class ToolCorrelationIdTests(unittest.TestCase):
         self.assertEqual(cust["call_id"], "call_ACMECORP_1")
 
     def test_correlation_ids_declared_in_one_place(self):
-        """三种协议的关联 ID 必须集中声明，避免下次新增协议时又漏一个。"""
+        """关联 ID 必须集中声明，避免下次新增协议时又漏一个。
+
+        `file_id` 是 OpenAI Files/Responses 的文件句柄（2026-10-29 加）：
+        与 `call_id` 同性质——上游靠它找回文件，改写即 404。
+        """
         self.assertEqual(tr._MASK_CORRELATION_ID_KEYS,
-                         {"tool_call_id", "tool_use_id", "call_id"})
+                         {"tool_call_id", "tool_use_id", "call_id", "file_id"})
 
 
 class ObjectKeyMaskingBoundaryTests(unittest.TestCase):

@@ -7749,13 +7749,24 @@ _MASK_MEDIA_VALUE_KEYS = frozenset({
 })
 
 
+# 文本型 MIME（含 XML/JSON 家族）：**不**豁免——它们装的是可读文本，可能藏 PII。
+# `image/svg+xml` 也走这条（SVG 的 <text> 是明文）。
+_TEXTISH_MIME_RX = re.compile(
+    r"^(?:text/|application/(?:json|xml|javascript|ecmascript|x-ndjson"
+    r"|x-www-form-urlencoded|ld\+json|vnd\.api\+json))",
+    re.I,
+)
+
+
 def _is_binary_data_url(value):
     """`data:<非文本 MIME>...` → True。文本类 data URL 不豁免（可能藏 PII）。"""
     m = _DATA_URL_MIME_RX.match(value)
     if not m:
         return False
     mime = m.group(1).lower()
-    return not (mime.startswith("text/") or mime.endswith("+xml") or mime.endswith("+json"))
+    if _TEXTISH_MIME_RX.match(mime):
+        return False
+    return not (mime.startswith("text/") or mime.endswith(("+xml", "+json")))
 
 
 def _media_value_exempt(key, value):
@@ -7792,8 +7803,9 @@ def _media_value_exempt(key, value):
 # 工具调用关联 ID：上游生成的不透明句柄，客户端靠它把工具结果连回上一轮函数调用。
 # 这组**不分业务区一律豁免**（判定点在 _mask_tree 的 in_business 之前），
 # 因为脱敏它必然断链且保护不了任何东西。call_id 是 OpenAI Responses API 的形式，
-# tool_call_id 是 Chat Completions 的，tool_use_id 是 Anthropic 的。
-_MASK_CORRELATION_ID_KEYS = {"tool_call_id", "tool_use_id", "call_id"}
+# tool_call_id 是 Chat Completions 的，tool_use_id 是 Anthropic 的，file_id 是
+# OpenAI Files/Responses 的文件句柄（改了上游 404，与 call_id 同性质）。
+_MASK_CORRELATION_ID_KEYS = {"tool_call_id", "tool_use_id", "call_id", "file_id"}
 # 业务区容器 key：进入后任何字段都照常扫描
 _MASK_BUSINESS_KEYS = {"input", "arguments", "parameters", "partial_json", "documents"}
 _MASK_MAX_DEPTH = 24

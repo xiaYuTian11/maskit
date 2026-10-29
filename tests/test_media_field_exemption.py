@@ -184,5 +184,49 @@ class MediaKeyNameTests(unittest.TestCase):
             tr._refresh_custom_words_sorted()
 
 
+class TextishDataUrlTests(unittest.TestCase):
+    """文本型 MIME 的 data URL 不豁免（可能藏 PII），与二进制容器严格区分。"""
+
+    PH = "1" + "3" + "0" + "0" * 8
+
+    def _field(self, mime, payload, sid):
+        tr._new_session(sid)
+        body = {"input": [{"type": "input_file", "file_data": "data:%s,%s" % (mime, payload)}]}
+        return tr._mask_tree(body, sid)["input"][0]["file_data"]
+
+    def test_json_xml_svg_are_scanned(self):
+        # 前后用逗号：手机号规则的边界断言会拒绝「被字母包住」的形态
+        payload = ",%s," % self.PH
+        for i, mime in enumerate(("application/json;base64", "application/xml;base64",
+                                  "image/svg+xml", "application/javascript;base64")):
+            got = self._field(mime, payload, "t-textish-%d" % i)
+            self.assertNotIn(self.PH, got, "文本型 data URL 未扫描：%s" % mime)
+
+    def test_binary_container_is_exempt(self):
+        payload = "t00A" + "A" * 40
+        got = self._field("image/png;base64", payload, "t-textish-bin")
+        self.assertTrue(got.endswith(payload))
+
+
+class CorrelationIdTests(unittest.TestCase):
+    """`file_id` 是协议句柄，改了上游 404（与 call_id 同性质）。"""
+
+    def test_file_id_is_exempt(self):
+        old = dict(tr.CUSTOM_WORDS)
+        try:
+            tr.CUSTOM_WORDS.clear()
+            tr.CUSTOM_WORDS["t00"] = "编号"
+            tr._refresh_custom_words_sorted()
+            sid = "t-file-id"
+            tr._new_session(sid)
+            body = {"input": [{"type": "input_file", "file_id": "file-abc123t00"}]}
+            got = tr._mask_tree(body, sid)["input"][0]["file_id"]
+            self.assertEqual(got, "file-abc123t00")
+        finally:
+            tr.CUSTOM_WORDS.clear()
+            tr.CUSTOM_WORDS.update(old)
+            tr._refresh_custom_words_sorted()
+
+
 if __name__ == "__main__":
     unittest.main()
