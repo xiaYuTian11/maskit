@@ -4,21 +4,31 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
-## [Unreleased]
+## [0.13.0] - 2026-10-30
 
 ### 更新摘要 / Summary
-- 日志页不再把工具调用编号、版本号这些普通标识符当成「占位符被改写」：正常请求不再被标成异常，真正需要关注的情况也更显眼。
-- The log page no longer labels tool-call IDs and version strings as rewritten placeholders, so healthy requests stop looking broken and real cases stand out.
+- 全新视觉体验与暗色优先质感：控制台新增趋势走势图，日志表格自适应小屏幕宽度。
+- 图片与文件附件不再被误打码：上传图片与文件时不再损坏二进制数据，避免上游拒收请求。
+- 还原归因更精准：普通编号与版本号等普通标识符不再被误判为占位符被改写，状态显示更准确。
+- Fresh dark-first visual design, a live trend sparkline on the dashboard, and a responsive logs table.
+- Images and file attachments are no longer corrupted by text masking, preventing upstream request rejections.
+- Plain identifiers and version numbers are no longer mistaken for rewritten placeholders.
+
+### 新增
+- 全新 macOS 风格设计系统与通用模式组件（PageHeader/Section/StatCard/Toolbar/Hint），统一页面排版节奏与交互质感。
+- Mac-styled design system with reusable pattern components (PageHeader, Section, StatCard, Toolbar, Hint) for consistent typography and spacing.
+- 控制台新增原生趋势走势图，日志表格优化列宽自适应紧凑屏幕。
+- Native trend sparkline on Dashboard and optimized Logs table columns for compact screens.
 
 ### 修复
-- 还原失败归因不再把普通标识符当占位符：`call_417868`、`gen-179315`、`V19511040_202211`、凭据片段 `garKuE-DnrfcP` 这类裸串此前会被宽松形态匹配计入「占位符被改写」。真机回放 2026-10-27 / 10-28 各 200 条该状态样本，命中全部是假阳性；现在裸形态只认本机签发过的后缀，这类请求回落为「模型没提」。
-- Restore attribution no longer counts ordinary identifiers (`call_417868`, `gen-179315`, `V19511040_202211`, credential fragments such as `garKuE-DnrfcP`) as rewritten placeholders; loose matches now require a locally issued suffix, so these requests fall back to "not mentioned".
-- `SECURITY.md` 补注：出口复检的 `type=BLOCK` 事件含 `decision=flagged`（已放行）与 `decision=blocked`（真阻断）两种，统计阻断数须按 `decision` 过滤。
-- `SECURITY.md` now documents that egress-recheck `type=BLOCK` events carry both `decision=flagged` (forwarded) and `decision=blocked`; blocking counts must filter by `decision`.
-- 自动更新元数据固定优先取 macOS 的 `.app.tar.gz`：此前按目录枚举顺序取第一个，`.dmg` 排在前面时会生成错误条目，客户端点更新直接 404。
-- macOS update metadata now always prefers `.app.tar.gz`; previously the first directory entry won, so a `.dmg` sorting first produced a broken entry and clients hit 404 on update.
-- 图片与文件附件不再被当文本脱敏：此前上传带图表的 Excel 时，图表转成的图片数据会被替换成占位符，上游直接拒收整条请求；现在这类内联数据原样上行，日志里也标出哪些内容未扫描。
-- Images and file attachments are no longer masked as text: picture data from an uploaded spreadsheet used to be rewritten, making upstream reject the whole request; such inline data now passes through unchanged and the log shows what was skipped.
+- 还原失败归因不再把普通标识符当占位符：普通编号与版本号裸串不再计入占位符被改写，假阳性归零。
+- Restore attribution no longer flags plain identifiers and version tags as rewritten placeholders.
+- `SECURITY.md` 补注：出口复检的拦截事件按判定结果区分放行与真阻断。
+- `SECURITY.md` now documents that egress-recheck block events distinguish forwarded and blocked decisions.
+- 自动更新元数据固定优先取 macOS 的 `.app.tar.gz`，消除目录枚举顺序依赖。
+- macOS update metadata now always prefers `.app.tar.gz` to avoid 404s on client auto-updates.
+- 图片与文件附件不再被当文本脱敏：媒体专属键下的内联二进制整块豁免，浏览器扩展链路同步上报豁免计数。
+- Binary images and file attachments under media keys are exempted from text masking, and the extension bridge reports counts in sync.
 
 ## [0.12.2] - 2026-10-28
 
