@@ -32,22 +32,22 @@ export interface EventTypeMeta {
 }
 
 export const EVENT_TYPE_META: Record<EventType, EventTypeMeta> = {
-  MASK: { icon: Shield, color: 'text-blue-500', labelKey: 'evt.mask', label: '脱敏', alert: false },
-  RESTORE: { icon: RotateCcw, color: 'text-emerald-500', labelKey: 'evt.restore', label: '还原', alert: false },
-  PASS: { icon: ArrowRight, color: 'text-slate-400', labelKey: 'evt.pass', label: '透传', alert: false },
-  BYPASS: { icon: FilterX, color: 'text-slate-400', labelKey: 'evt.bypass', label: '绕过', alert: false },
-  SKIP: { icon: SkipForward, color: 'text-slate-400', labelKey: 'evt.skip', label: '跳过', alert: false },
-  BLOCK: { icon: Ban, color: 'text-red-500', labelKey: 'evt.block', label: '阻断', alert: true },
-  ERR: { icon: TriangleAlert, color: 'text-red-500', labelKey: 'evt.err', label: '错误', alert: true },
-  SCAN_WARN: { icon: ScanSearch, color: 'text-amber-500', labelKey: 'evt.scanWarn', label: '扫描告警', alert: true },
-  CANCEL: { icon: CircleSlash, color: 'text-slate-400', labelKey: 'evt.cancel', label: '取消', alert: false },
-  DNS_ERROR: { icon: Globe, color: 'text-amber-500', labelKey: 'evt.dns', label: 'DNS 错误', alert: false },
+  MASK: { icon: Shield, color: 'text-primary', labelKey: 'evt.mask', label: '脱敏', alert: false },
+  RESTORE: { icon: RotateCcw, color: 'text-success-ink', labelKey: 'evt.restore', label: '还原', alert: false },
+  PASS: { icon: ArrowRight, color: 'text-muted-foreground', labelKey: 'evt.pass', label: '透传', alert: false },
+  BYPASS: { icon: FilterX, color: 'text-muted-foreground', labelKey: 'evt.bypass', label: '绕过', alert: false },
+  SKIP: { icon: SkipForward, color: 'text-muted-foreground', labelKey: 'evt.skip', label: '跳过', alert: false },
+  BLOCK: { icon: Ban, color: 'text-destructive', labelKey: 'evt.block', label: '阻断', alert: true },
+  ERR: { icon: TriangleAlert, color: 'text-destructive', labelKey: 'evt.err', label: '错误', alert: true },
+  SCAN_WARN: { icon: ScanSearch, color: 'text-warning-ink', labelKey: 'evt.scanWarn', label: '扫描告警', alert: true },
+  CANCEL: { icon: CircleSlash, color: 'text-muted-foreground', labelKey: 'evt.cancel', label: '取消', alert: false },
+  DNS_ERROR: { icon: Globe, color: 'text-warning-ink', labelKey: 'evt.dns', label: 'DNS 错误', alert: false },
 }
 
 export function getEventTypeMeta(type: string): EventTypeMeta {
   return EVENT_TYPE_META[type as EventType] ?? {
     icon: CircleSlash,
-    color: 'text-slate-400',
+    color: 'text-muted-foreground',
     label: type,
     alert: false,
   }

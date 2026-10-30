@@ -34,7 +34,7 @@ export function VerificationCard({ upstreams }: { upstreams: { name: string }[] 
   }
 
   return <Card>
-    <CardHeader className="pb-3"><CardTitle className="text-base">{t('p6.verify.title')}</CardTitle></CardHeader>
+    <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold">{t('p6.verify.title')}</CardTitle></CardHeader>
     <CardContent className="space-y-3">
       <p className="text-sm text-muted-foreground">{t('p6.verify.steps')}</p>
       <Select value={selection} onValueChange={setSelection}>
@@ -50,7 +50,7 @@ export function VerificationCard({ upstreams }: { upstreams: { name: string }[] 
         <Button size="sm" variant="outline" disabled={busy} onClick={() => start('window')}>{t('p6.verify.weakStart')}</Button>
       </div>
       <p className="text-xs text-muted-foreground">{t('p6.verify.limit')}</p>
-      {query.isError ? <p role="alert" className="text-sm text-destructive">{t('p6.verify.unavailable')} {String(query.error)}</p> : result && result.status !== 'idle' && <div className="space-y-2 rounded-md border p-3" aria-live="polite">
+      {query.isError ? <p role="alert" className="text-sm text-destructive-ink">{t('p6.verify.unavailable')} {String(query.error)}</p> : result && result.status !== 'idle' && <div className="space-y-2 rounded-md border p-3" aria-live="polite">
         <p className="text-sm font-medium">{t(`p6.verify.${result.status}`)}</p>
         <p className="text-xs">{result.upstream || t(result.ingress === 'ext' ? 'p6.verify.ext' : 'p6.verify.proxy')} · {t(result.mode === 'window' ? 'p6.verify.weak' : 'p6.verify.strong')}</p>
         {result.status === 'pending' && result.mode === 'marker' && <>

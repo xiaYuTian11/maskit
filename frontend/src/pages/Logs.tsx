@@ -15,11 +15,13 @@
  * 5) placeholderData: keepPreviousData（切筛选时保留上一份直到新数据到，不闪空）。
  * 6) 删掉所有 setEvents([]) 副作用 effect（数据跟着 queryKey 走，不再手动清空）。
  */
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { Toolbar } from '@/components/patterns/Toolbar'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Download, Trash2, RefreshCw, Search, HelpCircle, Loader2, X, Globe, FileText, History } from 'lucide-react'
+import { Download, Trash2, RefreshCw, Search, Loader2, X, Globe, FileText, History } from 'lucide-react'
 import { getLogs, exportLogs, clearLogs, getLogMode, setLogMode, startLogTrace, stopLogTrace } from '@/api/logs'
 import { getAuditEvents } from '@/api/audit'
 import { EventTypeIcon, EVENT_TYPE_META } from '@/components/events/EventTypeIcon'
@@ -52,6 +54,7 @@ import { isTauri } from '@/lib/shield-fetch'
 import type { ShieldEvent, AuditEvent, AuditSeverity, LogMode, LogModeState } from '@/types/api'
 import dayjs from 'dayjs'
 import { cn } from '@/lib/utils'
+import { Hint } from '@/components/common/Hint'
 import { useI18n } from '@/lib/i18n'
 import { mergeMaskRestore, FILTER_ALL, type MergedEvent } from '@/lib/log-events'
 import {
@@ -64,7 +67,6 @@ import {
   outcomeFromFilter,
   type OutcomeKey,
 } from '@/lib/log-outcome'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useVisibility } from '@/lib/useVisibility'
 
 /** 审计信号行合并进主列表（AGENTS.md：auditRows 前端合并，不改 events 表） */
@@ -160,9 +162,13 @@ interface AuditRow {
  * 是纯重复噪声；浏览器扩展流量改为「上游」单元格前的一个小徽标。
  */
 const LOG_GRID_COLS =
-  'grid-cols-[68px_92px_minmax(112px,0.9fr)_minmax(140px,1.1fr)_minmax(190px,1.5fr)_68px_64px_72px]'
+  // 列宽压缩（2026-10-29）：旧值 min 合计 806px，配 min-w 890 后，宽 921 的窗口
+  // 扣除侧栏与内边距只剩 777 可用，表格恒定出一条横向滚动条 —— 而滚动条正好吃在
+  // 最右侧「耗时/费用」列上，那两列就又看不见了。把固定列收窄、弹性列下限下调，
+  // 让 8 列在 777px 也能完整呈现。
+  'grid-cols-[62px_86px_minmax(96px,0.8fr)_minmax(106px,1.1fr)_minmax(150px,1.5fr)_56px_74px_64px]'
 /** 表格最小宽度：上面这些列 + gap + 左右内边距能完整放下的下限；低于它由外层横向滚动接管。 */
-const LOG_MIN_W = 'min-w-[890px]'
+const LOG_MIN_W = 'min-w-[774px]'
 
 /** 「隐藏噪声」偏好的存储键（localStorage）：跨会话保留，重开客户端后仍生效。
  *  命名沿用 AppLayout 的 `maskit_sidebar_collapsed`（maskit_ + 模块 + 字段），
@@ -463,11 +469,11 @@ export default function LogsPage() {
     return merged.slice(start, start + pageSize)
   }, [merged, page, pageSize])
 
-  // 虚拟滚动（基于分页后的数据）
+  // 虚拟滚动（基于分页后的数据，52px 保证双行摘要与脱敏标签有充裕呼吸感不被切边）
   const virtualizer = useVirtualizer({
     count: paged.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 48,
+    estimateSize: () => 52,
     overscan: 8,
   })
 
@@ -775,12 +781,12 @@ export default function LogsPage() {
     const mask = (row as { mask_ms?: number }).mask_ms
     if (mask != null) {
       return (
-        <span className="text-muted-foreground/70" title={t('logs.durMaskHint')}>
+        <span className="text-muted-foreground" title={t('logs.durMaskHint')}>
           {tf('logs.durMask', { v: fmtMs(mask) })}
         </span>
       )
     }
-    return <span className="text-muted-foreground/50">—</span>
+    return <span className="text-muted-foreground">—</span>
   }
 
   /**
@@ -798,19 +804,19 @@ export default function LogsPage() {
           <Badge
             variant="outline"
             className={cn(
-              'px-1 py-0 text-[9px] font-mono',
+              'px-1 py-0 text-2xs font-mono',
               row.http_status >= 400
-                ? 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400'
+                ? 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                 : row.http_status >= 200 && row.http_status < 300
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                  : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                  ? 'border-success/30 bg-success/10 text-success-ink'
+                  : 'border-warning/30 bg-warning/10 text-warning-ink',
             )}
           >
             {row.http_status}
           </Badge>
           {row.http_status >= 500 && (
             <span
-              className="max-w-[6.5rem] truncate text-[9px] text-muted-foreground"
+              className="max-w-[6.5rem] truncate text-2xs text-muted-foreground"
               title={t(`logs.status5xx.${row.block_source || 'unknown'}`)}
             >
               {t(`logs.status5xx.${row.block_source || 'unknown'}`)}
@@ -823,7 +829,7 @@ export default function LogsPage() {
     if (term) {
       const text = term.vars ? tf(term.key, term.vars) : t(term.key)
       return (
-        <span className="min-w-0 max-w-full truncate text-[9px] text-muted-foreground" title={text}>
+        <span className="min-w-0 max-w-full truncate text-2xs text-muted-foreground" title={text}>
           {text}
         </span>
       )
@@ -836,7 +842,7 @@ export default function LogsPage() {
             ? t('logs.statusNoSensitive')
             : String(row.status)
       return (
-        <span className="min-w-0 max-w-full truncate text-[9px] text-muted-foreground" title={String(row.status)}>
+        <span className="min-w-0 max-w-full truncate text-2xs text-muted-foreground" title={String(row.status)}>
           {text}
         </span>
       )
@@ -847,13 +853,13 @@ export default function LogsPage() {
       return (
         <Badge
           variant="outline"
-          className="border-emerald-500/30 bg-emerald-500/10 px-1 py-0 text-[9px] font-mono text-emerald-600 dark:text-emerald-400"
+          className="border-success/30 bg-success/10 px-1 py-0 text-2xs font-mono text-success-ink"
         >
           200
         </Badge>
       )
     }
-    return <span className="text-muted-foreground/50">—</span>
+    return <span className="text-muted-foreground">—</span>
   }
 
   // 处理摘要列：事件行显示「脱敏 N / 还原 N」（无命中时回退路径/状态），审计行显示信号名 + 严重度
@@ -865,11 +871,11 @@ export default function LogsPage() {
       const sev = (row as AuditRow).severity
       return (
         <span className="flex min-w-0 items-center gap-1.5" title={ev?.evidence ?? (row as AuditRow).msg ?? ''}>
-          <span className="truncate text-[11px] font-medium text-amber-600 dark:text-amber-400">
+          <span className="truncate text-2xs font-medium text-warning-ink">
             {t(info.labelKey ?? info.label ?? sig)}
           </span>
           {sev && (
-            <Badge variant="outline" className={cn('shrink-0 rounded-full px-1 py-0 text-[9px]', severityMeta(sev).cls)}>
+            <Badge variant="outline" className={cn('shrink-0 rounded-full px-1 py-0 text-2xs', severityMeta(sev).cls)}>
               {t(severityMeta(sev).labelKey)}
             </Badge>
           )}
@@ -895,15 +901,15 @@ export default function LogsPage() {
     // 已阻断。正常脱敏/扫描未命中不额外加噪声。
     const stateChip =
       row.completeness === 'partial' || row.completeness === 'failed'
-        ? { text: t('logs.stateIncomplete'), cls: 'text-amber-600 dark:text-amber-400' }
+        ? { text: t('logs.stateIncomplete'), cls: 'text-warning-ink' }
         : row.decision === 'passthrough'
           ? { text: t('logs.statePassthrough'), cls: 'text-muted-foreground' }
           : row.decision === 'blocked'
-            ? { text: t('logs.stateBlocked'), cls: 'text-red-600 dark:text-red-400' }
+            ? { text: t('logs.stateBlocked'), cls: 'text-destructive-ink' }
             : row.decision === 'flagged'
               // 出口复检「只记录」：请求已照常上行，所以是告警色而不是红色失败色。
               // 用户第一准则（2026-10-26）：不阻断请求，但必须让他看得见。
-              ? { text: t('logs.stateFlagged'), cls: 'text-amber-600 dark:text-amber-400' }
+              ? { text: t('logs.stateFlagged'), cls: 'text-warning-ink' }
               : null
     // 提取本条记录捕获的敏感词类型标签（如 PHONE, CONNSTR 等），让列表直观展现脱敏项类别
     const itemLabels = Array.from(
@@ -925,15 +931,15 @@ export default function LogsPage() {
         // （实测截图：`API_KEY` 与橙色 `未还原 4` 直接重叠）。拆行后同一行内不再存在
         // 「可收缩元素 与 shrink-0 元素 抢宽度」的竞争，溢出统一由 overflow-hidden 裁切。
         <span
-          className="flex min-w-0 flex-col justify-center gap-0.5 text-[11px]"
+          className="flex min-w-0 flex-col justify-center gap-0.5 text-2xs"
           title={[itemsPreviewText, row.method, row.host, row.path].filter(Boolean).join(' · ')}
         >
           {/* 第一行：计数。关键数字，永不与标签抢宽度 */}
           <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
-            {masked && <span className="shrink-0 whitespace-nowrap text-blue-600 dark:text-blue-400">{t('logs.colMasked')} {row.count}</span>}
-            {restored && <span className="shrink-0 whitespace-nowrap text-emerald-600 dark:text-emerald-400">{t('logs.colRestored')} {row.restored}</span>}
+            {masked && <span className="shrink-0 whitespace-nowrap text-primary-ink">{t('logs.colMasked')} {row.count}</span>}
+            {restored && <span className="shrink-0 whitespace-nowrap text-success-ink">{t('logs.colRestored')} {row.restored}</span>}
             {unresolved && (
-              <span className="shrink-0 whitespace-nowrap text-amber-600 dark:text-amber-400" title={t('logs.unresolvedHint')}>
+              <span className="shrink-0 whitespace-nowrap text-warning-ink" title={t('logs.unresolvedHint')}>
                 {t('logs.colUnresolved')} {row.unresolved}
               </span>
             )}
@@ -955,12 +961,12 @@ export default function LogsPage() {
           {itemLabels.length > 0 && (
             <span className="flex min-w-0 items-center gap-1 overflow-hidden">
               {itemLabels.slice(0, 2).map((lb) => (
-                <span key={lb} className="shrink-0 whitespace-nowrap rounded bg-muted px-1 py-0.2 font-mono text-[9px] text-muted-foreground">
+                <span key={lb} className="shrink-0 whitespace-nowrap rounded bg-muted px-1 py-0.2 font-mono text-2xs text-muted-foreground">
                   {lb}
                 </span>
               ))}
               {itemLabels.length > 2 && (
-                <span className="shrink-0 whitespace-nowrap text-[9px] text-muted-foreground">+{itemLabels.length - 2}</span>
+                <span className="shrink-0 whitespace-nowrap text-2xs text-muted-foreground">+{itemLabels.length - 2}</span>
               )}
             </span>
           )}
@@ -970,7 +976,7 @@ export default function LogsPage() {
     // 无命中的行（PASS/BYPASS/SKIP/ERR…）：展示「—」
     const pathText = [row.method, row.host, row.path].filter(Boolean).join(' ')
     return (
-      <span className="text-[11px] text-muted-foreground/50" title={pathText || row.status || ''}>
+      <span className="text-2xs text-muted-foreground" title={pathText || row.status || ''}>
         —
       </span>
     )
@@ -979,17 +985,39 @@ export default function LogsPage() {
   return (
     <div className="flex h-full min-h-0 flex-col space-y-4">
       {/* 页头 */}
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t('logs.pageTitle')}</h1>
-          <p className="mt-1 text-sm font-medium text-muted-foreground">
-            {t('logs.subtitle')}
-          </p>
-        </div>
-      </div>
+      <PageHeader title={t('logs.pageTitle')} subtitle={t('logs.subtitle')} />
 
-      {/* 筛选栏 */}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* 筛选栏：条件在左、动作在右（actions 由 Toolbar 推到行末） */}
+      <Toolbar
+        actions={<>
+          <Button size="sm" variant="ghost" className="px-2.5" onClick={refresh} title={t('logs.refresh')}>
+            <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} />
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="px-2.5"
+            onClick={loadOlder}
+            loading={olderLoading}
+            disabled={!events.length || olderLoading || (historyMode && !hasOlder)}
+            title={t('logs.olderTitle')}
+          >
+            {!olderLoading && <History className="mr-1 h-3.5 w-3.5" />} {t('logs.older')}
+          </Button>
+          <Button size="sm" variant="outline" className="px-2.5" onClick={doExport} loading={exporting}>
+            {!exporting && <Download className="mr-1 h-3.5 w-3.5" />} {t('logs.export')}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="px-2.5 text-destructive-ink hover:text-destructive-ink"
+            onClick={() => setConfirmClear(true)}
+            disabled={clearing}
+          >
+            {!clearing && <Trash2 className="mr-1 h-3.5 w-3.5" />} {t('common.clear')}
+          </Button>
+        </>}
+      >
         <Select value={filterType} onValueChange={(v) => { setFilterType(v); setPage(1) }}>
           <SelectTrigger className="h-8 w-[156px] text-xs">
             <SelectValue placeholder={t('logs.filterAll')} />
@@ -1012,7 +1040,7 @@ export default function LogsPage() {
             </SelectGroup>
             <SelectGroup>
               <SelectLabel>{t('logs.filterByIngress')}</SelectLabel>
-              <SelectItem value="EXT_ALL" className="font-medium text-blue-600 dark:text-blue-400">
+              <SelectItem value="EXT_ALL" className="font-medium text-primary-ink">
                 <div className="flex items-center gap-1.5">
                   <Globe className="h-3.5 w-3.5" />
                   <span>{t('logs.filterExt')}</span>
@@ -1021,7 +1049,7 @@ export default function LogsPage() {
             </SelectGroup>
             {/* 底层原语：排障时才需要，平时不占视线 */}
             <SelectGroup>
-              <SelectLabel className="text-[10px] text-muted-foreground">{t('logs.filterAdvanced')}</SelectLabel>
+              <SelectLabel className="text-2xs text-muted-foreground">{t('logs.filterAdvanced')}</SelectLabel>
               <SelectItem value="MASK">{t('logs.filterMasked')}</SelectItem>
               <SelectItem value="RESTORE">{t('logs.filterRestored')}</SelectItem>
               <SelectItem value="PASS">{t('logs.filterPass')}</SelectItem>
@@ -1086,7 +1114,7 @@ export default function LogsPage() {
             data-testid="logs-time-anchor"
           />
           {timeAnchor && (
-            <Button size="sm" variant="ghost" className="h-8 px-2 text-xs"
+            <Button size="sm" variant="ghost" className="px-2"
               onClick={() => applyTimeAnchor(null)} title={t('logs.timeAnchorClear')}>
               <X className="h-3.5 w-3.5" />
             </Button>
@@ -1120,7 +1148,7 @@ export default function LogsPage() {
                   { replace: true },
                 )
               }}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               title={t('common.reset')}
             >
               <X className="h-3.5 w-3.5" />
@@ -1128,16 +1156,41 @@ export default function LogsPage() {
           )}
         </div>
 
-        <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
+        {/* 开关型筛选用 chip 底：与旁边的表单控件同属「筛选条件」，
+            而裸开关看起来像设置项，跟下拉/输入框排在一起时整排没有归组感。
+            选中态用 bg-card + 主色边框保持清晰，不用 90% 透明的 bg-primary/10（会被壁纸洗白）。 */}
+        <label
+          className={cn(
+            'flex cursor-pointer select-none items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs transition-colors',
+            fulltext
+              ? 'border-primary/30 bg-card text-primary-ink'
+              : 'border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+          )}
+        >
           <Switch checked={fulltext} onCheckedChange={(v) => { setFulltext(v); setPage(1) }} className="scale-75" />
           <span>{t('logs.fulltext')}</span>
         </label>
-        <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">
+        <label
+          className={cn(
+            'flex cursor-pointer select-none items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs transition-colors',
+            sensitive
+              ? 'border-primary/30 bg-card text-primary-ink'
+              : 'border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+          )}
+        >
           <Switch checked={sensitive} onCheckedChange={(v) => { setSensitive(v); setPage(1) }} className="scale-75" />
           <span>{t('logs.sensitiveOnly')}</span>
         </label>
         {/* 切开关会改变列表行数：重置页码，避免停留在越界的空页（与全文搜索/仅敏感同口径） */}
-        <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground" title={t('logs.hideNoiseTitle')}>
+        <label
+          title={t('logs.hideNoiseTitle')}
+          className={cn(
+            'flex cursor-pointer select-none items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs transition-colors',
+            hideNoise
+              ? 'border-primary/30 bg-card text-primary-ink'
+              : 'border-border bg-card text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+          )}
+        >
           <Switch
             checked={hideNoise}
             onCheckedChange={(v) => { setHideNoise(v); setPage(1); writeHideNoisePreference(v) }}
@@ -1165,7 +1218,7 @@ export default function LogsPage() {
           <Button
             size="sm"
             variant={modeState === 'trace' ? 'default' : 'outline'}
-            className="h-8 px-2.5 text-xs"
+            className="px-2.5"
             onClick={toggleTrace}
             disabled={modeBusy}
             title={t('logs.traceTitle')}
@@ -1175,45 +1228,17 @@ export default function LogsPage() {
               : t('logs.traceStart')}
           </Button>
         </div>
+      </Toolbar>
 
-        <div className="ml-auto flex items-center gap-1.5">
-          <Button size="sm" variant="ghost" className="h-8 px-2.5" onClick={refresh} title={t('logs.refresh')}>
-            <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} />
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 px-2.5 text-xs"
-            onClick={loadOlder}
-            loading={olderLoading}
-            disabled={!events.length || olderLoading || (historyMode && !hasOlder)}
-            title={t('logs.olderTitle')}
-          >
-            {!olderLoading && <History className="mr-1 h-3.5 w-3.5" />} {t('logs.older')}
-          </Button>
-          <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" onClick={doExport} loading={exporting}>
-            {!exporting && <Download className="mr-1 h-3.5 w-3.5" />} {t('logs.export')}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8 px-2.5 text-xs text-red-600 hover:text-red-600 dark:text-red-400"
-            onClick={() => setConfirmClear(true)}
-            disabled={clearing}
-          >
-            {!clearing && <Trash2 className="mr-1 h-3.5 w-3.5" />} {t('common.clear')}
-          </Button>
-        </div>
-      </div>
-
-      {/* 状态颜色说明：问号 Tooltip（与全局统一，hover 查看） */}
-      <div className="flex items-center gap-1.5 px-1">
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" />
-            </TooltipTrigger>
-            <TooltipContent side="right" className="max-w-[340px] space-y-1">
+      {/* 状态说明图例：问号气泡（点击/键盘均可展开，与全站 Hint 一致）。
+           原为孤立占一行的右上角 ?，改为紧跟工具栏的右对齐辅助元素，减少独立漂浮层级。 */}
+      <div className="flex items-center justify-end gap-1.5 px-1 -mt-1">
+        <Hint
+          text={t('logs.legendTitle')}
+          side="right"
+          contentClassName="max-w-[340px] space-y-1"
+          content={
+            <>
               <div className="font-semibold">{t('logs.legendTitle')}</div>
               {OUTCOME_ORDER.map((k) => {
                 const Icon = OUTCOME_META[k].icon
@@ -1227,19 +1252,19 @@ export default function LogsPage() {
                   </div>
                 )
               })}
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+            </>
+          }
+        />
       </div>
 
       {historyMode && (
-        <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-400">
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-1.5 text-xs text-warning-ink">
           <span>
             {timeAnchor
               ? tf('logs.historyBannerAt', { t: dayjs(timeAnchor * 1000).format('YYYY-MM-DD HH:mm') })
               : t('logs.historyBanner')}
           </span>
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={backToLive}>
+          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={backToLive}>
             {t('logs.backToLive')}
           </Button>
         </div>
@@ -1248,13 +1273,13 @@ export default function LogsPage() {
       {/* 表格（虚拟滚动） */}
       <div
         ref={scrollRef}
-        className="min-h-0 flex-1 overflow-auto rounded-xl border bg-card shadow-[var(--shadow-card)]"
+        className="min-h-0 flex-1 overflow-auto rounded-xl border bg-card shadow-card"
       >
         <div className={LOG_MIN_W}>
         {/* 表头（固定）：时间(两行 日期+时间) / 结论 / 上游 / 模型 / 处理摘要(脱敏·还原 宽列) / 状态 / 耗时 / 费用 */}
         <div
           className={cn(
-            'sticky top-0 z-10 grid gap-2 border-b bg-card px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground',
+            'sticky top-0 z-10 grid gap-2 border-b bg-card px-3 py-2 text-2xs font-semibold uppercase tracking-wide text-muted-foreground',
             LOG_GRID_COLS,
           )}
         >
@@ -1276,16 +1301,18 @@ export default function LogsPage() {
               <div
                 key={`${row._audit ? 'a' : 'e'}-${row.seq}-${vi.index}`}
                 className={cn(
-                  'absolute left-0 top-0 grid w-full items-center gap-2 overflow-hidden border-b px-3 text-[12px]',
+                  // bg-card 必顶：虚拟列表行是 absolute 定位，父容器一旦半透明（自定背景开启时
+                  // 卡片跟随 --card-opacity），壁纸就从行底下透上来，同一张表每行底色不一样。
+                  'absolute left-0 top-0 grid w-full items-center gap-2 overflow-hidden border-b bg-card px-3 text-[12px]',
                   LOG_GRID_COLS,
                   'transition-colors hover:bg-muted/40',
-                  row._audit && 'bg-amber-500/5 hover:bg-amber-500/10',
+                  row._audit && 'bg-warning/5 hover:bg-warning/10',
                 )}
                 style={{ height: vi.size, transform: `translateY(${vi.start}px)` }}
                 onClick={() => openDetail(row)}
               >
                 {/* 时间：上日期下时间（用户要求，一行放不下就两行） */}
-                <span className="flex flex-col leading-tight tabular-nums text-[11px] text-muted-foreground shrink-0">
+                <span className="flex flex-col leading-tight tabular-nums text-2xs text-muted-foreground shrink-0">
                   <span>{row.ts ? dayjs(row.ts * 1000).format('MM-DD') : '—'}</span>
                   <span className="opacity-70">{row.ts ? dayjs(row.ts * 1000).format('HH:mm:ss') : ''}</span>
                 </span>
@@ -1306,16 +1333,16 @@ export default function LogsPage() {
                   title={`${(row as { ingress?: string }).ingress === 'ext' ? t('logs.badgeExt') : t('logs.ingress.proxy')}${row.host ? ` · ${row.host}${row.path ?? ''}` : ''}`}
                 >
                   {(row as { ingress?: string }).ingress === 'ext' && (
-                    <Globe className="h-3 w-3 shrink-0 text-blue-600 dark:text-blue-400" />
+                    <Globe className="h-3 w-3 shrink-0 text-primary-ink" />
                   )}
                   {(row as { ingress?: string }).ingress === 'ext' &&
                     !row._audit &&
                     (row.path === '/ext/mask-file' || (row.dialog && row.dialog.includes('文件脱敏'))) && (
                       <span className="shrink-0" title={(row as { dialog?: string }).dialog ?? t('logs.badgeDoc')}>
-                        <FileText className="h-3 w-3 text-amber-600 dark:text-amber-400" />
+                        <FileText className="h-3 w-3 text-warning-ink" />
                       </span>
                     )}
-                  <span className="min-w-0 truncate text-[11px] font-medium text-foreground/85">
+                  <span className="min-w-0 truncate text-2xs font-medium text-foreground/85">
                     {(row as { ingress?: string }).ingress === 'ext'
                       ? (row.host || t('logs.webChat'))
                       : String(row.upstream || row.client_app || '—')}
@@ -1326,11 +1353,11 @@ export default function LogsPage() {
                   className="flex min-w-0 items-center gap-1.5"
                   title={`${row.host ?? ''}${row.path ?? ''}${row.model ? `\n${tf('logs.modelIn', { m: row.model })}` : ''}${(row as { _detailSeq?: number })._detailSeq ? `\n${tf('logs.restoredN', { n: row.restored ?? 0 })}` : ''}`}
                 >
-                  <code className="truncate font-mono text-[11px]">
+                  <code className="truncate font-mono text-2xs">
                     {row.model || ((row as { ingress?: string }).ingress === 'ext' ? t('logs.webChat') : (row.upstream ? '—' : row.host) || '—')}
                   </code>
                   {row.stream_actual && (
-                    <span className="shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-[9px] text-muted-foreground">
+                    <span className="shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-2xs text-muted-foreground">
                       {row.stream_actual === 'stream' ? t('logs.streaming') : t('logs.whole')}
                     </span>
                   )}
@@ -1343,22 +1370,22 @@ export default function LogsPage() {
                   {/* transport 观测阶段：只有非 complete 才值得显示。complete 是 100% 的常态，
                       每行都印一遍「交换完成」只是噪声（实测最近 7 天 6445 条 RESTORE 全是 complete）。 */}
                   {'transport' in row && row.transport && row.transport.phase && row.transport.phase !== 'complete' && (
-                    <span className="max-w-[6.5rem] truncate text-[9px] text-muted-foreground" title={t('transport.caution')}>
+                    <span className="max-w-[6.5rem] truncate text-2xs text-muted-foreground" title={t('transport.caution')}>
                       {t(`transport.phase.${row.transport.phase}`)}
                     </span>
                   )}
                 </span>
                 {/* 耗时：端到端优先；只有脱敏耗时时显式标注口径（见上方 durationCell） */}
-                <span className="text-right tabular-nums text-[11px] text-muted-foreground">
+                <span className="text-right tabular-nums text-2xs text-muted-foreground">
                   {durationCell(row)}
                 </span>
                 {/* 费用（RESTORE 事件由后端按模型×usage 估算） */}
-                <span className="text-right tabular-nums text-[11px]">
+                <span className="text-right tabular-nums text-2xs">
                   {(row as { cost_usd?: number }).cost_usd != null && (row as { cost_usd?: number }).cost_usd! > 0
-                    ? <span className="text-emerald-600 dark:text-emerald-400">${(row as { cost_usd?: number }).cost_usd!.toFixed(4)}</span>
+                    ? <span className="text-success-ink">${(row as { cost_usd?: number }).cost_usd!.toFixed(4)}</span>
                     : (row as { ingress?: string }).ingress === 'ext'
-                      ? <span className="text-[10px] text-muted-foreground/40 font-mono">{t('logs.free')}</span>
-                      : <span className="text-muted-foreground/50">—</span>}
+                      ? <span className="text-2xs text-muted-foreground font-mono">{t('logs.free')}</span>
+                      : <span className="text-muted-foreground">—</span>}
                 </span>
               </div>
             )
@@ -1367,11 +1394,11 @@ export default function LogsPage() {
 
         {paged.length === 0 && !logsQuery.isLoading && (
           <div className="flex flex-col items-center justify-center py-20 text-center">
-            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/70">
+            <div className="mb-3 flex h-11 w-11 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground">
               <Search className="h-5 w-5 stroke-[1.5]" />
             </div>
             <p className="text-sm font-semibold text-foreground/80">{t('logs.noEvents')}</p>
-            <p className="mt-1 max-w-sm text-xs text-muted-foreground/70">{t('logs.noEventsHint')}</p>
+            <p className="mt-1 max-w-sm text-xs text-muted-foreground">{t('logs.noEventsHint')}</p>
           </div>
         )}
         {paged.length === 0 && logsQuery.isLoading && (
@@ -1389,7 +1416,7 @@ export default function LogsPage() {
           {tailOpen ? '▾' : '▸'} {tf('logs.tailTitle', { n: tailData.length })}
         </button>
         {tailOpen && (
-          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-3 font-mono text-2xs leading-relaxed text-muted-foreground">
             {tailData.join(String.fromCharCode(10)) || t('logs.tailEmpty')}
           </pre>
         )}

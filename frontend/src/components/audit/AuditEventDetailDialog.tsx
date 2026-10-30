@@ -19,7 +19,7 @@ function CopyEvidenceBtn({ text }: { text: string }) {
     <Button
       size="sm"
       variant="ghost"
-      className="h-5 px-1.5 text-[10px]"
+      className="h-5 px-1.5 text-2xs"
       onClick={async () => {
         try {
           await copyText(text)
@@ -33,22 +33,28 @@ function CopyEvidenceBtn({ text }: { text: string }) {
   )
 }
 
+/** 审计严重度 → 配色。
+ *
+ *  这里是**刻意不收敛到 --success/--warning/--destructive 的**：四级严重度是一条连续强度
+ *  刻度（CRITICAL > HIGH > MEDIUM > LOW），不是「成功/警告/失败」三态。压成 3 个 token
+ *  会让 CRITICAL 与 HIGH 同色，反而丢掉「该先看哪条」。图表分类色同理。
+ *  但要遵守两条：浅色下文字必须用 700 档（6xx 在卡片上只有 3.5–3.6:1）。 */
 export const SEVERITY_META: Record<AuditSeverity, { labelKey: string; cls: string }> = {
   CRITICAL: {
     labelKey: 'audit.sevCritical',
-    cls: 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400',
+    cls: 'border-destructive/40 bg-destructive/10 text-destructive-ink',
   },
   HIGH: {
     labelKey: 'audit.sevHigh',
-    cls: 'border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-400',
+    cls: 'border-orange-500/40 bg-orange-500/10 text-orange-700 dark:text-orange-400',
   },
   MEDIUM: {
     labelKey: 'audit.sevMedium',
-    cls: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+    cls: 'border-warning/40 bg-warning/10 text-warning-ink',
   },
   LOW: {
     labelKey: 'audit.sevLow',
-    cls: 'border-slate-400/40 bg-slate-400/10 text-slate-600 dark:text-slate-400',
+    cls: 'border-muted-foreground/40 bg-muted-foreground/10 text-muted-foreground dark:text-slate-400',
   },
 }
 
@@ -196,7 +202,7 @@ export function AuditEventDetailDialog({
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
                   {isInfoMode ? t('audit.signalInfo') : t('audit.detailTitle')}
-                  <Badge variant="outline" className={cn('rounded-full text-[11px]', sev.cls)}>
+                  <Badge variant="outline" className={cn('rounded-full text-2xs', sev.cls)}>
                     {t(sev.labelKey)}
                   </Badge>
                 </DialogTitle>
@@ -214,13 +220,13 @@ export function AuditEventDetailDialog({
                   <div className="mb-1 text-xs font-semibold text-muted-foreground">{t('audit.dialogSignalType')}</div>
                   <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">{event.signal_type}</code>
                 </div>
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
-                  <div className="mb-1 text-xs font-semibold text-amber-700 dark:text-amber-400">{t('audit.dialogReason')}</div>
-                  <p className="text-xs leading-relaxed text-amber-800/90 dark:text-amber-200/90">{t(reasonKey)}</p>
+                <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+                  <div className="mb-1 text-xs font-semibold text-warning-ink">{t('audit.dialogReason')}</div>
+                  <p className="text-xs leading-relaxed text-warning-ink">{t(reasonKey)}</p>
                 </div>
-                <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
-                  <div className="mb-1 text-xs font-semibold text-red-700 dark:text-red-400">{t('audit.dialogImpact')}</div>
-                  <p className="text-xs leading-relaxed text-red-800/90 dark:text-red-200/90">{t(impactKey)}</p>
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                  <div className="mb-1 text-xs font-semibold text-destructive-ink">{t('audit.dialogImpact')}</div>
+                  <p className="text-xs leading-relaxed text-destructive-ink">{t(impactKey)}</p>
                 </div>
                 {event.evidence && !isInfoMode && (
                   <div>
@@ -228,7 +234,7 @@ export function AuditEventDetailDialog({
                       <span className="text-xs font-semibold text-muted-foreground">{t('audit.evidence')}</span>
                       <CopyEvidenceBtn text={event.evidence} />
                     </div>
-                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-2.5 font-mono text-[11px] leading-relaxed text-foreground">
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-2.5 font-mono text-2xs leading-relaxed text-foreground">
                       {event.evidence}
                     </pre>
                   </div>
@@ -252,7 +258,7 @@ export function AuditEventDetailDialog({
                         <div>{tf('audit.scanCostBytes', { kb: String(Math.round(event.audit_scan_bytes / 1024)) })}</div>
                       )}
                       {event.audit_scan_truncated && (
-                        <div className="text-amber-700 dark:text-amber-400">{t('audit.scanTruncated')}</div>
+                        <div className="text-warning-ink">{t('audit.scanTruncated')}</div>
                       )}
                     </div>
                   </div>

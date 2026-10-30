@@ -16,6 +16,7 @@ import { useVisibility } from '@/lib/useVisibility'
  */
 const AUDIT_WINDOW = 500
 import { Trash2, Radar, ShieldCheck, Info, Play, Loader2, X, FileText, HelpCircle, Activity, RefreshCw, Ban, Plus } from 'lucide-react'
+import { Hint } from '@/components/common/Hint'
 import {
   getAuditEvents,
   clearAudit,
@@ -27,6 +28,7 @@ import {
 import { getConfig, patchConfig, type ConfigPatch } from '@/api/settings'
 import type { AuditEvent, AuditSeverity } from '@/types/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { PageHeader } from '@/components/patterns/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -48,7 +50,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { AuditEventDetailDialog, SIGNAL_INFO, SIGNAL_ORDER, severityMeta, signalInfo } from '@/components/audit/AuditEventDetailDialog'
@@ -294,14 +295,10 @@ export default function AuditPage() {
   return (
     <div className="space-y-5">
       {/* 页头 */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t('nav.audit')}</h1>
-          <p className="mt-1 text-sm font-medium text-muted-foreground">
-            {t('audit.subtitle')}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+      <PageHeader
+        title={t('nav.audit')}
+        subtitle={t('audit.subtitle')}
+        actions={<>
           <Button
             size="sm"
             variant="default"
@@ -321,12 +318,12 @@ export default function AuditPage() {
             variant="outline"
             onClick={() => setConfirmClearAudit(true)}
             loading={clearMutation.isPending}
-            className="gap-1.5 text-destructive hover:text-destructive"
+            className="gap-1.5 text-destructive-ink hover:text-destructive-ink"
           >
             {!clearMutation.isPending && <Trash2 className="h-4 w-4" />} {t('common.clear')}
           </Button>
-        </div>
-      </div>
+        </>
+      } />
 
       {/* 二级选项卡切换：事件日志 vs 审计探针与规则 */}
       <Tabs value={auditSubTab} onValueChange={(v) => setAuditSubTab(v as 'events' | 'timeline' | 'probe')} className="w-full">
@@ -338,15 +335,13 @@ export default function AuditPage() {
 
         <TabsContent value="probe" className="space-y-4 pt-2">
           {/* 主动安全探针扫描执行卡片 */}
-          <Card className="border bg-card shadow-[var(--shadow-card)]">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center gap-2 space-y-0">
-              <Activity className="h-5 w-5 text-primary" />
-              <div>
-                <CardTitle className="text-sm font-semibold">{t('settings.security.auditProbe')}</CardTitle>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {t('settings.advanced.auditProbeDesc')}
-                </p>
-              </div>
+              <Activity className="h-5 w-5 text-primary-ink" />
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.security.auditProbe')}
+                <Hint text={t('settings.advanced.auditProbeDesc')} />
+              </CardTitle>
               <Badge variant="outline" className="ml-auto text-xs">
                 {auditRunning ? t('settings.advanced.auditRunning') : (auditJob?.phase || t('common.idle'))}
               </Badge>
@@ -370,12 +365,7 @@ export default function AuditPage() {
                 </div>
                 <div>
                   <Label className="flex items-center gap-1 text-xs">{t('settings.advanced.profile')}
-                    <TooltipProvider delayDuration={200}>
-                      <Tooltip>
-                        <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
-                        <TooltipContent className="max-w-[280px] text-xs">{t('settings.advanced.profileTooltip')}</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    <Hint text={t('settings.advanced.profileTooltip')} />
                   </Label>
                   <Select value={auditProfile} onValueChange={setAuditProfile}>
                     <SelectTrigger className="mt-1 h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
@@ -402,18 +392,18 @@ export default function AuditPage() {
               {auditRunning && (
                 <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
                   <div className="flex items-center gap-2">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary-ink" />
                     <span className="text-xs font-medium">{auditJob?.phase || t('settings.advanced.auditRunning')}</span>
-                    <Badge variant="outline" className="ml-auto shrink-0 font-mono text-[11px]">{auditDone}/{auditTotal}</Badge>
+                    <Badge variant="outline" className="ml-auto shrink-0 font-mono text-2xs">{auditDone}/{auditTotal}</Badge>
                   </div>
                   <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-gradient-to-r from-primary to-cyan-500 transition-[width] duration-500" style={{ width: `${auditProgress}%` }} />
+                    <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${auditProgress}%` }} />
                   </div>
                 </div>
               )}
 
               {!auditRunning && auditJob?.phase && (
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {t('settings.advanced.lastTask')}{auditJob.phase}
                   {auditJob.error ? tf('settings.advanced.failed', { e: auditJob.error.slice(0, 120) }) : ''}
                 </p>
@@ -422,11 +412,11 @@ export default function AuditPage() {
           </Card>
 
       {/* ===== 审计配置（基础 + 高级） ===== */}
-      <Card className="border bg-card shadow-[var(--shadow-card)]">
+      <Card className="border bg-card shadow-card">
         <CardHeader className="flex-row items-center gap-2 space-y-0">
-          <ShieldCheck className="h-5 w-5 text-primary" />
-          <CardTitle className="text-sm">{t('audit.config')}</CardTitle>
-          <span className={cn('ml-auto rounded-full px-2.5 py-0.5 text-xs font-medium', auditCfg.enabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-muted text-muted-foreground')}>
+          <ShieldCheck className="h-5 w-5 text-primary-ink" />
+          <CardTitle className="text-sm font-semibold">{t('audit.config')}</CardTitle>
+          <span className={cn('ml-auto rounded-full px-2.5 py-0.5 text-xs font-medium', auditCfg.enabled ? 'bg-success/10 text-success-ink' : 'bg-muted text-muted-foreground')}>
             {auditCfg.enabled ? t('audit.enabled') : t('audit.disabled')}
           </span>
         </CardHeader>
@@ -443,7 +433,7 @@ export default function AuditPage() {
                   <span className="text-[13px] font-medium">{title}</span>
                   <Switch checked={!!(auditCfg[k] as boolean)} onCheckedChange={(v) => saveAudit({ op: 'set', path: [k], value: v })} className="scale-90" />
                 </div>
-                <p className="mt-1 text-[11px] text-muted-foreground">{desc}</p>
+                <p className="mt-1 text-2xs text-muted-foreground">{desc}</p>
               </label>
             ))}
           </div>
@@ -462,13 +452,13 @@ export default function AuditPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">
+              <p className="mt-1 text-2xs text-muted-foreground">
                 {auditPreset === 'pure' ? t('audit.presetPureDesc')
                   : auditPreset === 'verbose' ? t('audit.presetVerboseDesc')
                   : t('audit.presetStrictDesc')}
               </p>
               {/* 承诺文案由 fail_closed **实时推导**，不硬编码（否则会与行为脱节） */}
-              <p className={cn('mt-1.5 text-[11px] font-medium', auditBlockOn ? 'text-amber-600 dark:text-amber-500' : 'text-emerald-600 dark:text-emerald-400')}>
+              <p className={cn('mt-1.5 text-2xs font-medium', auditBlockOn ? 'text-warning-ink' : 'text-success-ink')}>
                 {auditBlockOn ? t('audit.promiseBlockCritical') : t('audit.promiseNoBlock')}
               </p>
             </div>
@@ -477,14 +467,14 @@ export default function AuditPage() {
                 <span className="text-[13px] font-medium">{t('audit.blockSwitch')}</span>
                 <Switch checked={auditBlockOn} onCheckedChange={(v) => saveAudit({ op: 'set', path: ['fail_closed'], value: v })} className="scale-90" />
               </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('audit.blockSwitchDesc')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('audit.blockSwitchDesc')}</p>
             </div>
             <label className="flex cursor-pointer select-none flex-col justify-between rounded-lg border bg-muted/30 p-3 transition-colors hover:border-primary/40">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[13px] font-medium">{t('audit.autoReport')}</span>
                 <Switch checked={!!(auditCfg.auto_report as boolean)} onCheckedChange={(v) => saveAudit({ op: 'set', path: ['auto_report'], value: v })} className="scale-90" />
               </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('audit.reportHint')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('audit.reportHint')}</p>
             </label>
             <div className="rounded-lg border bg-muted/30 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -499,7 +489,7 @@ export default function AuditPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('audit.floorHint')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('audit.floorHint')}</p>
             </div>
           </div>
 
@@ -507,7 +497,7 @@ export default function AuditPage() {
           <div>
             <div className="mb-2 flex items-center gap-1.5 text-sm font-medium">
               {t('audit.signalsTitle2')}
-              <span className="inline-flex items-center gap-1 text-[11px] font-normal text-muted-foreground" title={t('audit.clickHint2')}>
+              <span className="inline-flex items-center gap-1 text-2xs font-normal text-muted-foreground" title={t('audit.clickHint2')}>
                 <Info className="h-3 w-3" /> {t('audit.clickHint')}
               </span>
             </div>
@@ -540,9 +530,9 @@ export default function AuditPage() {
         </CardContent>
       </Card>
           {/* ===== 命令拦截（W2-3）：模式 / 通道 / 规则 / 白名单 + 残留风险 ===== */}
-          <Card className="border bg-card shadow-[var(--shadow-card)]">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center gap-2 space-y-0">
-              <Ban className="h-5 w-5 text-primary" />
+              <Ban className="h-5 w-5 text-primary-ink" />
               <div>
                 <CardTitle className="text-sm font-semibold">{t('audit.cmd.title')}</CardTitle>
                 <p className="mt-0.5 text-xs text-muted-foreground">{t('audit.cmd.desc')}</p>
@@ -567,7 +557,7 @@ export default function AuditPage() {
                     </Select>
                   </div>
                   {/* 模式后果写清楚（含 block 在流式/非流式下的差异）——UI 承诺必须等于行为 */}
-                  <p className="mt-1 text-[11px] text-muted-foreground">
+                  <p className="mt-1 text-2xs text-muted-foreground">
                     {cmdMode === 'observe' ? t('audit.cmd.modeObserveDesc')
                       : cmdMode === 'rewrite' ? t('audit.cmd.modeRewriteDesc') : t('audit.cmd.modeBlockDesc')}
                   </p>
@@ -583,7 +573,7 @@ export default function AuditPage() {
                     ))}
                   </div>
                   {cmdChannels.includes('text') && (
-                    <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-500">{t('audit.cmd.channelTextWarn')}</p>
+                    <p className="mt-1.5 text-2xs text-warning-ink">{t('audit.cmd.channelTextWarn')}</p>
                   )}
                 </div>
               </div>
@@ -591,9 +581,9 @@ export default function AuditPage() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium">{t('audit.cmd.patterns')}</span>
-                  <span className="text-[11px] text-muted-foreground">{t('audit.cmd.ruleHint')}</span>
+                  <span className="text-2xs text-muted-foreground">{t('audit.cmd.ruleHint')}</span>
                   <Button
-                    size="sm" variant="outline" className="ml-auto h-7 gap-1 text-xs"
+                    size="sm" variant="outline" className="ml-auto h-7 gap-1"
                     onClick={() => { setCmdError(''); setCmdDraft({ id: '', label: '', regex: '', builtin: false }) }}
                   >
                     <Plus className="h-3.5 w-3.5" />{t('audit.cmd.addRule')}
@@ -614,16 +604,16 @@ export default function AuditPage() {
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
                           <span className="text-xs font-medium">{p.label || p.id}</span>
-                          {p.builtin && <Badge variant="outline" className="text-[10px]">{t('audit.cmd.builtin')}</Badge>}
+                          {p.builtin && <Badge variant="outline" className="text-2xs">{t('audit.cmd.builtin')}</Badge>}
                         </div>
-                        <code className="mt-0.5 block truncate font-mono text-[11px] text-muted-foreground" title={p.regex}>{p.regex}</code>
+                        <code className="mt-0.5 block truncate font-mono text-2xs text-muted-foreground" title={p.regex}>{p.regex}</code>
                       </div>
                       <Button
-                        size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-[11px]"
+                        size="2xs" variant="ghost" className="shrink-0 px-1.5"
                         onClick={() => { setCmdError(''); setCmdDraft({ id: p.id ?? '', label: p.label, regex: p.regex, builtin: !!p.builtin }) }}
                       >{t('audit.cmd.edit')}</Button>
                       <Button
-                        size="sm" variant="ghost" className="h-6 shrink-0 px-1.5 text-[11px] text-destructive hover:text-destructive"
+                        size="2xs" variant="ghost" className="shrink-0 px-1.5 text-destructive-ink hover:text-destructive-ink"
                         onClick={() => saveCmdPatterns(cmdPatterns.filter((x) => x.id !== p.id))}
                       >{t('audit.cmd.delete')}</Button>
                     </div>
@@ -634,7 +624,7 @@ export default function AuditPage() {
               <div>
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium">{t('audit.cmd.allow')}</span>
-                  <span className="text-[11px] text-muted-foreground">{t('audit.cmd.allowHint')}</span>
+                  <span className="text-2xs text-muted-foreground">{t('audit.cmd.allowHint')}</span>
                 </div>
                 <div className="space-y-1.5">
                   {cmdAllow.map((rx, i) => (
@@ -649,7 +639,7 @@ export default function AuditPage() {
                         }}
                       />
                       <Button
-                        size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive"
+                        size="xs" variant="ghost" className="shrink-0 px-2 text-destructive-ink hover:text-destructive-ink"
                         onClick={() => saveCmdBlock({ op: 'set', path: ['allow_patterns'], value: cmdAllow.filter((_, j) => j !== i) })}
                       >{t('audit.cmd.delete')}</Button>
                     </div>
@@ -661,7 +651,7 @@ export default function AuditPage() {
                       onChange={(e) => setCmdAllowDraft(e.target.value)}
                     />
                     <Button
-                      size="sm" variant="outline" className="h-7 shrink-0 gap-1 text-xs"
+                      size="sm" variant="outline" className="h-7 shrink-0 gap-1"
                       disabled={!cmdAllowDraft.trim()}
                       onClick={() => {
                         void saveCmdBlock({ op: 'list_add', path: ['allow_patterns'], value: [cmdAllowDraft.trim()] })
@@ -672,20 +662,20 @@ export default function AuditPage() {
                 </div>
               </div>
 
-              <p className="text-[11px] text-muted-foreground">{t('audit.cmd.risk')}</p>
+              <p className="text-2xs text-muted-foreground">{t('audit.cmd.risk')}</p>
             </CardContent>
           </Card>
         </TabsContent>
 
         <TabsContent value="events" className="space-y-4 pt-2">
       {/* 信号识别轻量提示 */}
-      <div className="flex items-center gap-2 rounded-xl border border-blue-500/20 bg-blue-500/5 px-4 py-2.5 text-xs text-muted-foreground">
-        <Info className="h-4 w-4 shrink-0 text-blue-500" />
+      <div className="flex items-center gap-2 rounded-xl border bg-muted/40 px-4 py-2.5 text-xs text-muted-foreground">
+        <Info className="h-4 w-4 shrink-0" />
         <span>{t('audit.judgeCompact')}</span>
       </div>
 
       {/* 审计事件列表 */}
-      <Card className="border bg-card shadow-[var(--shadow-card)]">
+      <Card className="border bg-card shadow-card">
         <CardContent className="p-4">
           <div className="mb-3 flex items-center gap-2">
             <Radar className="h-4 w-4 text-muted-foreground" />
@@ -718,14 +708,14 @@ export default function AuditPage() {
                 </SelectContent>
               </Select>
               {(sevFilter !== '__ALL__' || sigFilter !== '__ALL__') && (
-                <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => { setSevFilter('__ALL__'); setSigFilter('__ALL__') }}>
+                <Button size="sm" variant="ghost" className="px-2" onClick={() => { setSevFilter('__ALL__'); setSigFilter('__ALL__') }}>
                   {t('common.reset')}
                 </Button>
               )}
               {/* 窗口填满时把「筛选作用域」说出来（审计 L8）：筛选在前端做，
                   命中项若在窗口之外就看不到，此时「无匹配」不能读作「不存在」。 */}
               {windowFull && (sevFilter !== '__ALL__' || sigFilter !== '__ALL__') && (
-                <span className="text-[11px] text-amber-600 dark:text-amber-500">
+                <span className="text-2xs text-warning-ink">
                   {tf('audit.filterWindowHint', { n: AUDIT_WINDOW })}
                 </span>
               )}
@@ -743,7 +733,7 @@ export default function AuditPage() {
                引擎没起来 / 请求被拒 / 后端 5xx 时，「什么都没读到」的正确解读是
                「审计这一层现在是瞎的」，而不是「一切正常」。 */
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-destructive/40 bg-destructive/5 py-12 text-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10 text-destructive-ink">
                 <HelpCircle className="h-6 w-6" />
               </div>
               <h4 className="mt-3 text-sm font-semibold text-foreground">{t('audit.loadFailTitle')}</h4>
@@ -751,14 +741,14 @@ export default function AuditPage() {
                 {t('audit.loadFailDesc')}
               </p>
               {eventsErrorObj ? (
-                <p className="mt-1 max-w-md break-all font-mono text-[11px] text-destructive/80">
+                <p className="mt-1 max-w-md break-all font-mono text-2xs text-destructive-ink">
                   {String((eventsErrorObj as Error)?.message || eventsErrorObj)}
                 </p>
               ) : null}
               <Button
                 size="sm"
                 variant="outline"
-                className="mt-4 gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
+                className="mt-4 gap-1.5 border-destructive/40 text-destructive-ink hover:bg-destructive/10"
                 onClick={() => { void refetchEvents() }}
               >
                 <RefreshCw className="h-3.5 w-3.5" />
@@ -766,8 +756,8 @@ export default function AuditPage() {
               </Button>
             </div>
           ) : events.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-emerald-500/30 bg-emerald-500/5 py-12 text-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-success/30 bg-success/5 py-12 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-success/10 text-success-ink">
                 <ShieldCheck className="h-6 w-6" />
               </div>
               <h4 className="mt-3 text-sm font-semibold text-foreground">{t('audit.emptySafeTitle')}</h4>
@@ -777,7 +767,7 @@ export default function AuditPage() {
               <Button
                 size="sm"
                 variant="outline"
-                className="mt-4 gap-1.5 border-emerald-500/30 text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400"
+                className="mt-4 gap-1.5 border-success/30 text-success-ink hover:bg-success/10 hover:text-success-ink"
                 onClick={() => {
                   setAuditSubTab('probe')
                   setConfirmAudit(true)
@@ -789,11 +779,11 @@ export default function AuditPage() {
             </div>
           ) : filteredEvents.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
-              <Radar className="mx-auto mb-3 h-8 w-8 text-muted-foreground/50" />
+              <Radar className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
               {t('audit.noEventsAfterFilter')}
               {/* 窗口满时补一句限定语：筛选只作用于已加载的 N 条（审计 L8）。 */}
               {windowFull && (
-                <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-500">
+                <p className="mt-1.5 text-xs text-warning-ink">
                   {tf('audit.noEventsWindowNote', { n: AUDIT_WINDOW })}
                 </p>
               )}
@@ -824,7 +814,7 @@ export default function AuditPage() {
                         title={`${t('common.viewDetail')}：${t(info.labelKey ?? info.label ?? '')}`}
                       >
                         <TableCell className="py-2 pr-3">
-                          <Badge variant="outline" className={cn('shrink-0 rounded-full text-[11px]', sev.cls)}>
+                          <Badge variant="outline" className={cn('shrink-0 rounded-full text-2xs', sev.cls)}>
                             {t(sev.labelKey)}
                           </Badge>
                         </TableCell>
@@ -857,11 +847,11 @@ export default function AuditPage() {
         <TabsContent value="timeline" className="space-y-4 pt-2">
           {/* 高风险操作时间线（W2-5）：**视图级**放宽 to floor=LOW，且只看 S9 危险动作。
               不新建页面/表；默认事件视图仍按用户档位过滤，切回来事件数不增加。 */}
-          <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-2.5 text-xs text-muted-foreground">
-            <Info className="h-4 w-4 shrink-0 text-amber-500" />
+          <div className="flex items-center gap-2 rounded-xl border border-warning/20 bg-warning/5 px-4 py-2.5 text-xs text-muted-foreground">
+            <Info className="h-4 w-4 shrink-0 text-warning-ink" />
             <span>{t('audit.timelineHint')}</span>
           </div>
-          <Card className="border bg-card shadow-[var(--shadow-card)]">
+          <Card className="border bg-card shadow-card">
             <CardContent className="p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Radar className="h-4 w-4 text-muted-foreground" />
@@ -877,12 +867,12 @@ export default function AuditPage() {
               ) : timelineError ? (
                 /* 读失败与「零发现」必须视觉可分（同审计 L6 的口径） */
                 <div className="py-10 text-center text-xs text-muted-foreground">
-                  <HelpCircle className="mx-auto mb-2 h-6 w-6 text-destructive/70" />
+                  <HelpCircle className="mx-auto mb-2 h-6 w-6 text-destructive-ink" />
                   {t('audit.loadFailTitle')}
                 </div>
               ) : timelineEvents.length === 0 ? (
                 <div className="py-10 text-center text-xs text-muted-foreground">
-                  <Radar className="mx-auto mb-3 h-8 w-8 text-muted-foreground/50" />
+                  <Radar className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
                   {t('audit.timelineEmpty')}
                 </div>
               ) : (
@@ -896,13 +886,13 @@ export default function AuditPage() {
                         onClick={() => setDetailEvent(ev)}
                         title={t('common.viewDetail')}
                       >
-                        <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-amber-500" />
+                        <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-warning" />
                         <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="outline" className={cn('rounded-full text-[11px]', sev.cls)}>{t(sev.labelKey)}</Badge>
+                          <Badge variant="outline" className={cn('rounded-full text-2xs', sev.cls)}>{t(sev.labelKey)}</Badge>
                           <span className="text-xs text-muted-foreground">{dayjs(ev.ts * 1000).format('MM-DD HH:mm:ss')}</span>
                           {ev.host ? <span className="text-xs text-muted-foreground">{ev.host}</span> : null}
                         </div>
-                        <pre className="mt-1 whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+                        <pre className="mt-1 whitespace-pre-wrap break-all rounded-lg bg-muted/60 p-2 font-mono text-2xs leading-relaxed text-foreground">
                           {ev.evidence || '—'}
                         </pre>
                       </li>
@@ -966,7 +956,7 @@ export default function AuditPage() {
                   onChange={(e) => { setCmdError(''); setCmdDraft({ ...cmdDraft, regex: e.target.value }) }}
                 />
               </div>
-              {cmdError && <p className="text-[11px] text-destructive">{cmdError}</p>}
+              {cmdError && <p className="text-2xs text-destructive-ink">{cmdError}</p>}
             </div>
           )}
           <DialogFooter>
@@ -988,7 +978,7 @@ export default function AuditPage() {
           {/* 主动探针关闭时要说清后果（W1-4）：否则用户只会在跑完才发现
               「我的安全设置被改了」——临时改也必须是明示的。 */}
           {!auditCfg.active_probes && (
-            <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-500">
+            <p className="text-xs leading-relaxed text-warning-ink">
               {t('settings.confirm.auditTempProbes')}
             </p>
           )}
@@ -1011,7 +1001,7 @@ export default function AuditPage() {
         <DialogContent className="flex max-h-[80vh] max-w-2xl flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <FileText className="h-5 w-5 text-primary" />
+              <FileText className="h-5 w-5 text-primary-ink" />
               {t('settings.advanced.viewReport')}
             </DialogTitle>
           </DialogHeader>

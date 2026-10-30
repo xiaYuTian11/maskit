@@ -1,6 +1,6 @@
 /**
  * 主布局：左侧导航（可收起）+ 顶部状态栏 + 内容区
- * 视觉：shadcn/ui token + Tailwind，亮色优先（data-theme 切换）
+ * 视觉：shadcn/ui token + Tailwind，暗色优先（data-theme 切换）
  */
 import { useEffect, useState, type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
@@ -66,22 +66,26 @@ const NAV_ITEMS = [
   { to: '/settings', key: 'settings', icon: Settings },
 ]
 
-/** 主题：亮色优先，data-theme 属性切换（Tailwind darkMode selector 对齐）。
+/** 主题：暗色优先，data-theme 属性切换（Tailwind darkMode selector 对齐）。
  *  初值直接读 main.tsx 已写入的属性，不再自己判断默认值——两处各判一次必然漂移。 */
 function useTheme() {
   // 初始值直接读 html 属性（main.tsx 已同步初始化）
   const [dark, setDark] = useState(() => {
     return document.documentElement.getAttribute('data-theme') === 'dark'
   })
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
-    try {
-      localStorage.setItem('shield_theme', dark ? 'dark' : 'light')
-    } catch {
-      // localStorage 不可用时仅内存态
-    }
-  }, [dark])
-  return { dark, toggle: () => setDark((d) => !d) }
+  const toggle = () => {
+    setDark((prev) => {
+      const next = !prev
+      document.documentElement.setAttribute('data-theme', next ? 'dark' : 'light')
+      try {
+        localStorage.setItem('shield_theme', next ? 'dark' : 'light')
+      } catch {
+        // localStorage 不可用时仅内存态
+      }
+      return next
+    })
+  }
+  return { dark, toggle }
 }
 
 export function AppLayout({ children }: { children: ReactNode }) {
@@ -305,13 +309,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className={cn('flex h-screen overflow-hidden bg-background text-foreground', hasCustomBg && 'has-custom-bg')}
+      className={cn('isolate flex h-screen overflow-hidden bg-background text-foreground', hasCustomBg && 'has-custom-bg')}
       style={hasCustomBg ? ({ '--card-opacity': (cardOpacity / 100).toString() } as React.CSSProperties) : undefined}
     >
-      {/* 个性化背景层：在所有内容之下，透明度与高斯模糊由用户控制 */}
+      {/* 个性化背景层：必须 -z-10 沉到内容之下。旧版写的是 z-0 —— 定位元素(z-index:0)
+              绘制在静态内容之上，于是这张图实际是「蒙在界面上面的一层彩色膜」，
+              标题、搜索框、筛选 chip 全被它盖住（实测白字压在浅蓝绿上几乎不可读）。 */}
       {bgImage && bgOpacity > 0 && (
         <div
-          className="pointer-events-none fixed inset-0 z-0 bg-cover bg-center bg-no-repeat transition-[filter,transform,opacity] duration-300"
+          className="pointer-events-none fixed inset-0 -z-10 bg-cover bg-center bg-no-repeat transition-[filter,transform,opacity] duration-300"
           style={{
             backgroundImage: `url("${bgImage}")`,
             opacity: bgOpacity / 100,
@@ -323,27 +329,27 @@ export function AppLayout({ children }: { children: ReactNode }) {
       {/* ===== 侧边栏 ===== */}
       <aside
         className={cn(
-          'relative flex shrink-0 flex-col border-r bg-card transition-all duration-300',
-          collapsed ? 'w-[52px]' : 'w-56',
+          'vibrancy relative flex shrink-0 flex-col border-r transition-all duration-300',
+          collapsed ? 'w-[64px]' : 'w-[208px]',
         )}
       >
         {/* Logo 区 */}
         <div className={cn('flex h-14 shrink-0 items-center gap-2.5 border-b px-3', collapsed && 'justify-center px-0')}>
-          <Logo className="h-8 w-8 shrink-0 drop-shadow-[0_2px_8px_hsl(217_91%_60%/0.35)]" />
+          <Logo className="h-7 w-7 shrink-0" />
           {!collapsed && (
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-sm font-bold leading-tight">Data Maskit</span>
+                <span className="truncate text-[13px] font-semibold leading-tight tracking-[-0.01em]">Data Maskit</span>
                 {(status?.version || shellVersion) && (
                   <span
-                    className="rounded border bg-muted/60 px-1 py-0 font-mono text-[10px] text-muted-foreground"
+                    className="shrink-0 rounded bg-muted px-1 py-px font-mono text-[9.5px] leading-none text-muted-foreground"
                     title={status?.version ? undefined : t('common.versionFromShell')}
                   >
                     v{status?.version || shellVersion}
                   </span>
                 )}
               </div>
-              <div className="truncate text-[10px] font-medium leading-tight text-muted-foreground">
+              <div className="truncate text-2xs font-medium leading-tight text-muted-foreground">
                 {t('layout.slogan')}
               </div>
             </div>
@@ -361,24 +367,17 @@ export function AppLayout({ children }: { children: ReactNode }) {
               title={label}
               className={({ isActive }) =>
                 cn(
-                  'group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-semibold transition-all duration-150',
+                  'group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors duration-150',
                   isActive
-                    ? 'bg-gradient-to-r from-primary/15 to-primary/5 text-primary shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]'
+                    ? 'bg-primary/10 text-primary-ink'
                     : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
                   collapsed && 'justify-center px-0',
                 )
               }
             >
-              {({ isActive }) => (
+              {() => (
                 <>
-                  {/* 激活指示条 */}
-                  <span
-                    className={cn(
-                      'absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-primary transition-all',
-                      isActive ? 'opacity-100' : 'opacity-0',
-                    )}
-                  />
-                  <item.icon className={cn('h-4 w-4 shrink-0', isActive && 'drop-shadow-[0_0_6px_hsl(217_91%_60%/0.5)]')} />
+                  <item.icon className="h-4 w-4 shrink-0" />
                   {!collapsed && <span className="truncate">{label}</span>}
                 </>
               )}
@@ -408,22 +407,24 @@ export function AppLayout({ children }: { children: ReactNode }) {
       {/* ===== 主区 ===== */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 顶栏：毛玻璃 */}
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-background/70 px-5 backdrop-blur-md">
+        <header className="vibrancy flex h-14 shrink-0 items-center gap-3 border-b px-5">
           {/* 状态指示 */}
           <div className="flex items-center gap-2.5">
             <span className="relative flex h-2.5 w-2.5">
               {/* 去掉常驻 animate-ping：它每帧重绘合成层，是 WebView2 后台发热的主因之一。
-                  运行态用静态圆点 + 微光晕，异常/启动过渡态才用 pulse 提醒（少例不常驻）。 */}
+                  运行态用静态圆点，异常/启动过渡态才用 pulse 提醒（少例不常驻）。
+                  彩色光晕也一并去掉：零偏移光晕是装饰不是深度；状态由色相自己表达，
+                  颜色两端各取一档能到 3:1 的（400 档在白底只有 1.9–2.2，算不上指示）。 */}
               <span
                 className={cn(
                   'relative inline-flex h-2.5 w-2.5 rounded-full',
                   showEngineError
-                    ? 'bg-red-500 shadow-[0_0_8px_hsl(0_72%_51%/0.6)] animate-pulse'
+                    ? 'bg-destructive animate-pulse'
                     : isStarting || isStopping
-                      ? 'bg-amber-400 shadow-[0_0_8px_hsl(38_92%_50%/0.5)] animate-pulse'
+                      ? 'bg-warning animate-pulse'
                       : isRunning
-                        ? 'bg-emerald-400 shadow-[0_0_6px_hsl(152_60%_45%/0.5)]'
-                        : 'bg-slate-500',
+                        ? 'bg-success'
+                        : 'bg-muted-foreground dark:bg-slate-400',
                 )}
               />
             </span>
@@ -447,7 +448,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
           {/* fallback 徽章 */}
           {status && !isRunning && status.fallback_mode && (
-            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+            <span className="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-0.5 text-2xs font-medium text-warning-ink">
               {t('layout.fallbackPrefix')}
               {status.fallback_mode === 'passthrough'
                 ? t('layout.fallbackPass')
@@ -458,28 +459,31 @@ export function AppLayout({ children }: { children: ReactNode }) {
           )}
 
           <div className="ml-auto flex items-center gap-2">
-            {/* 有新版时的常驻入口：用实心主色按钮而不是灰色图标，因为它是这一栏里
-                唯一需要用户「现在就处理」的东西，藏在 ghost 按钮里等于没有。 */}
+            {/* 有新版时的入口：降为 ghost 小字（2026-10-29）。
+                旧版这里是实心主色按钮，与右侧「停止代理」并排两个高饱和控件，
+                而它其实是一个可以晚点再处理的事 —— 每屏都在抢注意力，真正的
+                危险操作反而没显得更重。保留 text-primary-ink 上色保证仍然显眼。 */}
             {updateVersion ? (
               <Button
                 size="sm"
+                variant="ghost"
                 onClick={() => navigate(isTauri() ? '/settings?tab=about&install=1' : '/settings?tab=about')}
                 title={tf('layout.newVersionHint', { v: updateVersion ?? '' })}
-                className="h-8 gap-1.5 px-3 text-xs font-medium"
+                className="h-8 gap-1.5 rounded-full px-3 text-xs font-medium text-primary-ink hover:text-primary-ink"
               >
                 <ArrowUpCircle className="h-3.5 w-3.5" />
-                <span>{tf('layout.updateTo', { v: updateVersion ?? '' })}</span>
+                <span className="hidden sm:inline">{tf('layout.updateTo', { v: updateVersion ?? '' })}</span>
               </Button>
             ) : (
-              <Button size="sm" variant="ghost" onClick={checkForUpdate} title={t('common.checkUpdate')} className="h-8 gap-1.5 px-2.5 text-xs" disabled={checkingUpdate}>
+              <Button size="sm" variant="ghost" onClick={checkForUpdate} title={t('common.checkUpdate')} className="gap-1.5 rounded-full px-3" disabled={checkingUpdate}>
                 {checkingUpdate ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : upToDateNotice ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-500" />
+                  <Check className="h-3.5 w-3.5 text-success-ink" />
                 ) : (
                   <RefreshCw className="h-3.5 w-3.5" />
                 )}
-                <span className={cn('hidden sm:inline', upToDateNotice && 'font-medium text-emerald-600 dark:text-emerald-400')}>
+                <span className={cn('hidden sm:inline', upToDateNotice && 'font-medium text-success-ink')}>
                   {upToDateNotice ? t('layout.upToDate') : t('common.checkUpdate')}
                 </span>
               </Button>
@@ -495,12 +499,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
               variant="ghost"
               onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
               title={lang === 'zh' ? t('layout.switchToEnglish') : t('layout.switchToChinese')}
-              className="h-8 gap-1.5 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+              className="h-8 gap-1.5 rounded-full px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
             >
               <Languages className="h-3.5 w-3.5" />
               <span>{lang === 'zh' ? 'EN' : '中'}</span>
             </Button>
-            <Button size="sm" variant="ghost" onClick={toggle} title={t('layout.toggleTheme')} className="h-8 w-8 px-0">
+            <Button size="sm" variant="ghost" onClick={toggle} title={t('layout.toggleTheme')} className="w-8 rounded-full px-0">
               {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
             <Button
@@ -521,17 +525,23 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 }
               }}
               title="GitHub"
-              className="hidden h-8 w-8 px-0 text-muted-foreground hover:text-foreground sm:inline-flex"
+              className="hidden h-8 w-8 rounded-full px-0 text-muted-foreground hover:text-foreground sm:inline-flex"
             >
               <GithubIcon className="h-4 w-4" />
             </Button>
             <Button
               size="sm"
-              variant={isRunning ? 'destructive' : 'default'}
+              variant={isRunning ? 'outline' : 'default'}
               onClick={toggleProxy}
               disabled={!engineAvailable || isStarting || isStopping}
               loading={proxyBusy || isStarting || isStopping}
-              className="h-8 gap-1.5 px-3.5 text-[13px] font-medium"
+              className={cn(
+                'h-8 gap-1.5 rounded-full px-4 text-[13px] font-medium',
+                // 停止是破坏性操作，但「运行中」不是异常态：常驻红描边让顶栏长期
+                // 像有个没处理的告警（实测整屏最重的颜色就是这枚按钮）。
+                // 改成中性描边，只在指针停上去时转红 —— 危险提示在按下之前给，不在常态里常驻。
+                isRunning && 'hover:border-destructive/40 hover:text-destructive-ink hover:bg-destructive/10',
+              )}
             >
               {!(proxyBusy || isStarting || isStopping) && (isRunning ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />)}
               {isStarting
@@ -546,16 +556,16 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </header>
 
         {originBlocked && (
-          <div className="flex items-center justify-between border-b border-amber-500/40 bg-amber-500/15 px-4 py-2 text-xs text-amber-800 dark:text-amber-200">
+          <div className="flex items-center justify-between border-b border-warning/40 bg-warning/15 px-4 py-2 text-xs text-warning-ink">
             <div className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <AlertTriangle className="h-4 w-4 shrink-0 text-warning-ink" />
               <span>{t('layout.originRejectedBanner')}</span>
             </div>
             <div className="flex items-center gap-2">
               <Button
-                size="sm"
+                size="2xs"
                 variant="outline"
-                className="h-6 border-amber-500/50 text-[11px] hover:bg-amber-500/20"
+                className="border-warning/50 hover:bg-warning/20"
                 onClick={handleRescueOrigin}
                 disabled={rescuingOrigin}
               >
@@ -588,7 +598,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             )}
           >
             {statusError && (
-              <div className="mb-4 flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+              <div className="mb-4 flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive-ink">
                 <AlertCircle className="h-3.5 w-3.5 shrink-0" />
                 {tf('layout.connFail', { err: String(statusError).slice(0, 120) })}
               </div>

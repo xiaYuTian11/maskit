@@ -60,7 +60,7 @@ export function HelpCenter({ onRestartTour }: { onRestartTour: () => void }) {
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2"><BookOpen className="h-5 w-5 text-primary" />{t('help.title')}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2"><BookOpen className="h-5 w-5 text-primary-ink" />{t('help.title')}</DialogTitle>
             <DialogDescription>{t('help.description')}</DialogDescription>
           </DialogHeader>
           <div className="max-h-[65vh] space-y-5 overflow-y-auto pr-1">

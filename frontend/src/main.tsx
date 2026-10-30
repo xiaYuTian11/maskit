@@ -7,19 +7,26 @@ import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 import { LanguageProvider } from '@/lib/i18n'
 import './index.css'
 
-// ===== 主题初始化：render 前同步执行（亮色优先） =====
+// ===== 主题初始化：render 前同步执行（暗色优先） =====
 // 必须在 React 挂载前设置 html[data-theme]，否则首帧会闪一下另一套变量（FOUC）。
-// 默认亮色：办公场景的默认预期就是亮色，深色是主动选择而非强加。
-// 用户选过就尊重用户；localStorage 异常时兜底亮色。
+// 默认暗色：暗色模式视觉质感更佳、防眩光。
+// 一次性迁移：旧版本在首次挂载时曾自动将 'shield_theme: light' 写进 localStorage，
+// 导致老用户浏览器被永久固定在亮色；检测未完成 v2 迁移时清掉旧自动值，启用新默认暗色。
 let savedTheme: string | null = null
 try {
+  if (!localStorage.getItem('shield_theme_v2')) {
+    localStorage.setItem('shield_theme_v2', '1')
+    if (localStorage.getItem('shield_theme') === 'light') {
+      localStorage.removeItem('shield_theme')
+    }
+  }
   savedTheme = localStorage.getItem('shield_theme')
 } catch {
   savedTheme = null
 }
 document.documentElement.setAttribute(
   'data-theme',
-  savedTheme === 'dark' ? 'dark' : 'light',
+  savedTheme === 'light' ? 'light' : 'dark',
 )
 
 // TanStack Query 全局配置（方案 §5：轮询/缓存/重试，不用裸 setInterval）

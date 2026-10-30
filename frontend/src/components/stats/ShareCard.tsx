@@ -107,7 +107,7 @@ export function ShareCard() {
 
   return (
     <>
-      <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => setOpen(true)}>
+      <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setOpen(true)}>
         <Share2 className="h-3.5 w-3.5" /> {t('share.gen')}
       </Button>
 
@@ -126,7 +126,7 @@ export function ShareCard() {
                 key={p.days}
                 size="sm"
                 variant={days === p.days ? 'default' : 'outline'}
-                className="h-7 text-xs"
+                className="h-7"
                 onClick={() => setDays(p.days)}
               >
                 {p.labelKey === 'share.days7' ? t('share.days7') : tf('share.daysN', { n: p.days })}
@@ -147,7 +147,7 @@ export function ShareCard() {
               <Download className="h-3.5 w-3.5" /> {t('share.saveImg')}
             </Button>
             <Button size="sm" variant="outline" onClick={copy} className="gap-1.5">
-              {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? <Check className="h-3.5 w-3.5 text-success-ink" /> : <Copy className="h-3.5 w-3.5" />}
               {copied ? t('detail.copied') : t('share.copyClipboard')}
             </Button>
           </div>
@@ -170,7 +170,7 @@ function draw(cv: HTMLCanvasElement, d: Highlights, days: number, t: (k: string)
   if (!g) return
   g.scale(dpr, dpr)
 
-  const FONT = '"Inter", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif'
+  const FONT = '"Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif'
 
   const bg = g.createLinearGradient(0, 0, W, H)
   bg.addColorStop(0, '#0a1020')

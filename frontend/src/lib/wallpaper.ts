@@ -3,62 +3,62 @@
  *
  * 设计取舍：
  * - 纯前端偏好（localStorage），不进后端 config.json；
- * - 默认内置旗舰预设「天境流光 (Ambient Flow)」：无实色纯黑/纯白底，纯透明背景 + 四角大半径弥散光晕，
- *   在深色模式下呈现深邃太空与科技星云，在浅色模式下呈现清澈日光与轻盈流光，完美兼顾深浅双模；
- * - 黄金比例参数：背景透明度 35%、背景虚化 12px、卡片不透明度 78%（兼顾透光与文字锐利度）。
+ * - 针对暗色网关 UI 专属定制 4 套高级矢量微光壁纸：
+ *   ① 星云流光（旗舰推荐）：深邃星云天青、深靛与暗罗兰自然弥散，层次丰富舒缓；
+ *   ② 极光暗夜：幽林深绿与冰川湛蓝极光帷幔，静谧深远；
+ *   ③ 深海星辉：深海冷钴蓝漫射光束，硬核专注科技感；
+ *   ④ 黑曜微光：黑曜石炭黑底色搭配低调暗金微光，轻奢抗疲劳。
+ * - 全新未配置用户默认启用「星云流光（55% 透明度 + 78% 卡片磨砂）」，开箱即享高端毛玻璃；
+ * - 若用户曾上传自定义图片或选择其他预设，100% 优先保留用户配置，绝不覆盖；
+ * - 若用户曾主动清空/关闭背景，保持关闭状态，尊重用户偏好。
  */
 
-export const DEFAULT_OPACITY = 60
+export const DEFAULT_OPACITY = 55
+/** 用户主动选预设/传图时给的可见度 */
+export const PRESET_OPACITY = 55
 export const DEFAULT_BLUR = 6
-export const DEFAULT_CARD_OPACITY = 45
+export const DEFAULT_CARD_OPACITY = 78
+
+const LEGACY_BG_MIGRATED_KEY = 'shield_bg_migrated_v2'
 
 /**
- * 旗舰自适应流动柔光矢量 SVG（深浅自适应·全屏饱满弥散光斑·免网络离线可用）
- * 左上天青、右上深靛、中央梦幻紫罗兰、右下翡翠绿、左下海洋蓝，全屏无死角流光交织
+ * 预设 1：星云流光（旗舰自适应·全屏柔和弥散星云·免网络离线可用）
  */
 export const DEFAULT_WALLPAPER_DATA_URL = `data:image/svg+xml;utf8,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" fill="none">
   <defs>
-    <!-- 左上至中心：明澈天青与科技电光蓝 -->
-    <radialGradient id="amb-cyan" cx="20%" cy="25%" r="75%">
-      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.95"/>
-      <stop offset="35%" stop-color="#06b6d4" stop-opacity="0.65"/>
-      <stop offset="70%" stop-color="#0ea5e9" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0"/>
+    <radialGradient id="neb-blue" cx="20%" cy="22%" r="68%">
+      <stop offset="0%" stop-color="#1e40af" stop-opacity="0.55"/>
+      <stop offset="40%" stop-color="#0284c7" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
     </radialGradient>
-    <!-- 右上至中心偏右：深邃星云靛蓝与皇家紫 -->
-    <radialGradient id="amb-indigo" cx="78%" cy="28%" r="80%">
-      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.95"/>
-      <stop offset="40%" stop-color="#6366f1" stop-opacity="0.7"/>
-      <stop offset="75%" stop-color="#818cf8" stop-opacity="0.3"/>
-      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
+    <radialGradient id="neb-indigo" cx="78%" cy="25%" r="65%">
+      <stop offset="0%" stop-color="#4338ca" stop-opacity="0.48"/>
+      <stop offset="45%" stop-color="#6366f1" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#4338ca" stop-opacity="0"/>
     </radialGradient>
-    <!-- 中部至正中央：微光霓虹洋红与梦幻紫罗兰，覆盖主视区中心 -->
-    <radialGradient id="amb-rose" cx="48%" cy="58%" r="72%">
-      <stop offset="0%" stop-color="#d946ef" stop-opacity="0.85"/>
-      <stop offset="35%" stop-color="#ec4899" stop-opacity="0.6"/>
-      <stop offset="70%" stop-color="#a855f7" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="#a855f7" stop-opacity="0"/>
+    <radialGradient id="neb-purple" cx="50%" cy="58%" r="60%">
+      <stop offset="0%" stop-color="#581c87" stop-opacity="0.32"/>
+      <stop offset="50%" stop-color="#7e22ce" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#581c87" stop-opacity="0"/>
     </radialGradient>
-    <!-- 右下角：清冽翡翠绿 -->
-    <radialGradient id="amb-emerald" cx="85%" cy="85%" r="65%">
-      <stop offset="0%" stop-color="#10b981" stop-opacity="0.85"/>
-      <stop offset="45%" stop-color="#059669" stop-opacity="0.5"/>
-      <stop offset="80%" stop-color="#10b981" stop-opacity="0.2"/>
-      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    <radialGradient id="neb-emerald" cx="85%" cy="80%" r="55%">
+      <stop offset="0%" stop-color="#065f46" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="#0d9488" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#065f46" stop-opacity="0"/>
     </radialGradient>
-    <!-- 左下角：深邃冷海蓝，饱满托底 -->
-    <radialGradient id="amb-ocean" cx="16%" cy="80%" r="65%">
-      <stop offset="0%" stop-color="#2563eb" stop-opacity="0.85"/>
-      <stop offset="50%" stop-color="#3b82f6" stop-opacity="0.45"/>
-      <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+    <radialGradient id="neb-cyan" cx="15%" cy="75%" r="55%">
+      <stop offset="0%" stop-color="#1e3a8a" stop-opacity="0.42"/>
+      <stop offset="60%" stop-color="#0284c7" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0"/>
     </radialGradient>
   </defs>
-  <rect width="100%" height="100%" fill="url(#amb-cyan)"/>
-  <rect width="100%" height="100%" fill="url(#amb-indigo)"/>
-  <rect width="100%" height="100%" fill="url(#amb-rose)"/>
-  <rect width="100%" height="100%" fill="url(#amb-ocean)"/>
-  <rect width="100%" height="100%" fill="url(#amb-emerald)"/>
+  <rect width="100%" height="100%" fill="#0a0d14"/>
+  <rect width="100%" height="100%" fill="url(#neb-blue)"/>
+  <rect width="100%" height="100%" fill="url(#neb-indigo)"/>
+  <rect width="100%" height="100%" fill="url(#neb-purple)"/>
+  <rect width="100%" height="100%" fill="url(#neb-cyan)"/>
+  <rect width="100%" height="100%" fill="url(#neb-emerald)"/>
 </svg>
 `.trim())}`
 
@@ -78,25 +78,30 @@ export const PRESET_WALLPAPERS: PresetWallpaper[] = [
     id: 'aurora',
     labelKey: 'settings.bg.presetAurora',
     dataUrl: `data:image/svg+xml;utf8,${encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" fill="none">
         <defs>
-          <radialGradient id="g1" cx="30%" cy="25%" r="65%">
-            <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.85"/>
-            <stop offset="100%" stop-color="#0f172a" stop-opacity="0"/>
+          <radialGradient id="aur-green" cx="30%" cy="28%" r="70%">
+            <stop offset="0%" stop-color="#065f46" stop-opacity="0.55"/>
+            <stop offset="35%" stop-color="#059669" stop-opacity="0.28"/>
+            <stop offset="70%" stop-color="#10b981" stop-opacity="0.08"/>
+            <stop offset="100%" stop-color="#065f46" stop-opacity="0"/>
           </radialGradient>
-          <radialGradient id="g2" cx="75%" cy="65%" r="60%">
-            <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.75"/>
-            <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+          <radialGradient id="aur-cyan" cx="75%" cy="32%" r="65%">
+            <stop offset="0%" stop-color="#0c4a6e" stop-opacity="0.55"/>
+            <stop offset="40%" stop-color="#0284c7" stop-opacity="0.22"/>
+            <stop offset="80%" stop-color="#38bdf8" stop-opacity="0.06"/>
+            <stop offset="100%" stop-color="#0c4a6e" stop-opacity="0"/>
           </radialGradient>
-          <radialGradient id="g3" cx="60%" cy="15%" r="55%">
-            <stop offset="0%" stop-color="#ec4899" stop-opacity="0.5"/>
-            <stop offset="100%" stop-color="#0f172a" stop-opacity="0"/>
+          <radialGradient id="aur-purple" cx="55%" cy="80%" r="65%">
+            <stop offset="0%" stop-color="#1e1b4b" stop-opacity="0.50"/>
+            <stop offset="50%" stop-color="#312e81" stop-opacity="0.18"/>
+            <stop offset="100%" stop-color="#1e1b4b" stop-opacity="0"/>
           </radialGradient>
         </defs>
-        <rect width="100%" height="100%" fill="#080c14"/>
-        <rect width="100%" height="100%" fill="url(#g1)"/>
-        <rect width="100%" height="100%" fill="url(#g2)"/>
-        <rect width="100%" height="100%" fill="url(#g3)"/>
+        <rect width="100%" height="100%" fill="#05080e"/>
+        <rect width="100%" height="100%" fill="url(#aur-green)"/>
+        <rect width="100%" height="100%" fill="url(#aur-cyan)"/>
+        <rect width="100%" height="100%" fill="url(#aur-purple)"/>
       </svg>
     `.trim())}`,
   },
@@ -104,20 +109,29 @@ export const PRESET_WALLPAPERS: PresetWallpaper[] = [
     id: 'space',
     labelKey: 'settings.bg.presetSpace',
     dataUrl: `data:image/svg+xml;utf8,${encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" fill="none">
         <defs>
-          <radialGradient id="s1" cx="50%" cy="40%" r="65%">
-            <stop offset="0%" stop-color="#1e293b" stop-opacity="0.95"/>
-            <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+          <radialGradient id="sp-blue" cx="50%" cy="18%" r="75%">
+            <stop offset="0%" stop-color="#1d4ed8" stop-opacity="0.52"/>
+            <stop offset="40%" stop-color="#2563eb" stop-opacity="0.24"/>
+            <stop offset="75%" stop-color="#60a5fa" stop-opacity="0.06"/>
+            <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0"/>
           </radialGradient>
-          <radialGradient id="s2" cx="20%" cy="80%" r="55%">
-            <stop offset="0%" stop-color="#2563eb" stop-opacity="0.45"/>
-            <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+          <radialGradient id="sp-deep" cx="18%" cy="75%" r="60%">
+            <stop offset="0%" stop-color="#075985" stop-opacity="0.42"/>
+            <stop offset="50%" stop-color="#0369a1" stop-opacity="0.14"/>
+            <stop offset="100%" stop-color="#075985" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="sp-indigo" cx="82%" cy="70%" r="58%">
+            <stop offset="0%" stop-color="#1e3a8a" stop-opacity="0.38"/>
+            <stop offset="55%" stop-color="#3b82f6" stop-opacity="0.10"/>
+            <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0"/>
           </radialGradient>
         </defs>
-        <rect width="100%" height="100%" fill="#04060a"/>
-        <rect width="100%" height="100%" fill="url(#s1)"/>
-        <rect width="100%" height="100%" fill="url(#s2)"/>
+        <rect width="100%" height="100%" fill="#040711"/>
+        <rect width="100%" height="100%" fill="url(#sp-blue)"/>
+        <rect width="100%" height="100%" fill="url(#sp-deep)"/>
+        <rect width="100%" height="100%" fill="url(#sp-indigo)"/>
       </svg>
     `.trim())}`,
   },
@@ -125,20 +139,29 @@ export const PRESET_WALLPAPERS: PresetWallpaper[] = [
     id: 'cyber',
     labelKey: 'settings.bg.presetCyber',
     dataUrl: `data:image/svg+xml;utf8,${encodeURIComponent(`
-      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" fill="none">
         <defs>
-          <radialGradient id="c1" cx="25%" cy="30%" r="55%">
-            <stop offset="0%" stop-color="#059669" stop-opacity="0.65"/>
-            <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+          <radialGradient id="ob-gold" cx="72%" cy="26%" r="65%">
+            <stop offset="0%" stop-color="#78350f" stop-opacity="0.42"/>
+            <stop offset="40%" stop-color="#b45309" stop-opacity="0.18"/>
+            <stop offset="75%" stop-color="#d97706" stop-opacity="0.05"/>
+            <stop offset="100%" stop-color="#78350f" stop-opacity="0"/>
           </radialGradient>
-          <radialGradient id="c2" cx="80%" cy="70%" r="65%">
-            <stop offset="0%" stop-color="#0284c7" stop-opacity="0.75"/>
-            <stop offset="100%" stop-color="#020617" stop-opacity="0"/>
+          <radialGradient id="ob-purple" cx="28%" cy="65%" r="60%">
+            <stop offset="0%" stop-color="#4c1d95" stop-opacity="0.36"/>
+            <stop offset="45%" stop-color="#6d28d9" stop-opacity="0.12"/>
+            <stop offset="100%" stop-color="#4c1d95" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="ob-zinc" cx="45%" cy="30%" r="55%">
+            <stop offset="0%" stop-color="#27272a" stop-opacity="0.45"/>
+            <stop offset="60%" stop-color="#3f3f46" stop-opacity="0.10"/>
+            <stop offset="100%" stop-color="#27272a" stop-opacity="0"/>
           </radialGradient>
         </defs>
-        <rect width="100%" height="100%" fill="#03090e"/>
-        <rect width="100%" height="100%" fill="url(#c1)"/>
-        <rect width="100%" height="100%" fill="url(#c2)"/>
+        <rect width="100%" height="100%" fill="#08080a"/>
+        <rect width="100%" height="100%" fill="url(#ob-zinc)"/>
+        <rect width="100%" height="100%" fill="url(#ob-gold)"/>
+        <rect width="100%" height="100%" fill="url(#ob-purple)"/>
       </svg>
     `.trim())}`,
   },
@@ -146,7 +169,9 @@ export const PRESET_WALLPAPERS: PresetWallpaper[] = [
 
 /**
  * 获取当前存储的壁纸设置
- * 若全新打开未配置，默认使用推荐配置；若用户曾主动关闭（opacity=0），则保持关闭尊重偏好
+ * - 全新未配置用户：默认启用推荐的第 1 套旗舰星云壁纸与毛玻璃卡片；
+ * - 已有自定义图片或已选预设的用户：100% 保持用户既有配置，绝不覆盖；
+ * - 主动清空/关闭过壁纸的用户（savedImg === '' 且已配置过）：保持关闭。
  */
 export function getStoredWallpaperConfig() {
   try {
@@ -155,19 +180,46 @@ export function getStoredWallpaperConfig() {
     const savedBlur = localStorage.getItem('shield_bg_blur')
     const savedCardOpacity = localStorage.getItem('shield_card_opacity')
 
-    // 未做任何配置的全新状态（null），启用默认旗舰视觉体验
+    // 未做任何配置的全新状态（null）
     const isInitial = savedImg === null && savedOpacity === null
 
-    const bgImage = isInitial ? DEFAULT_WALLPAPER_DATA_URL : (savedImg || '')
-    const bgOpacity = isInitial ? DEFAULT_OPACITY : (savedOpacity !== null ? Number(savedOpacity) : 0)
-    const bgBlur = savedBlur !== null ? Number(savedBlur) : (isInitial ? DEFAULT_BLUR : 0)
-    
-    // 如果用户是全新状态，或存留的是旧版厚重默认值 (>=70)，自动适配为新版通透卡片默认值 45%
-    let cardOpacity = DEFAULT_CARD_OPACITY
-    if (!isInitial && savedCardOpacity !== null) {
-      const parsed = Number(savedCardOpacity)
-      cardOpacity = parsed >= 70 ? DEFAULT_CARD_OPACITY : parsed
+    // ===== 一次性迁移：仅首次升级时清掉旧版自动写入的默认壁纸 =====
+    const migrated = localStorage.getItem(LEGACY_BG_MIGRATED_KEY) === '1'
+    if (!migrated) {
+      try {
+        localStorage.setItem(LEGACY_BG_MIGRATED_KEY, '1')
+      } catch {
+        /* ignore */
+      }
+      const isBuiltinPreset = (savedImg ?? '').startsWith('data:image/svg+xml')
+      const legacyDefaultBg = isBuiltinPreset && Number(savedOpacity ?? 0) === 60
+      if (legacyDefaultBg) {
+        try {
+          localStorage.removeItem('shield_bg_image')
+          localStorage.removeItem('shield_bg_opacity')
+          localStorage.removeItem('shield_card_opacity')
+          localStorage.removeItem('shield_bg_blur')
+        } catch {
+          /* ignore */
+        }
+        // 清除旧默认后，自动无缝升级为新版默认星云流光
+        return {
+          bgImage: DEFAULT_WALLPAPER_DATA_URL,
+          bgOpacity: DEFAULT_OPACITY,
+          bgBlur: DEFAULT_BLUR,
+          cardOpacity: DEFAULT_CARD_OPACITY,
+        }
+      }
     }
+
+    // 全新用户：默认启用星云流光；老用户有图片取图片；主动关闭者取空
+    const bgImage = isInitial ? DEFAULT_WALLPAPER_DATA_URL : (savedImg || '')
+    const bgOpacity = isInitial
+      ? DEFAULT_OPACITY
+      : (savedOpacity !== null ? Number(savedOpacity) : 0)
+    const bgBlur = savedBlur !== null ? Number(savedBlur) : DEFAULT_BLUR
+    const cardOpacity =
+      savedCardOpacity !== null ? Number(savedCardOpacity) : DEFAULT_CARD_OPACITY
 
     return { bgImage, bgOpacity, bgBlur, cardOpacity }
   } catch {

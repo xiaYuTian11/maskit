@@ -32,13 +32,13 @@ export class ErrorBoundary extends Component<Props, State> {
       const stack = err?.stack
       return (
         <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4 p-8 text-center">
-          <div className="w-full max-w-xl rounded-2xl border border-red-500/30 bg-red-500/10 p-5 text-left text-sm text-red-600 dark:text-red-400 shadow-lg">
+          <div className="w-full max-w-xl rounded-2xl border border-destructive/30 bg-destructive/10 p-5 text-left text-sm text-destructive-ink shadow-lg">
             <div className="flex items-center gap-2 font-bold text-base">
               <AlertCircle className="h-5 w-5 shrink-0" />
               <span>{ttf('errorBoundary.title', { e: msg })}</span>
             </div>
             {stack && (
-              <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-black/10 p-3 font-mono text-[11px] leading-relaxed text-red-700 dark:text-red-300">
+              <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-black/10 p-3 font-mono text-2xs leading-relaxed text-destructive-ink">
                 {stack}
               </pre>
             )}

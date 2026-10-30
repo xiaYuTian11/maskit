@@ -115,16 +115,16 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
   }
 
   return (
-    <Card className="border bg-card">
+    <Card className="border bg-card shadow-card">
       <CardHeader className="flex-row items-center gap-3 space-y-0">
         <Logo className="h-10 w-10 shrink-0" />
         <div className="min-w-0">
-          <CardTitle className="flex items-center gap-2 text-base">Data Maskit <Badge variant="outline" className="font-mono text-xs" title={versionFromShell ? t('common.versionFromShell') : undefined}>v{shownVersion || '—'}</Badge></CardTitle>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">{t('about.subtitle')}</p>
-          {dataRoot && <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{dataRoot}</p>}
+          <CardTitle className="flex items-center gap-2 text-sm font-semibold">Data Maskit <Badge variant="outline" className="font-mono text-xs" title={versionFromShell ? t('common.versionFromShell') : undefined}>v{shownVersion || '—'}</Badge></CardTitle>
+          <p className="mt-0.5 text-2xs text-muted-foreground">{t('about.subtitle')}</p>
+          {dataRoot && <p className="mt-0.5 truncate text-2xs text-muted-foreground">{dataRoot}</p>}
         </div>
         {running != null && (
-          <Badge variant="outline" className={cn('ml-auto shrink-0 text-xs', running ? 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground')}>
+          <Badge variant="outline" className={cn('ml-auto shrink-0 text-xs', running ? 'border-success/30 text-success-ink' : 'text-muted-foreground')}>
             <Shield className="mr-1 h-3 w-3" />
             {running ? t('common.running') : t('common.stopped')}
           </Badge>
@@ -136,13 +136,13 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
           <code className="font-mono text-foreground">{`v${shownVersion || '—'}`}</code>
         </div>
         {versionFromShell && (
-          <p className="text-[11px] text-muted-foreground">{t('common.versionFromShell')}</p>
+          <p className="text-2xs text-muted-foreground">{t('common.versionFromShell')}</p>
         )}
 
         {installing ? (
           <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <div className="flex items-center gap-2 text-xs">
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary-ink" />
               <span>{tf('about.downloading', { v: result?.version ?? '' })}</span>
               <span className="ml-auto font-mono tabular-nums text-muted-foreground">
                 {progress ? fmtMB(progress.got) : ''}
@@ -161,14 +161,14 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
                 <div className="h-full w-1/3 animate-[indeterminate_1.2s_ease-in-out_infinite] rounded-full bg-primary" />
               )}
             </div>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               {t('about.autoInstallHint')}
             </p>
           </div>
         ) : result?.has_update ? (
           <div className="space-y-2 rounded-lg border border-primary/40 bg-primary/5 p-3">
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <Download className="h-3.5 w-3.5 text-primary" />
+              <Download className="h-3.5 w-3.5 text-primary-ink" />
               <span className="font-semibold">{tf('about.newVersion', { v: result.version ?? '' })}</span>
               {result.pub_date && dayjs(result.pub_date).isValid() && (
                 <span className="text-muted-foreground">
@@ -177,25 +177,25 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
               )}
             </div>
             {result.notes && (
-              <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">{result.notes}</p>
+              <p className="whitespace-pre-wrap text-2xs leading-relaxed text-muted-foreground">{result.notes}</p>
             )}
             {isTauri() ? (
-              <Button size="sm" className="h-8" onClick={doInstall}>
+              <Button size="sm" className="" onClick={doInstall}>
                 <Download className="mr-1.5 h-3.5 w-3.5" /> {t('about.downloadInstall')}
               </Button>
             ) : (
-              <div className="space-y-2.5 border-t border-border/50 pt-2.5">
+              <div className="space-y-2.5 border-t border-border pt-2.5">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                  <Terminal className="h-3.5 w-3.5 text-primary" />
+                  <Terminal className="h-3.5 w-3.5 text-primary-ink" />
                   <span>{t('about.dockerUpdateTitle')}</span>
                 </div>
-                <div className="space-y-1.5 rounded-md bg-muted/60 p-2.5 font-mono text-[11px] text-foreground select-all">
-                  <div className="text-[10px] text-muted-foreground"># Docker Compose:</div>
+                <div className="space-y-1.5 rounded-md bg-muted/60 p-2.5 font-mono text-2xs text-foreground select-all">
+                  <div className="text-2xs text-muted-foreground"># Docker Compose:</div>
                   <div>docker compose pull && docker compose up -d</div>
-                  <div className="mt-1.5 text-[10px] text-muted-foreground"># Docker CLI:</div>
+                  <div className="mt-1.5 text-2xs text-muted-foreground"># Docker CLI:</div>
                   <div>docker pull ghcr.io/xiayutian11/maskit:latest</div>
                 </div>
-                <div className="flex items-start gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-400">
+                <div className="flex items-start gap-1.5 rounded-md border border-warning/20 bg-warning/10 p-2 text-2xs text-warning-ink">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>{t('about.dockerPersistWarning')}</span>
                 </div>
@@ -204,7 +204,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
                     href={`https://github.com/xiaYuTian11/maskit/releases/tag/v${result.version}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                    className="inline-flex items-center gap-1 text-xs text-primary-ink hover:underline"
                   >
                     <span>{t('about.dockerReleaseLink')}</span>
                     <ExternalLink className="h-3 w-3" />
@@ -214,7 +214,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
             )}
           </div>
         ) : result?.ok && !result.has_update ? (
-          <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+          <p className="flex items-center gap-1.5 text-xs text-success-ink">
             <CheckCircle2 className="h-3.5 w-3.5" /> {t('about.upToDate')}
           </p>
         ) : result && !result.ok ? (
@@ -224,7 +224,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
         ) : null}
 
         {!installing && (
-          <Button size="sm" variant="outline" className="h-8" onClick={doCheck} disabled={checking}>
+          <Button size="sm" variant="outline" className="" onClick={doCheck} disabled={checking}>
             {checking ? (
               <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> {t('about.checking')}</>
             ) : (
@@ -236,7 +236,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
         {/* 更新检查源：只有 Web / Docker 部署用得到（桌面版走 Tauri Updater）。
             国内/内网服务器连不上 GitHub 时，填镜像或自建中转即可让「检查更新」恢复。 */}
         {!installing && !isTauri() && onSaveUpdateSource && (
-          <div className="space-y-1.5 border-t border-border/50 pt-3">
+          <div className="space-y-1.5 border-t border-border pt-3">
             <label className="text-xs text-muted-foreground">{t('about.updateSource')}</label>
             <div className="flex items-center gap-2">
               <Input
@@ -246,11 +246,11 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
                 onKeyDown={(e) => { if (e.key === 'Enter') saveSource() }}
                 placeholder={t('about.updateSourcePh')}
               />
-              <Button size="sm" variant="outline" className="h-8 shrink-0" onClick={saveSource}>
+              <Button size="sm" variant="outline" className="shrink-0" onClick={saveSource}>
                 {t('common.save')}
               </Button>
             </div>
-            <p className="text-[11px] text-muted-foreground">{t('about.updateSourceHint')}</p>
+            <p className="text-2xs text-muted-foreground">{t('about.updateSourceHint')}</p>
           </div>
         )}
       </CardContent>

@@ -10,7 +10,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useVisibility } from '@/lib/useVisibility'
 import { getStatsHistory, getTodayStats, getStatsModels, getPriceSyncStatus, getConfig, type StatsHistoryPoint } from '@/api/settings'
-import { BarChart3, TrendingUp, Coins, ShieldCheck, ShieldAlert, RotateCcw, Layers, Trophy, Tags, LockKeyhole } from 'lucide-react'
+import { BarChart3, TrendingUp, Layers, Trophy, Tags, LockKeyhole } from 'lucide-react'
 import { cn, formatCompactNumber, formatTokensShort } from '@/lib/utils'
 import { CRED_LABELS, maskWord } from '@/lib/sensitive-word'
 import { groupWordsByIngress } from '@/lib/ingress-groups'
@@ -20,7 +20,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { ShareCard } from '@/components/stats/ShareCard'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { StatCard } from '@/components/patterns/StatCard'
+import { PageHeader } from '@/components/patterns/PageHeader'
 
 type Granularity = 'day' | 'hour'
 
@@ -34,15 +35,17 @@ interface LineMetric {
 }
 
 const LINE_METRICS: LineMetric[] = [
-  { key: 'mask_events', labelKey: 'stats.mask', color: '#10b981', fill: 'rgba(16,185,129,0.18)' },
-  { key: 'restored', labelKey: 'stats.restored2', color: '#8b5cf6', fill: 'rgba(139,92,246,0.18)' },
-  { key: 'alerts', labelKey: 'stats.alerts2', color: '#f59e0b', fill: 'rgba(245,158,11,0.18)' },
+  // 多序列图只用三个色相：主色（脱敏）/ 中性灰（还原）/ 告警橙（告警）。
+  // 旧版是绿+紫+橙+红四条高饱和线，四色并列时反而分不清谁是谁。
+  { key: 'mask_events', labelKey: 'stats.mask', color: 'hsl(var(--primary))', fill: 'hsl(var(--primary) / 0.14)' },
+  { key: 'restored', labelKey: 'stats.restored2', color: 'hsl(var(--muted-foreground))', fill: 'hsl(var(--muted-foreground) / 0.12)' },
+  { key: 'alerts', labelKey: 'stats.alerts2', color: 'hsl(var(--warning, 38 92% 50%))', fill: 'hsl(var(--warning, 38 92% 50%) / 0.16)' },
 ]
 
 // 审计信号线（新增：注入审计/投毒检测信号数，含高危子计数）
-const AUDIT_METRIC = { key: 'audit_signals' as const, labelKey: 'stats.audit2', color: '#ef4444', fill: 'rgba(239,68,68,0.15)' }
+const AUDIT_METRIC = { key: 'audit_signals' as const, labelKey: 'stats.audit2', color: 'hsl(var(--destructive))', fill: 'hsl(var(--destructive) / 0.14)' }
 
-const TOKEN_COLOR = '#3b82f6'
+const TOKEN_COLOR = 'hsl(var(--primary))'
 
 export default function StatsPage() {
   const { t } = useI18n()
@@ -88,56 +91,51 @@ export default function StatsPage() {
 
   return (
     <div className="space-y-4">
-      {/* 页头 */}
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t('stats.title')}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{t('stats.subtitle')}</p>
-        </div>
-        {/* 战绩卡片：本地生成分享图，零上传 */}
-        <ShareCard />
-      </div>
+      {/* 页头。战绩卡片本地生成分享图，零上传 */}
+      <PageHeader title={t('stats.title')} subtitle={t('stats.subtitle')} actions={<ShareCard />} />
 
       {/* 粒度切换 */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 shadow-[var(--shadow-card)]">
-        <div className="flex items-center gap-1 rounded-lg bg-muted/60 p-0.5 text-xs">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 shadow-card">
+        <div className="flex items-center gap-1 rounded-full bg-muted/70 p-1 text-xs">
           {([['day', t('stats.byDay')], ['hour', t('stats.byHour')]] as const).map(([k, label]) => (
             <button
               key={k}
               type="button"
               onClick={() => { setGranularity(k); setDays(k === 'hour' ? 24 : 30) }}
-              className={cn('rounded-md px-3 py-1 font-medium transition-colors', granularity === k ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+              className={cn('rounded-md px-3 py-1 font-medium transition-colors', granularity === k ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.18)] ring-1 ring-black/5 dark:ring-white/10' : 'text-muted-foreground hover:text-foreground')}
             >
               {label}
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-1 rounded-lg bg-muted/60 p-0.5 text-xs">
+        <div className="flex items-center gap-1 rounded-full bg-muted/70 p-1 text-xs">
           {granularity === 'day'
             ? ([['7', 'stats.period7d'], ['30', 'stats.period30d'], ['90', 'stats.period90d']] as const).map(([k, lk]) => (
-                <button key={k} type="button" onClick={() => setDays(Number(k))} className={cn('rounded-md px-2.5 py-1 font-medium transition-colors', String(days) === k ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{t(lk)}</button>
+                <button key={k} type="button" onClick={() => setDays(Number(k))} className={cn('rounded-full px-3 py-1 font-medium transition-all', String(days) === k ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.18)] ring-1 ring-black/5 dark:ring-white/10' : 'text-muted-foreground hover:text-foreground')}>{t(lk)}</button>
               ))
             : ([['6', 'stats.period6h'], ['24', 'stats.period24h'], ['72', 'stats.period72h']] as const).map(([k, lk]) => (
-                <button key={k} type="button" onClick={() => setDays(Number(k))} className={cn('rounded-md px-2.5 py-1 font-medium transition-colors', String(days) === k ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}>{t(lk)}</button>
+                <button key={k} type="button" onClick={() => setDays(Number(k))} className={cn('rounded-full px-3 py-1 font-medium transition-all', String(days) === k ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.18)] ring-1 ring-black/5 dark:ring-white/10' : 'text-muted-foreground hover:text-foreground')}>{t(lk)}</button>
               ))
           }
         </div>
         {isFetching && <span className="ml-auto text-xs text-muted-foreground">{t('stats.refreshing')}</span>}
       </div>
 
-      {/* 汇总数字卡片：以 4 列封顶两行排布（4+3），彻底避免 7 列挤压爆框 */}
-      <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
-        <SummaryCard icon={Layers} label={t('stats.totalReq')} value={totals.requests} color="#3b82f6" bg="from-blue-500/15 to-blue-500/5" />
-        <SummaryCard icon={ShieldCheck} label={t('stats.totalMasked')} value={totals.mask} color="#10b981" bg="from-emerald-500/15 to-emerald-500/5" />
-        <SummaryCard icon={RotateCcw} label={t('stats.totalRestored')} value={totals.restored} color="#8b5cf6" bg="from-violet-500/15 to-violet-500/5" />
-        <SummaryCard icon={ShieldAlert} label={t('stats.totalAlerts')} value={totals.alerts} color="#f59e0b" bg="from-amber-500/15 to-amber-500/5" />
-        <SummaryCard icon={ShieldCheck} label={t('stats.totalAudit')} value={totals.audit} color="#ef4444" bg="from-red-500/15 to-red-500/5" />
-        <SummaryCard icon={Coins} label={t('stats.totalTokens')} value={totals.tokens} color="#ec4899" bg="from-pink-500/15 to-pink-500/5" />
-        <SummaryCard icon={Trophy} label={t('stats.estCost')} value={`$${Number(totalCost || 0).toFixed(2)}`} color="#10b981" bg="from-emerald-500/15 to-emerald-500/5" />
+      {/* 汇总数字卡：6 张（2×3 / 3×2 / 6×1 都能整除）。
+          旧版是 7 张 —— 3 列时排成 3+3+1，最后一张「估算费用」孤零零占半行；
+          4 列时又变成 4+3。费用本身就是 Token 用量的派生值，改为 Token 卡的副标题，
+          既消掉孤行，也少了一个需要扫的卡片。 */}
+      <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-6">
+        <SummaryCard label={t('stats.totalReq')} value={totals.requests} />
+        <SummaryCard label={t('stats.totalMasked')} value={totals.mask} />
+        <SummaryCard label={t('stats.totalRestored')} value={totals.restored} />
+        <SummaryCard label={t('stats.totalAlerts')} value={totals.alerts} tone="warning" />
+        <SummaryCard label={t('stats.totalAudit')} value={totals.audit} tone="danger" />
+        <SummaryCard label={t('stats.totalTokens')} value={totals.tokens} hint={`≈ $${Number(totalCost || 0).toFixed(2)}`} />
       </div>
 
       {/* 柱状图：Token 用量（放第一，用户指定） */}
-      <div className="rounded-xl border bg-card p-5 shadow-[var(--shadow-card)]">
+      <div className="rounded-xl border bg-card p-5 shadow-card">
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <BarChart3 className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-semibold">{t('stats.tokenChart')}</span>
@@ -151,7 +149,7 @@ export default function StatsPage() {
       </div>
 
       {/* 折线图：脱敏 + 还原 + 告警（数值平时不显示，悬停才显示，避免重叠） */}
-      <div className="rounded-xl border bg-card p-5 shadow-[var(--shadow-card)]">
+      <div className="rounded-xl border bg-card p-5 shadow-card">
         <div className="mb-4 flex flex-wrap items-center gap-2">
           <TrendingUp className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-semibold">{t('stats.trendChart')}</span>
@@ -210,18 +208,18 @@ function ModelRanking({ hidden }: { hidden: boolean }) {
   const overallSuccessRate = totalAttempts > 0 ? Math.round((totalReq / totalAttempts) * 1000) / 10 : 100
 
   return (
-    <div className="rounded-xl border bg-card p-5 shadow-[var(--shadow-card)]">
+    <div className="rounded-xl border bg-card p-5 shadow-card">
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Trophy className="h-4 w-4 text-muted-foreground" />
         <span className="text-sm font-semibold">{t('stats.modelRanking')}</span>
         <span className="text-xs text-muted-foreground">{t('stats.modelHint')}</span>
-        <div className="ml-auto flex items-center gap-1 rounded-lg bg-muted/60 p-0.5 text-xs">
+        <div className="ml-auto flex items-center gap-1 rounded-full bg-muted/70 p-1 text-xs">
           {([['7', 'stats.period7d'], ['30', 'stats.period30d']] as const).map(([k, lk]) => (
             <button
               key={k}
               type="button"
               onClick={() => setRange(k)}
-              className={cn('rounded-md px-2.5 py-1 font-medium transition-colors', range === k ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+              className={cn('rounded-full px-3 py-1 font-medium transition-all', range === k ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.18)] ring-1 ring-black/5 dark:ring-white/10' : 'text-muted-foreground hover:text-foreground')}
             >
               {t(lk)}
             </button>
@@ -231,7 +229,7 @@ function ModelRanking({ hidden }: { hidden: boolean }) {
 
       {models.length === 0 ? (
         <div className="py-8 text-center text-sm text-muted-foreground">
-          <Layers className="mx-auto mb-2 h-7 w-7 text-muted-foreground/40" />
+          <Layers className="mx-auto mb-2 h-7 w-7 text-muted-foreground" />
           {t('stats.noModels')}
         </div>
       ) : (
@@ -249,20 +247,20 @@ function ModelRanking({ hidden }: { hidden: boolean }) {
               className={cn(
                 'rounded-lg border px-2.5 py-1 text-xs font-semibold',
                 totalErr === 0
-                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                  ? 'border-success/30 bg-success/10 text-success-ink'
                   : overallSuccessRate >= 95
-                    ? 'border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400'
-                    : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                    ? 'border-primary/30 bg-primary/10 text-primary-ink'
+                    : 'border-warning/30 bg-warning/10 text-warning-ink',
               )}
               title={tf('stats.reqAndErr', { s: totalReq, e: totalErr })}
             >
               {t('stats.successRate')} {overallSuccessRate.toFixed(1)}%
-              {totalErr > 0 && <span className="ml-1 text-[10px] font-normal opacity-80">({tf('stats.modelErrorsCount', { n: totalErr })})</span>}
+              {totalErr > 0 && <span className="ml-1 text-2xs font-normal opacity-80">({tf('stats.modelErrorsCount', { n: totalErr })})</span>}
             </span>
-            <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+            <span className="rounded-lg border border-success/30 bg-success/10 px-2.5 py-1 text-xs font-semibold text-success-ink">
               {t('stats.estCost')} ${Number(totalCost || 0).toFixed(2)}
             </span>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {t('stats.unpricedHint')}
               {priceSync && priceSync.synced_at > 0 && (
                 <span className="ml-1">{tf('stats.priceSyncFrom', { date: dayjs(priceSync.synced_at * 1000).format('MM-DD') })}</span>
@@ -289,10 +287,10 @@ function ModelRanking({ hidden }: { hidden: boolean }) {
                         {err > 0 ? (
                           <span
                             className={cn(
-                              'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none',
+                              'shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium leading-none',
                               rate >= 95
-                                ? 'border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                                : 'border border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400',
+                                ? 'border border-warning/30 bg-warning/10 text-warning-ink'
+                                : 'border border-destructive/30 bg-destructive/10 text-destructive-ink',
                             )}
                             title={tf('stats.reqAndErr', { s: req, e: err })}
                           >
@@ -300,26 +298,26 @@ function ModelRanking({ hidden }: { hidden: boolean }) {
                           </span>
                         ) : attempts > 0 ? (
                           <span
-                            className="shrink-0 rounded border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-emerald-600 dark:text-emerald-400"
+                            className="shrink-0 rounded border border-success/20 bg-success/10 px-1.5 py-0.5 text-2xs font-medium leading-none text-success-ink"
                             title={tf('stats.allSuccess', { n: req })}
                           >
                             100%
                           </span>
                         ) : null}
                       </div>
-                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                      <span className="shrink-0 text-2xs text-muted-foreground">
                         {m.requests.toLocaleString()} {t('stats.timesSuffix')} ·{' '}
                         <span title={m.cache_read ? tf('stats.tokensWithCache', { total: toks.toLocaleString(), cache: m.cache_read.toLocaleString() }) : `${toks.toLocaleString()} ${t('stats.tokens')}`}>
                           {formatTokensShort(toks, t('stats.unitSystem') === 'si' ? 'si' : 'cjk')} {t('stats.tokens')}
                         </span>
                         {m.priced
-                          ? <b className="ml-1.5 text-emerald-600 dark:text-emerald-400">${(m.cost_usd ?? 0).toFixed(3)}</b>
-                          : <span className="ml-1.5 text-muted-foreground/60">{t('stats.unpriced')}</span>}
+                          ? <b className="ml-1.5 text-success-ink">${(m.cost_usd ?? 0).toFixed(3)}</b>
+                          : <span className="ml-1.5 text-muted-foreground">{t('stats.unpriced')}</span>}
                       </span>
                     </div>
                     <div className="h-2 overflow-hidden rounded-full bg-muted">
                       <div
-                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all"
+                        className="h-full rounded-full bg-primary transition-all"
                         style={{ width: `${pct}%` }}
                       />
                     </div>
@@ -436,7 +434,7 @@ function Leaderboards({ days, granularity, hidden }: { days: number; granularity
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {t('stats.wordDetail')}
-              {viewWord?.tag && <span className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{viewWord.tag}</span>}
+              {viewWord?.tag && <span className="rounded border px-1.5 py-0.5 text-2xs text-muted-foreground">{viewWord.tag}</span>}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
@@ -449,7 +447,7 @@ function Leaderboards({ days, granularity, hidden }: { days: number; granularity
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {t('stats.count')}: <b className="font-mono tabular-nums text-foreground">{viewWord?.count?.toLocaleString()}</b>
               {viewWord?.cred && (
-                <span className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-600 dark:text-amber-400"><LockKeyhole className="h-3 w-3" />{t('stats.credLocked')}</span>
+                <span className="flex items-center gap-1 rounded bg-warning/10 px-1.5 py-0.5 text-2xs text-warning-ink"><LockKeyhole className="h-3 w-3" />{t('stats.credLocked')}</span>
               )}
             </div>
           </div>
@@ -510,7 +508,7 @@ function RankCard({
   // 前三名配色：金/银/铜。第 4 名起统一用卡片主色，避免整列花掉。
   const medal = ['#f59e0b', '#94a3b8', '#b45309']
   return (
-    <div className="flex flex-col rounded-xl border bg-card p-5 shadow-[var(--shadow-card)]">
+    <div className="flex flex-col rounded-xl border bg-card p-5 shadow-card">
       <div className="mb-4 flex h-7 items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -533,7 +531,7 @@ function RankCard({
             if (r._header) {
               return (
                 <li key={r.key} className="flex items-center gap-2 pt-1">
-                  <span className="shrink-0 text-[11px] font-semibold text-muted-foreground">{r._header}</span>
+                  <span className="shrink-0 text-2xs font-semibold text-muted-foreground">{r._header}</span>
                   <span className="h-px flex-1 bg-border" />
                 </li>
               )
@@ -554,7 +552,7 @@ function RankCard({
             return (
               <li key={r.key} className="flex h-9 items-center gap-2.5">
                 <span
-                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-bold tabular-nums"
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-2xs font-bold tabular-nums"
                   style={
                     rank <= 3
                       ? { background: `${medal[rank - 1]}22`, color: medal[rank - 1] }
@@ -586,7 +584,7 @@ function RankCard({
                       </span>
                     )}
                     {r.tag && (
-                      <span className="shrink-0 rounded border px-1 text-[10px] text-muted-foreground">{r.tag}</span>
+                      <span className="shrink-0 rounded border px-1 text-2xs text-muted-foreground">{r.tag}</span>
                     )}
                     {r.cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                   </span>
@@ -608,45 +606,36 @@ function RankCard({
   )
 }
 
-/** 汇总数字卡片：大数字自动缩写进位，并提供悬停 Tooltip 显示精确原值 */
-function SummaryCard({ icon: Icon, label, value, color, bg }: { icon: typeof Layers; label: string; value: number | string; color: string; bg: string }) {
+/** 汇总数字卡片：大数字自动缩写进位，并提供悬停 Tooltip 显示精确原值
+ *
+ * 颜色规则（2026-10-29）：数值默认 `text-foreground`，只有传 `tone` 且值 > 0 时才上色。
+ * 旧实现给 7 张卡各配一个色值（蓝/绿/紫/橙/红/粉/绿），7 个数字同时在喊，
+ * 反而没有重点 —— 用户扫一眼不知道该看哪个。
+ */
+/**
+ * 汇总卡：只是 <StatCard> 的薄封装 —— 上一版这里是一份独立的卡片实现，
+ * 与控制台 6 宫格长得一样却各写一遍，改一处漏一处。现在统一到 patterns/StatCard。
+ */
+function SummaryCard({ label, value, tone, hint }: {
+  label: string
+  value: number | string
+  tone?: 'warning' | 'danger'
+  hint?: string
+}) {
   const { t } = useI18n()
   const unitSystem = t('stats.unitSystem') === 'si' ? 'si' : 'cjk'
   const { compact, full, isCompact } = formatCompactNumber(value, unitSystem)
-
-  const numElement = (
-    <div
-      className="mt-3 text-2xl font-bold tabular-nums tracking-tight truncate"
-      style={{ color }}
-      title={full}
-    >
-      {compact}
-    </div>
-  )
+  const active = typeof value === 'number' && value > 0
 
   return (
-    <div className="flex flex-col rounded-xl border bg-card p-4 shadow-[var(--shadow-card)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[var(--shadow-card-hover)]">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-foreground/70">{label}</span>
-        <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br', bg)}>
-          <Icon className="h-4 w-4" style={{ color }} />
-        </div>
-      </div>
-      {isCompact ? (
-        <TooltipProvider delayDuration={150}>
-          <Tooltip>
-            <TooltipTrigger asChild className="cursor-default">
-              {numElement}
-            </TooltipTrigger>
-            <TooltipContent>
-              <p className="font-mono text-xs">{full}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      ) : (
-        numElement
-      )}
-    </div>
+    <StatCard
+      label={label}
+      value={compact}
+      size="md"
+      {...(isCompact ? { fullValue: full } : {})}
+      {...(tone && active ? { tone } : {})}
+      {...(hint ? { hint } : {})}
+    />
   )
 }
 
@@ -684,6 +673,25 @@ function fmtNum(v: number, t: (k: string) => string): string {
  *  - 峰值：仅每个指标的最大值点标注数值（不重叠）
  *  - 数据点：小圆点常显，hover 放大
  */
+/** 把 Y 轴上限抬到「整数刻度」：分 4 段，每段取 1/2/2.5/5×10^k。
+ *
+ *  旧实现直接拿数据最大值当上限，于是刻度显示成 10.5亿 / 7.9亿 / 5.2亿 / 2.6亿 ——
+ *  读者要先心算才知道每格代表多少，也看不出「峰值占轴的几成」。
+ *  抬到整数刻度后，同样的数据读起来是 12亿 / 9亿 / 6亿 / 3亿 / 0。
+ */
+function niceAxisMax(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 1
+  const raw = v / 4
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)))
+  // +1e-9 容差：raw/mag 可能是 2.5000000001，落不进 2.5 这档就会跳到 5，
+  // 轴上限凭空翻倍（实测 10 亿的数据画成 20 亿，柱子只剩半屏高）。
+  const n = raw / mag + 1e-9
+  // 步长档位带 3 与 4：只有 1/2/2.5/5 时，10.2 亿会因 raw=2.55 亿落进 5 档，
+  // 轴上限直接跳到 20 亿，柱子只剩半屏高。带 3 档后同数据得到 12 亿，满高。
+  const stepN = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 3 ? 3 : n <= 4 ? 4 : n <= 5 ? 5 : 10
+  return stepN * mag * 4
+}
+
 function MultiLineChart({ points }: { points: StatsHistoryPoint[] }) {
   const { t } = useI18n()
   const [hover, setHover] = useState<number | null>(null)
@@ -693,7 +701,7 @@ function MultiLineChart({ points }: { points: StatsHistoryPoint[] }) {
   const cw = (W - padding.left - padding.right) / Math.max(1, points.length - 1)
   const ch = H - padding.top - padding.bottom
   const metrics = [...LINE_METRICS, AUDIT_METRIC]
-  const maxVal = Math.max(1, ...points.flatMap((p) => metrics.map((m) => p[m.key] ?? 0)))
+  const maxVal = niceAxisMax(Math.max(1, ...points.flatMap((p) => metrics.map((m) => p[m.key] ?? 0))))
   const step = Math.max(1, Math.ceil(points.length / 10))
   // 每个指标的最大值索引（峰值标注）
   const peakIdx = new Map<string, number>()
@@ -867,9 +875,9 @@ function ChartTooltip({ point, xPct }: { point: StatsHistoryPoint; xPct: number 
         )}
         {(point.audit_high ?? 0) > 0 && (
           <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-red-600" />
-            <span className="text-red-600 dark:text-red-400">{t('stats.highRisk')}</span>
-            <span className="ml-auto pl-3 font-mono tabular-nums text-red-600 dark:text-red-400">{(point.audit_high ?? 0).toLocaleString()}</span>
+            <span className="h-2 w-2 rounded-full bg-destructive" />
+            <span className="text-destructive-ink">{t('stats.highRisk')}</span>
+            <span className="ml-auto pl-3 font-mono tabular-nums text-destructive-ink">{(point.audit_high ?? 0).toLocaleString()}</span>
           </div>
         )}
       </div>
@@ -886,7 +894,7 @@ function TokenBarChart({ points }: { points: StatsHistoryPoint[] }) {
   const padding = { top: 16, right: 16, bottom: 32, left: 52 }
   const cw = (W - padding.left - padding.right) / Math.max(1, points.length)
   const ch = H - padding.top - padding.bottom
-  const maxVal = Math.max(1, ...points.map(getTokens))
+  const maxVal = niceAxisMax(Math.max(1, ...points.map(getTokens)))
   const step = Math.max(1, Math.ceil(points.length / 10))
 
   return (

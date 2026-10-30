@@ -74,7 +74,7 @@ export function SkillBundleCard({ version }: { version?: string }) {
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle className="flex items-center gap-2 text-sm font-semibold">
           <BookOpen className="h-4 w-4" />
           {t('settings.skill.title')}
         </CardTitle>
@@ -82,19 +82,19 @@ export function SkillBundleCard({ version }: { version?: string }) {
       <CardContent className="space-y-3">
         <p className="text-[13px] leading-relaxed text-muted-foreground">{t('settings.skill.desc')}</p>
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={doDownload} disabled={downloading}>
+          <Button size="sm" variant="outline" className="h-7" onClick={doDownload} disabled={downloading}>
             {downloading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Download className="mr-1 h-3 w-3" />}
             {t('settings.skill.download')}
           </Button>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={copyCommand}>
+          <Button size="sm" variant="outline" className="h-7" onClick={copyCommand}>
             <Copy className="mr-1 h-3 w-3" />
             {t('settings.skill.copyCmd')}
           </Button>
         </div>
-        <code className="block overflow-x-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
+        <code className="block overflow-x-auto rounded-md bg-muted/40 px-2 py-1.5 font-mono text-2xs text-muted-foreground">
           {installCommand}
         </code>
-        <p className="text-[11px] leading-snug text-muted-foreground/80">{t('settings.skill.hint')}</p>
+        <p className="text-2xs leading-snug text-muted-foreground">{t('settings.skill.hint')}</p>
       </CardContent>
     </Card>
   )

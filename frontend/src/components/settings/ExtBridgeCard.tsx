@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Globe, Copy, RefreshCw, AlertTriangle, FileText, CheckCircle2, XCircle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Hint } from '@/components/common/Hint'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -101,7 +102,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
     : t('settings.extBridge.fail')
 
   return (
-    <Card className="border bg-card">
+    <Card className="border bg-card shadow-card">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm font-semibold">
           <Globe className="h-4 w-4 text-muted-foreground" />
@@ -112,18 +113,17 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
         <p className="text-xs leading-relaxed text-muted-foreground">{t('settings.extBridge.desc')}</p>
 
         {/* 总开关 */}
-        <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2.5">
-          <div className="space-y-0.5">
-            <div className="text-[13px] font-medium">{t('settings.extBridge.enabled')}</div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {t('settings.extBridge.enabledDesc')}
-            </p>
+        <div className="flex items-center justify-between gap-3 border-b border-border px-1.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+            <span className="truncate font-medium">{t('settings.extBridge.enabled')}</span>
+            <Hint text={t('settings.extBridge.enabledDesc')} />
           </div>
           <Switch
             checked={enabled}
             disabled={saving}
             onCheckedChange={(v) => toggle('ext_bridge_enabled', v)}
             aria-label={t('settings.extBridge.enabled')}
+            className="scale-75"
           />
         </div>
 
@@ -141,7 +141,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
             <Button
               size="sm"
               variant="outline"
-              className="h-8 shrink-0 text-xs"
+              className="shrink-0"
               disabled={!token}
               title={t('settings.extBridge.copy')}
               onClick={copyToken}
@@ -152,7 +152,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
             <Button
               size="sm"
               variant="outline"
-              className="h-8 shrink-0 text-xs"
+              className="shrink-0"
               disabled={!token}
               onClick={() => setRevealed((v) => !v)}
             >
@@ -161,7 +161,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
             <Button
               size="sm"
               variant="outline"
-              className="h-8 shrink-0 text-xs"
+              className="shrink-0"
               disabled={!token || saving || rotating}
               onClick={() => setConfirmRotate(true)}
             >
@@ -169,56 +169,57 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
               {t('settings.extBridge.rotate')}
             </Button>
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
+          <p className="text-2xs leading-relaxed text-muted-foreground">
             {t('settings.extBridge.tokenHint')}
           </p>
         </div>
 
         {/* 引擎不可达时的行为 */}
-        <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2.5">
-          <div className="space-y-0.5">
-            <div className="text-[13px] font-medium">{t('settings.extBridge.blockWhenDown')}</div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {t('settings.extBridge.blockWhenDownDesc')}
-            </p>
+        <div className="flex items-center justify-between gap-3 border-b border-border px-1.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+            <span className="truncate font-medium">{t('settings.extBridge.blockWhenDown')}</span>
+            <Hint text={t('settings.extBridge.blockWhenDownDesc')} />
           </div>
           <Switch
             checked={!!cfg?.ext_block_when_engine_down}
             disabled={saving}
             onCheckedChange={(v) => toggle('ext_block_when_engine_down', v)}
             aria-label={t('settings.extBridge.blockWhenDown')}
+            className="scale-75"
           />
         </div>
 
         {/* 老版 Office 文档自动转码脱敏 */}
-        <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 px-3 py-2.5">
-          <div className="space-y-0.5">
-            <div className="text-[13px] font-medium">{t('settings.extBridge.convertLegacyOffice')}</div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {t('settings.extBridge.convertLegacyOfficeDesc')}
-            </p>
+        <div className="flex items-center justify-between gap-3 border-b border-border px-1.5 py-2.5">
+          <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
+            <span className="truncate font-medium">{t('settings.extBridge.convertLegacyOffice')}</span>
+            {/* 风险已在标题里写明（「有损重建，不推荐」），不再额外挂 badge 重复；
+                具体丢什么、乱码怎么来的放 ? 里。 */}
+            <Hint text={t('settings.extBridge.convertLegacyOfficeDesc')} />
           </div>
           <Switch
             checked={!!cfg?.ext_convert_legacy_office}
             disabled={saving || !enabled}
             onCheckedChange={(v) => toggle('ext_convert_legacy_office', v)}
             aria-label={t('settings.extBridge.convertLegacyOffice')}
+            className="scale-75"
           />
         </div>
 
         {/* 格式支持与不支持说明备注 */}
-        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 space-y-2">
+        {/* 中性底：整站只有异常与告警才上色，信息块不该带强调色 */}
+        <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
           <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-            <FileText className="h-3.5 w-3.5 text-blue-500" />
+            <FileText className="h-3.5 w-3.5 text-muted-foreground" />
             {t('settings.extBridge.formatsTitle')}
           </div>
-          <div className="space-y-1.5 text-[11px] leading-relaxed">
-            <div className="flex items-start gap-1.5 text-emerald-600 dark:text-emerald-400">
+          <div className="space-y-1.5 text-2xs leading-relaxed">
+            <div className="flex items-start gap-1.5 text-success-ink">
               <CheckCircle2 className="h-3.5 w-3.5 shrink-0 mt-0.5" />
               <span>{t('settings.extBridge.supportedFormats')}</span>
             </div>
             <div className="flex items-start gap-1.5 text-muted-foreground">
-              <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-amber-500" />
+              <XCircle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-warning-ink" />
               <span>{t('settings.extBridge.unsupportedFormats')}</span>
             </div>
           </div>
@@ -226,13 +227,16 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
 
         {/* 只读信息：引擎地址 + 统计 */}
         <div className="grid gap-2 sm:grid-cols-2">
-          <div className="rounded-lg border bg-muted/20 px-3 py-2">
+          <div className="rounded-lg border bg-muted/30 px-3 py-2">
             <div className="flex items-center justify-between">
-              <div className="text-[11px] font-medium text-muted-foreground">{t('settings.extBridge.panelUrl')}</div>
+              <div className="flex items-center gap-1 text-2xs font-medium text-muted-foreground">
+                {t('settings.extBridge.panelUrl')}
+                <Hint text={t('settings.extBridge.panelUrlHint')} />
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-5 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+                className="h-5 px-1.5 text-2xs text-muted-foreground hover:text-foreground"
                 onClick={async () => {
                   const isTauri = typeof window !== 'undefined' && (window.location.origin.includes('tauri.localhost') || window.location.protocol === 'tauri:')
                   const targetUrl = isTauri ? 'http://127.0.0.1:5801' : window.location.origin
@@ -249,16 +253,13 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
                 ? 'http://127.0.0.1:5801'
                 : window.location.origin}
             </div>
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              {t('settings.extBridge.panelUrlHint')}
-            </div>
           </div>
           <div className="rounded-lg border bg-muted/20 px-3 py-2">
-            <div className="text-[11px] font-medium text-muted-foreground">{t('settings.extBridge.stats')}</div>
-            <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">{statsText}</div>
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              {t('settings.extBridge.statsHint')}
+            <div className="flex items-center gap-1 text-2xs font-medium text-muted-foreground">
+              {t('settings.extBridge.stats')}
+              <Hint text={t('settings.extBridge.statsHint')} />
             </div>
+            <div className="mt-0.5 font-mono text-xs font-semibold text-foreground">{statsText}</div>
           </div>
         </div>
       </CardContent>
@@ -267,7 +268,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
       <Dialog open={confirmRotate} onOpenChange={(v) => !v && setConfirmRotate(false)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-destructive">
+            <DialogTitle className="flex items-center gap-2 text-destructive-ink">
               <AlertTriangle className="h-4 w-4" />
               {t('settings.extBridge.rotateConfirmTitle')}
             </DialogTitle>

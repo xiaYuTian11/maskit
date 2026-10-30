@@ -5,74 +5,131 @@
 @layer base {
   /* shadcn/ui 颜色变量（浅色）：背景 slate-50 与白卡拉开层次 */
   :root {
-    --background: 210 40% 97%;
-    --foreground: 222.2 84% 4.9%;
+    /* ===== macOS 浅色（Big Sur+ 语义色）=====
+       窗口底 #EAEAED / 卡面纯白 / 标签 #1D1D1F（Apple labelColor）
+       强调色 #007AFF（systemBlue），不是自选靛蓝 —— macOS 原生控件的辨识度
+       有一半来自这个蓝。 */
+    --background: 240 6% 92.5%;
+    --foreground: 240 5% 11%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 240 5% 11%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 224 76% 48%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 95%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 95%;
-    --muted-foreground: 215.4 16.3% 42%;
-    --accent: 210 40% 95%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 32% 90%;
-    --input: 214.3 32% 90%;
-    --ring: 224 76% 48%;
+    --popover-foreground: 240 5% 11%;
+    --primary: 211 100% 50%;
+    --primary-foreground: 0 0% 100%;
+    /* 文字专用强调色：systemBlue 作填充够用（白字 4.4:1），作 11px 文字只有 3.98:1。
+       拆出 ink 一档给链接/可点文本，填充色不动。深色下反过来取亮版。 */
+    --primary-ink: 211 100% 34%;
+    --secondary: 240 5% 96%;
+    --secondary-foreground: 240 5% 11%;
+    --muted: 240 5% 96%;
+    --muted-foreground: 240 3% 42%;
+    --accent: 240 5% 96%;
+    --accent-foreground: 240 5% 11%;
+    --destructive: 3 100% 59%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-ink: 4 90% 42%;
+    --success: 145 63% 38%;
+    /* 状态文字专用：与 --primary-ink 同理，填充色当 11px 文字不够 4.5:1。
+       浅色取 700 档（≈5.0–5.5:1），深色取 400 档。 */
+    --success-ink: 160 94% 25%;
+    --warning-ink: 32 95% 37%;
+    --warning: 35 100% 45%;
+    --border: 240 5% 85%;
+    --input: 240 5% 82%;
+    --ring: 211 100% 50%;
+    /* 12px：与 Tailwind 原生 xl 对齐。原来的 14px 让 `rounded-lg` 比 `rounded-xl` 更圆，
+       大分组比卡片还圆 —— 圆角阶梯是倒挂的。 */
     --radius: 0.75rem;
-    --shadow-card: 0 1px 3px 0 rgb(15 23 42 / 0.06), 0 4px 14px -2px rgb(15 23 42 / 0.05), inset 0 1px 0 0 rgb(255 255 255 / 0.8);
-    --shadow-card-hover: 0 3px 6px -1px rgb(15 23 42 / 0.08), 0 10px 24px -4px rgb(15 23 42 / 0.12), inset 0 1px 0 0 rgb(255 255 255 / 0.9), 0 0 0 1px hsl(224 76% 48% / 0.18);
+    /* macOS 的阴影是一圈「极细轮廓 + 浅投影」，不是大范围弥散——
+       卡片看起来是「贴在窗口上的一片材料」，而不是浮在空中的纸。 */
+    /* 深浅两端同构：一层极淡顶光 + 垂直渐变。顶光给窗口「受光面」，
+       色相永远是中性 —— 背景带蓝紫光晕会和「颜色只表达状态」直接打架。 */
+    --bg-image:
+      radial-gradient(1200px 700px at 50% -25%, hsl(0 0% 100% / 0.85), transparent 62%),
+      linear-gradient(180deg, hsl(240 6% 93%) 0%, hsl(240 6% 91%) 100%);
+    /* 投影比之前多一级：只有 1px/2px 两层时，白卡在灰底上「飘不起来」，
+       整页看着像被熨斗压过。第三层是远而浅的一圈，负责把卡片从背景里抬出来。 */
+    --shadow-card:
+      0 0 0 0.5px rgb(0 0 0 / 0.06),
+      0 1px 3px rgb(0 0 0 / 0.07),
+      0 4px 12px -4px rgb(0 0 0 / 0.06);
+    --shadow-card-hover:
+      0 0 0 0.5px rgb(0 0 0 / 0.08),
+      0 2px 6px rgb(0 0 0 / 0.08),
+      0 14px 28px -10px rgb(0 0 0 / 0.16);
   }
 
-  /* 深色：data-theme 属性切换（与旧面板一致，Tailwind darkMode 走 selector） */
-  /* 深色：中性深灰而不是蓝黑。
-     原来底色是 hsl(224 42% 5%)——色相 224 加 42% 饱和度，整屏泛蓝，
-     用户反馈「像蓝色模式」。这里把面板类颜色的饱和度压到 8~14%，
-     只保留极轻的冷调避免死灰；蓝味集中到 primary/ring 这些强调色上，
-     强调色才是该有颜色的地方。 */
   [data-theme='dark'] {
-    --background: 220 14% 6%;
-    --foreground: 210 20% 97%;
-    --card: 220 12% 9.5%;
-    --card-foreground: 210 20% 97%;
-    --popover: 220 12% 9.5%;
-    --popover-foreground: 210 20% 97%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 220 10% 15%;
-    --secondary-foreground: 210 20% 97%;
-    --muted: 220 10% 13.5%;
-    --muted-foreground: 215 12% 68%;
-    --accent: 220 10% 15%;
-    --accent-foreground: 210 20% 97%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 210 20% 97%;
-    --border: 220 9% 19%;
-    --input: 220 9% 19%;
-    --ring: 217.2 91.2% 59.8%;
+    /* ===== macOS 深色 =====
+       窗口底 #17171A / 卡面 #222226 / 标签 #F5F5F7
+       强调色 #0A84FF（systemBlue Dark）。 */
+    --background: 240 4% 9.5%;
+    --foreground: 240 6% 96%;
+    /* 14% 的卡面与 9.5% 的窗口底只差 1.13:1，实际观感是「整页一块」：
+       深色下卡片边界本来就靠阴影与 0.5px 白边，底色不拉开就完全糊在一起。
+       17% 拉到 1.25:1，同层级（hover/tooltip）跟着上抬，层级不能倒挂。 */
+    --card: 240 4% 17%;
+    --card-foreground: 240 6% 96%;
+    --popover: 240 4% 19%;
+    --popover-foreground: 240 6% 96%;
+    --primary: 211 100% 52%;
+    --primary-foreground: 0 0% 100%;
+    --primary-ink: 211 100% 62%;
+    /* 列表 hover / 选中态必须比卡片本身更亮一点，否则控件「消失」在卡面里 */
+    --secondary: 240 4% 21%;
+    --secondary-foreground: 240 6% 96%;
+    --muted: 240 4% 19%;
+    --muted-foreground: 240 3% 62%;
+    --accent: 240 4% 21%;
+    --accent-foreground: 240 6% 96%;
+    --destructive: 4 100% 62%;
+    --destructive-foreground: 0 0% 100%;
+    --destructive-ink: 4 100% 64%;
+    --success: 145 60% 45%;
+    --success-ink: 158 64% 52%;
+    --warning-ink: 43 96% 56%;
+    --warning: 38 100% 56%;
+    --border: 240 5% 24%;
+    --input: 240 5% 27%;
+    --ring: 211 100% 52%;
     --radius: 0.75rem;
-    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.5), 0 8px 24px -8px rgb(0 0 0 / 0.6), inset 0 1px 0 0 rgb(255 255 255 / 0.05);
-    --shadow-card-hover: 0 4px 12px -2px rgb(0 0 0 / 0.6), 0 16px 36px -8px rgb(0 0 0 / 0.7), inset 0 1px 0 0 rgb(255 255 255 / 0.08), 0 0 0 1px hsl(217 91% 60% / 0.2);
+    /* 深色下的「轮廓」用 6% 白而不是黑：黑边在深色里会把卡片切成硬块，
+       白边更像材料本身的边缘反光。 */
+    --bg-image:
+      radial-gradient(1200px 700px at 50% -25%, hsl(0 0% 100% / 0.05), transparent 62%),
+      linear-gradient(180deg, hsl(240 4% 10.5%) 0%, hsl(240 4% 9%) 100%);
+    --shadow-card:
+      inset 0 0.5px 0 0 rgb(255 255 255 / 0.10),
+      0 0 0 0.5px rgb(255 255 255 / 0.07),
+      0 1px 2px rgb(0 0 0 / 0.45),
+      0 8px 24px -12px rgb(0 0 0 / 0.7);
+    --shadow-card-hover:
+      inset 0 0.5px 0 0 rgb(255 255 255 / 0.14),
+      0 0 0 0.5px rgb(255 255 255 / 0.10),
+      0 2px 6px rgb(0 0 0 / 0.5),
+      0 16px 36px -14px rgb(0 0 0 / 0.8);
   }
 }
 
 @layer base {
-  /* 打包字体：Inter（拉丁/数字）+ JetBrains Mono（等宽），离线可用，改善观感 */
+  /* 打包字体：Inter（拉丁/数字）+ JetBrains Mono（等宽），离线可用，改善观感。
+     同时声明 woff2 与 woff2-variations：兼容新旧版本 Chromium / WKWebView / WebKitGTK，
+     font-display: swap 确保解码前先用系统字体首帧直出，绝不阻塞渲染。 */
   @font-face {
     font-family: 'Inter';
-    src: url('./assets/fonts/inter-var.woff2') format('woff2-variations');
+    src:
+      url('./assets/fonts/inter-var.woff2') format('woff2'),
+      url('./assets/fonts/inter-var.woff2') format('woff2-variations');
     font-weight: 100 900;
     font-style: normal;
     font-display: swap;
   }
   @font-face {
     font-family: 'JBMono';
-    src: url('./assets/fonts/jbmono-var.woff2') format('woff2-variations');
+    src:
+      url('./assets/fonts/jbmono-var.woff2') format('woff2'),
+      url('./assets/fonts/jbmono-var.woff2') format('woff2-variations');
     font-weight: 100 800;
     font-style: normal;
     font-display: swap;
@@ -91,14 +148,25 @@
   }
   body {
     @apply bg-background text-foreground;
-    /* Inter 负责拉丁/数字（更现代），中文回落系统雅黑（渲染清晰） */
-    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI',
-      'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+    background-image: var(--bg-image);
+    background-attachment: fixed;
+    /* Inter 负责拉丁/数字（本地内置）；中文按平台原生黑体顺序回退：
+       macOS(PingFang SC) → 鸿蒙/小米字体 → Windows(Microsoft YaHei UI) → Linux(Noto Sans CJK SC) → 系统兜底 */
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+      'Hiragino Sans GB', 'HarmonyOS Sans SC', 'MiSans', 'Microsoft YaHei UI',
+      'Microsoft YaHei', 'Noto Sans CJK SC', 'Source Han Sans SC',
+      'WenQuanYi Micro Hei', 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
     font-feature-settings: 'rlig' 1, 'calt' 1, 'cv11' 1, 'ss01' 1;
     font-size: 14px;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+    /* 浏览器表面也算设计的一部分：光标与选区默认是 Chrome 蓝，和这套蓝不同一个调。 */
+    caret-color: hsl(var(--primary));
+  }
+  ::selection {
+    background-color: hsl(var(--primary) / 0.22);
+    color: inherit;
   }
   /* 字体层级：标题更鲜明，描述不致过淡 */
   h1 { font-weight: 700; letter-spacing: -0.01em; }
@@ -106,19 +174,28 @@
   h3 { font-weight: 600; }
   /* svg 兜底：任何漏了尺寸的图标不会被 viewBox 撑成巨图 */
   svg { width: 16px; height: 16px; flex: none; }
-  /* 等宽元素统一用 JBMono（端口/路径/时间/代码） */
+  /* 等宽元素统一用 JBMono（端口/路径/时间/代码），中文回退无衬线黑体防退化为点阵宋体 */
   code, kbd, samp, pre {
-    font-family: 'JBMono', 'JetBrains Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+    font-family: 'JBMono', 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Consolas,
+      'PingFang SC', 'Microsoft YaHei UI', 'Noto Sans Mono CJK SC', ui-monospace, monospace;
     font-feature-settings: 'zero' 1, 'ss01' 1;
   }
   /* 数字等宽（统计卡 / 端口 / 耗时 / 时间列不跳动） */
   .tabular-nums {
     font-variant-numeric: tabular-nums;
   }
-  code,
-  pre,
-  kbd {
-    font-family: 'JBMono', 'JetBrains Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+}
+
+/* 动效降级：入场淡入、hover 位移、toast 都在这里一次收口。
+   没有这段，前庭功能敏感的用户在每一次路由切换都要吃一次 150ms 位移。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -182,62 +259,67 @@
   }
 }
 
-/* 自定义背景图模式：侧边栏与主内容区域卡片共享半透明与毛玻璃磨砂质感，文字保持清晰 */
-.has-custom-bg aside,
-.has-custom-bg main .bg-card,
-.has-custom-bg main [data-card] {
-  background-color: hsl(var(--card) / var(--card-opacity, 0.45));
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+/* ===== 自定义背景图：主动开启时内容区透出壁纸，卡片跟随 --card-opacity 半透磨砂 =====
+   默认不启用壁纸（无 .has-custom-bg）时，整站为干净的纯色实底；
+   用户主动在「个性化背景」里选图/预设后，侧栏与顶栏由 .vibrancy 提供毛玻璃，
+   主内容区透明露出底层壁纸，卡片按 --card-opacity 透光并叠加 backdrop-filter 磨砂。 */
+/* 卡片容器（顶层 .bg-card）获得磨砂透光，卡片内的嵌套 .bg-card（如虚拟列表行、表头）不再重复半透明 */
+.has-custom-bg main > .bg-card,
+.has-custom-bg main > * > .bg-card {
+  background-color: hsl(var(--card) / var(--card-opacity, 0.78));
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
 }
-
-/* 顶栏磨砂与透明度联动：对齐整体视觉通透感 */
-.has-custom-bg header {
-  background-color: hsl(var(--background) / max(var(--card-opacity, 0.8), 0.72));
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-}
-
-/* 浮层与下拉菜单微磨砂：在半透明卡片之上展现优雅层级 */
-.has-custom-bg [data-radix-popper-content-wrapper] [role="listbox"],
+/* 浮层不透明：下拉菜单浮在图上必然读不清，这里直接给实底 */
+.has-custom-bg [data-radix-popper-content-wrapper] [role='listbox'],
 .has-custom-bg .bg-popover {
-  background-color: hsl(var(--popover) / 0.95);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background-color: hsl(var(--popover));
+}
+/* 壁纸色调保护层：深色模式下叠加深色半透明、浅色模式下叠加浅色半透明，
+   让高亮白斑/死黑区域不会直接吞掉页面标题与副标题文字。 */
+.has-custom-bg::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -9;
+  pointer-events: none;
+  background: linear-gradient(180deg, hsl(var(--background) / 0.25) 0%, hsl(var(--background) / 0.15) 100%);
 }
 
-/* 粘性表头（如 Logs 页）防穿透：提高表头不透明度，防止滚动内容在表头底层产生重影干扰 */
-.has-custom-bg main .sticky.bg-card,
-.has-custom-bg main .sticky > .bg-card,
-.has-custom-bg main [data-card] .sticky {
-  background-color: hsl(var(--card) / max(var(--card-opacity, 0.8), 0.94));
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+/* 折叠区的自绘箭头：写在 @layer base 里会被 utilities 层的
+   `transform: translate(var(--tw-translate-x), ...)`（由 transition-transform 引入）
+   覆盖成 identity，箭头永远不转（实测 matrix(1,0,0,1,0,0)）。
+   放在最外层，任何 <details> 里的 .chev 都适用。 */
+details[open] > summary .chev {
+  transform: rotate(90deg);
 }
 
-/* 浅色模式质感增强：增加内高光与边框对比度，防止在亮色壁纸上边缘失真 */
-:root:not([data-theme='dark']) .has-custom-bg aside,
-:root:not([data-theme='dark']) .has-custom-bg header,
-:root:not([data-theme='dark']) .has-custom-bg main .bg-card,
-:root:not([data-theme='dark']) .has-custom-bg main [data-card] {
-  border-color: hsl(var(--border) / 0.85);
+/* 卡片材质：
+   深色下这是一层 3.5% 的白渐变（顶部亮、55% 处消失），叠在纯色卡上形成「受光面」；
+   浅色下几乎全白，等于不生效。
+   不用单独组件类，是因为全站卡片都用 bg-card —— 一处声明，整体统一。 */
+.bg-card {
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, #fff 3.5%, transparent) 0%,
+    transparent 55%
+  );
+}
+[data-theme='light'] .bg-card {
+  background-image: none;
 }
 
-:root:not([data-theme='dark']) .has-custom-bg main .bg-card,
-:root:not([data-theme='dark']) .has-custom-bg main [data-card] {
-  box-shadow: 0 4px 16px -2px rgb(15 23 42 / 0.08), inset 0 1px 0 0 rgb(255 255 255 / 0.9);
+/* ===== macOS Vibrancy =====
+   侧栏与工具栏不是「一块不透明的灰」，而是能透出底层环境的毛玻璃。
+   关键是 saturate(180%)：只有 blur 的话是「糊」，加了饱和度提升才像玻璃。
+   前提是背景本身是纯色/微渐变（不是彩色壁纸），否则会重新变成花屏。 */
+.vibrancy {
+  /* 必须 hsl() 包一层：--card 是「0 0% 100%」这种分量三元组，不是颜色值，
+     直接丢进 color-mix() 会让整条声明被丢弃 → 侧栏/顶栏只剩 blur、没有底色。 */
+  background-color: hsl(var(--card) / 0.74);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
 }
-
-/* 深色模式质感增强：微调边框微光与阴影深度 */
-[data-theme='dark'] .has-custom-bg aside,
-[data-theme='dark'] .has-custom-bg header,
-[data-theme='dark'] .has-custom-bg main .bg-card,
-[data-theme='dark'] .has-custom-bg main [data-card] {
-  border-color: hsl(var(--border) / 0.65);
+[data-theme='dark'] .vibrancy {
+  background-color: hsl(var(--card) / 0.68);
 }
-
-[data-theme='dark'] .has-custom-bg main .bg-card,
-[data-theme='dark'] .has-custom-bg main [data-card] {
-  box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.5), inset 0 1px 0 0 rgb(255 255 255 / 0.06);
-}
-

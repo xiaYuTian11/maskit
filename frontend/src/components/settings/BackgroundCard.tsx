@@ -20,10 +20,11 @@ import { useI18n } from '@/lib/i18n'
 import { toast } from '@/lib/toast'
 import {
   PRESET_WALLPAPERS,
-  DEFAULT_WALLPAPER_DATA_URL,
   DEFAULT_OPACITY,
+  PRESET_OPACITY,
   DEFAULT_BLUR,
   DEFAULT_CARD_OPACITY,
+  DEFAULT_WALLPAPER_DATA_URL,
   getStoredWallpaperConfig,
 } from '@/lib/wallpaper'
 
@@ -115,6 +116,7 @@ export function BackgroundCard() {
   }
 
   const handleResetDefault = () => {
+    // 恢复默认外观 = 恢复到系统推荐的星云流光默认预设
     applyImage(DEFAULT_WALLPAPER_DATA_URL)
     applyOpacity(DEFAULT_OPACITY)
     applyBlur(DEFAULT_BLUR)
@@ -124,7 +126,8 @@ export function BackgroundCard() {
 
   const applyPreset = (dataUrl: string) => {
     applyImage(dataUrl)
-    if (opacity === 0) applyOpacity(DEFAULT_OPACITY)
+    // DEFAULT_OPACITY 为 0（初始不启用），选预设时必须抬到可见值，否则点了没反应
+    if (opacity === 0) applyOpacity(PRESET_OPACITY)
     toast(t('settings.bg.applied'))
   }
 
@@ -144,7 +147,7 @@ export function BackgroundCard() {
     try {
       const optimizedBase64 = await compressImage(file)
       applyImage(optimizedBase64)
-      if (opacity === 0) applyOpacity(DEFAULT_OPACITY)
+      if (opacity === 0) applyOpacity(PRESET_OPACITY)
       toast(t('settings.bg.applied'))
     } catch {
       toast(t('settings.bg.readFail'), 'error')
@@ -155,7 +158,7 @@ export function BackgroundCard() {
   }
 
   return (
-    <Card className="border bg-card">
+    <Card className="border bg-card shadow-card">
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle className="flex items-center gap-2 text-sm font-semibold">
@@ -167,7 +170,7 @@ export function BackgroundCard() {
               variant="ghost"
               size="sm"
               onClick={handleResetDefault}
-              className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+              className="h-7 gap-1 px-2 text-muted-foreground hover:text-foreground"
             >
               <RotateCcw className="h-3 w-3" />
               <span>{t('settings.bg.resetDefault')}</span>
@@ -204,7 +207,7 @@ export function BackgroundCard() {
         {/* 预设壁纸推荐 */}
         <div>
           <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            <Sparkles className="h-3.5 w-3.5 text-primary-ink" />
             <span>{t('settings.bg.presets')}</span>
           </div>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -226,7 +229,7 @@ export function BackgroundCard() {
                     alt={t(p.labelKey)}
                     className="h-14 w-full object-cover transition-transform duration-300 group-hover:scale-105"
                   />
-                  <div className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm truncate">
+                  <div className="absolute inset-x-0 bottom-0 bg-background/80 px-2 py-0.5 text-2xs font-medium backdrop-blur-sm truncate">
                     {t(p.labelKey)}
                   </div>
                 </button>
@@ -253,7 +256,7 @@ export function BackgroundCard() {
                 onChange={(e) => applyOpacity(Number(e.target.value))}
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
               />
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.bg.opacityHint')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('settings.bg.opacityHint')}</p>
             </div>
 
             {/* 2. 背景虚化模糊度滑块 */}
@@ -271,7 +274,7 @@ export function BackgroundCard() {
                 onChange={(e) => applyBlur(Number(e.target.value))}
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
               />
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.bg.blurHint')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('settings.bg.blurHint')}</p>
             </div>
 
             {/* 3. 卡片不透明度滑块 */}
@@ -289,7 +292,7 @@ export function BackgroundCard() {
                 onChange={(e) => applyCardOpacity(Number(e.target.value))}
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary"
               />
-              <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.bg.cardOpacityHint')}</p>
+              <p className="mt-1 text-2xs text-muted-foreground">{t('settings.bg.cardOpacityHint')}</p>
             </div>
           </div>
         )}
@@ -310,7 +313,7 @@ export function BackgroundCard() {
             </span>
           </label>
           {!bgImage && (
-            <p className="text-[11px] text-muted-foreground">{t('settings.bg.emptyHint')}</p>
+            <p className="text-2xs text-muted-foreground">{t('settings.bg.emptyHint')}</p>
           )}
         </div>
       </CardContent>

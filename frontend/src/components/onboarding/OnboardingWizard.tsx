@@ -96,7 +96,7 @@ export function OnboardingWizard({ open, onOpenChange, firstRun }: OnboardingWiz
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <span className="rounded-lg bg-primary/10 p-2 text-primary"><Icon className="h-5 w-5" /></span>
+            <span className="rounded-lg bg-primary/10 p-2 text-primary-ink"><Icon className="h-5 w-5" /></span>
             {t('onboarding.title')}
           </DialogTitle>
           <DialogDescription>{t('onboarding.description')}</DialogDescription>
@@ -111,7 +111,7 @@ export function OnboardingWizard({ open, onOpenChange, firstRun }: OnboardingWiz
                   aria-label={`${index + 1}`}
                   onClick={() => setStep(index)}
                   className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-colors ${
-                    index === step ? 'bg-primary text-primary-foreground' : index < step ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'
+                    index === step ? 'bg-primary text-primary-foreground' : index < step ? 'bg-primary/15 text-primary-ink' : 'bg-muted text-muted-foreground'
                   }`}
                 >
                   {index < step ? <Check className="h-3.5 w-3.5" /> : index + 1}

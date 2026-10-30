@@ -231,7 +231,7 @@ export function WordsImportDialog({
               <Button
                 size="sm"
                 variant="outline"
-                className="h-8 text-xs"
+                className=""
                 onClick={() => fileInputRef.current?.click()}
               >
                 <FileText className="mr-1.5 h-3.5 w-3.5" />
@@ -262,7 +262,7 @@ export function WordsImportDialog({
                   value="merge"
                   checked={mode === 'merge'}
                   onChange={() => setMode('merge')}
-                  className="mt-0.5 text-primary focus:ring-primary"
+                  className="mt-0.5 text-primary-ink focus:ring-primary"
                 />
                 <span className="text-xs leading-normal">
                   {t('settings.words.importModeMerge')}
@@ -275,7 +275,7 @@ export function WordsImportDialog({
                   value="overwrite"
                   checked={mode === 'overwrite'}
                   onChange={() => setMode('overwrite')}
-                  className="mt-0.5 text-primary focus:ring-primary"
+                  className="mt-0.5 text-primary-ink focus:ring-primary"
                 />
                 <span className="text-xs leading-normal text-muted-foreground hover:text-foreground">
                   {t('settings.words.importModeOverwrite')}
@@ -288,12 +288,12 @@ export function WordsImportDialog({
           {rawText.trim() && (
             <div className="rounded-md border p-2.5 text-xs">
               {parsed && parsed.totalWords > 0 ? (
-                <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                <div className="flex items-center gap-2 text-success-ink">
                   <CheckCircle2 className="h-4 w-4 shrink-0" />
                   <span>{tf('settings.words.importSummary', { cats: parsed.totalCats, words: parsed.totalWords })}</span>
                 </div>
               ) : (
-                <div className="flex items-center gap-2 text-amber-600 dark:text-amber-400">
+                <div className="flex items-center gap-2 text-warning-ink">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
                   <span>{t('settings.words.importEmpty')}</span>
                 </div>

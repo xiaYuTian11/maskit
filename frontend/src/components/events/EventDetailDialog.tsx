@@ -16,7 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { EventTypeIcon, getEventTypeMeta } from '@/components/events/EventTypeIcon'
-import { CheckCircle2 } from 'lucide-react'
+import { CheckCircle2, ChevronRight } from 'lucide-react'
 import type { ShieldEvent, LogMode } from '@/types/api'
 import dayjs from 'dayjs'
 import { cn, copyText } from '@/lib/utils'
@@ -24,9 +24,11 @@ import { useI18n } from '@/lib/i18n'
 
 function MetaItem({ k, v, wide }: { k: string; v: React.ReactNode; wide?: boolean }) {
   return (
-    <div className={cn('rounded-lg bg-muted/50 p-2.5', wide && 'col-span-2')}>
-      <div className="text-[11px] text-muted-foreground">{k}</div>
-      <div className="mt-0.5 break-all text-[13px]">{v}</div>
+    // 不再给每个键值对套一块 bg-muted 圆角：弹窗里一格一底色，十几格就是十几块
+    // 补丁，真实层级（标题 / 字段 / 值）被底色抹平。改为纯文字层级，靠字号与颜色区分。
+    <div className={cn('min-w-0', wide && 'col-span-2')}>
+      <div className="text-2xs text-muted-foreground">{k}</div>
+      <div className="mt-0.5 break-all text-[13px] leading-5">{v}</div>
     </div>
   )
 }
@@ -139,7 +141,7 @@ function highlightOriginals(text: string, originals: string[]): React.ReactNode 
     out.push(
       <mark
         key={`${i}-${m[0]}`}
-        className="rounded bg-emerald-500/25 px-0.5 text-foreground ring-1 ring-emerald-500/40"
+        className="rounded bg-success/25 px-0.5 text-foreground ring-1 ring-success/40"
       >
         {m[0]}
       </mark>,
@@ -155,9 +157,9 @@ function CopyBtn({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
   return (
     <Button
-      size="sm"
+      size="2xs"
       variant="ghost"
-      className="h-6 px-2 text-[11px]"
+      className="px-2"
       onClick={async () => {
         try {
           await copyText(text)
@@ -231,41 +233,64 @@ export function EventDetailDialog({
       case 'RESTORE':
         return {
           label: t('detail.stageRestore'),
-          className: 'bg-emerald-600 text-white hover:bg-emerald-600',
+          className: 'bg-success/15 text-success-ink',
           desc: t('detail.stageRestoreDesc'),
         }
       case 'MASK':
         return {
           label: t('detail.stageMask'),
-          className: 'bg-blue-600 text-white hover:bg-blue-600',
+          className: 'bg-primary/15 text-primary-ink',
           desc: t('detail.stageMaskDesc'),
         }
       case 'BLOCK':
         return {
           label: t('evt.block'),
-          className: 'bg-red-600 text-white hover:bg-red-600',
+          className: 'bg-destructive/15 text-destructive-ink',
           desc: t('detail.stageBlockDesc'),
         }
       case 'ERR':
         return {
           label: t('evt.err'),
-          className: 'bg-red-600 text-white hover:bg-red-600',
+          className: 'bg-destructive/15 text-destructive-ink',
           desc: t('detail.stageErrDesc'),
         }
       case 'SCAN_WARN':
         return {
           label: t('evt.scanWarn'),
-          className: 'bg-amber-600 text-white hover:bg-amber-600',
+          className: 'bg-warning/15 text-warning-ink',
           desc: t('detail.stageScanWarnDesc'),
         }
       default:
         return {
           label: meta.labelKey ? t(meta.labelKey) : (meta.label || event.type),
-          className: 'bg-slate-600 text-white hover:bg-slate-600',
+          className: 'bg-muted-foreground text-white hover:bg-muted-foreground',
           desc: t('detail.stageOtherDesc'),
         }
     }
   }, [event, t])
+
+  // 只保留真正观测到的项：「未知 / 未观测」不作为一行展示（10 行未知等于没信息）。
+  //
+  // 用 IIFE 而不是顶层可选链：`if (!event) return []` 之后 event 被收窄成非空，
+  // 内部就能写成 `event.transport?.phase`。顶层直接 `event?.transport?.phase`
+  // 虽然能过 TS，但破坏了 test_event_details_translate_all_enum_surfaces 的
+  // 字面量契约（那条测试靠源码字符串守住「枚举必须过 translator」）。
+  const unknownLabel = t('transport.unknown')
+  const transportRows: Array<[string, string]> = (() => {
+    if (!event) return []
+    return ([
+      [t('transport.phase'), transportLabel('phase', event.transport?.phase)],
+      [t('transport.reason'), transportLabel('reason', event.transport?.reason)],
+      [t('transport.connection'), event.transport?.server_conn_id || unknownLabel],
+      [t('transport.protocol'), !event.transport?.protocol || event.transport.protocol === 'unknown' ? unknownLabel : event.transport.protocol],
+      [t('transport.reused'), event.transport?.reused == null ? unknownLabel : t(event.transport.reused ? 'transport.yes' : 'transport.no')],
+      [t('transport.proxy'), event.transport?.via_proxy == null ? unknownLabel : t(event.transport.via_proxy ? 'transport.yes' : 'transport.no')],
+      [t('transport.idle'), event.transport?.idle_s == null ? unknownLabel : String(event.transport.idle_s)],
+      [t('transport.connect'), event.transport?.connect_ms == null ? unknownLabel : formatDuration(event.transport.connect_ms)],
+      [t('transport.tls'), event.transport?.tls_ms == null ? unknownLabel : formatDuration(event.transport.tls_ms)],
+      [t('transport.evidence'), event.transport?.evidence_complete == null ? unknownLabel : t(event.transport.evidence_complete ? 'transport.complete' : 'transport.partial')],
+    ] as Array<[string, string]>).filter(([, v]) => v !== unknownLabel)
+  })()
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -336,26 +361,36 @@ export function EventDetailDialog({
               <MetaItem k={t('detail.duration')} v={formatDuration(event.total_ms ?? event.upstream_ms ?? event.first_byte_ms)} />
             </div>
 
-            <section className="space-y-2 rounded-lg border bg-muted/20 p-3 text-xs" aria-label={t('transport.title')}>
-              <h3 className="font-medium">{t('transport.title')}</h3>
-              <dl className="grid grid-cols-2 gap-2">
-                {[
-                  [t('transport.phase'), transportLabel('phase', event.transport?.phase)],
-                  [t('transport.reason'), transportLabel('reason', event.transport?.reason)],
-                  [t('transport.connection'), event.transport?.server_conn_id || t('transport.unknown')],
-                  [t('transport.protocol'), !event.transport?.protocol || event.transport.protocol === 'unknown' ? t('transport.unknown') : event.transport.protocol],
-                  [t('transport.reused'), event.transport?.reused == null ? t('transport.unknown') : t(event.transport.reused ? 'transport.yes' : 'transport.no')],
-                  [t('transport.proxy'), event.transport?.via_proxy == null ? t('transport.unknown') : t(event.transport.via_proxy ? 'transport.yes' : 'transport.no')],
-                  [t('transport.idle'), event.transport?.idle_s == null ? t('transport.unknown') : String(event.transport.idle_s)],
-                  [t('transport.connect'), event.transport?.connect_ms == null ? t('transport.unknown') : formatDuration(event.transport.connect_ms)],
-                  [t('transport.tls'), event.transport?.tls_ms == null ? t('transport.unknown') : formatDuration(event.transport.tls_ms)],
-                  [t('transport.evidence'), event.transport?.evidence_complete == null ? t('transport.unknown') : t(event.transport.evidence_complete ? 'transport.complete' : 'transport.partial')],
-                ].map(([label, value]) => <div key={label} className="min-w-0"><dt className="text-muted-foreground">{label}</dt><dd className="break-all">{value}</dd></div>)}
-              </dl>
-              <p className="text-muted-foreground">{t('transport.caution')}</p>
-              {event.failure_phase && <p>{t('transport.localPhase')}: {transportLabel('phase', event.failure_phase)}</p>}
-              {event.upstream_may_have_executed && <p>{t('transport.executed')}</p>}
-            </section>
+            {/* 连接观测：默认折叠。这一块 10 个字段在一次普通反向代理请求里
+                通常全是「未知 / 未观测」（没走隧道、没复连、没 TLS 耗时采样），
+                展开时会把半屏让给 12 个并列的「未知」，真正的结论（脱敏了哪些、
+                有没有残留）被挤到下面。折叠后标题行只报「已观测几项」，其余收在里面。 */}
+            <details className="rounded-lg border bg-muted/20 text-xs">
+              <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 font-medium">
+                <span>{t('transport.title')}</span>
+                <span className="ml-auto text-2xs font-normal text-muted-foreground">
+                  {transportRows.length > 0
+                    ? tf('detail.transportObserved', { n: transportRows.length })
+                    : t('transport.unknown')}
+                </span>
+                <ChevronRight className="chev h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
+              </summary>
+              <div className="space-y-2 border-t px-3 py-2">
+                {transportRows.length > 0 ? (
+                  <dl className="grid grid-cols-2 gap-2">
+                    {transportRows.map(([label, value]) => (
+                      <div key={label} className="min-w-0">
+                        <dt className="text-muted-foreground">{label}</dt>
+                        <dd className="break-all">{value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+                <p className="text-muted-foreground">{t('transport.caution')}</p>
+                {event.failure_phase && <p>{t('transport.localPhase')}: {transportLabel('phase', event.failure_phase)}</p>}
+                {event.upstream_may_have_executed && <p>{t('transport.executed')}</p>}
+              </div>
+            </details>
             {(event.ner_init_ms != null || event.ner_infer_ms != null || event.ner_budget_wait_ms != null) && (
               <p className="text-xs text-muted-foreground">{t('detail.nerTiming')}: {[event.ner_init_ms, event.ner_infer_ms, event.ner_budget_wait_ms].map((v) => v == null ? t('transport.unknown') : formatDuration(v)).join(' / ')}</p>
             )}
@@ -372,7 +407,7 @@ export function EventDetailDialog({
                       variant={event.stream_actual === 'stream' ? 'outline' : 'secondary'}
                       className={cn(
                         event.stream_actual === 'stream_error' &&
-                          'border-amber-500/40 text-amber-600 dark:text-amber-400',
+                          'border-warning/40 text-warning-ink',
                       )}
                     >
                       {event.stream_actual === 'stream'
@@ -392,12 +427,14 @@ export function EventDetailDialog({
                 注意：审计耗时/扫描字节那三个字段**不属于这里** —— 它们只存在于
                 audit_events 表，渲染在 AuditEventDetailDialog；挂在这里是死分支
                 （真这么写过一次：永远读到 undefined，比不渲染更糟）。 */}
-            {(event.block_source || event.engine_busy || event.ner_global_throttled
+            {(event.block_source || event.engine_busy || (event.ner_global_throttled ?? 0) > 0
               // 等待类指标必须单独放行：它们由不同的事件发出（aux 等待是
               // reason=response_offload_wait 的 ERR，只带 client 来源字段），
               // 挂在上面那三个字段的 gate 里就永远渲染不出来（死分支）。
-              || typeof event.aux_wait_ms === 'number'
-              || typeof event.ner_sem_wait_ms === 'number') && (
+              // 阈值与外层渲染条件保持一致（都是 >= 1），否则 await_ms=0 时
+              // 外层为真、内层全为假 → 弹窗里多出一个 40px 高的空灰框。
+              || (event.aux_wait_ms ?? 0) >= 1
+              || (event.ner_sem_wait_ms ?? 0) >= 1) && (
               <div className="space-y-1 rounded-lg border bg-muted/30 p-2.5 text-xs">
                 {event.block_source && (
                   <div>
@@ -408,7 +445,7 @@ export function EventDetailDialog({
                   </div>
                 )}
                 {event.engine_busy && (
-                  <div className="text-amber-700 dark:text-amber-400">
+                  <div className="text-warning-ink">
                     {tf('detail.engineBusy', {
                       d: String(event.engine_queue_depth ?? '-'),
                       b: String(event.engine_queue_bytes ?? '-'),
@@ -416,7 +453,7 @@ export function EventDetailDialog({
                   </div>
                 )}
                 {typeof event.ner_global_throttled === 'number' && event.ner_global_throttled > 0 && (
-                  <div className="text-amber-700 dark:text-amber-400">
+                  <div className="text-warning-ink">
                     {tf('detail.nerGlobalThrottled', { n: String(event.ner_global_throttled) })}
                   </div>
                 )}
@@ -438,7 +475,7 @@ export function EventDetailDialog({
                 三种原因的可操作性不同，所以文案分开：编码问题是上游行为（改不了），
                 排除名单是自己加的（改得了）。 */}
             {event.stream_degraded_reason && (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed text-warning-ink">
                 <div className="font-semibold">{t('detail.streamDegraded')}</div>
                 <div className="mt-1">
                   {event.stream_degraded_reason.startsWith('content_encoding:')
@@ -464,7 +501,7 @@ export function EventDetailDialog({
 
             {/* msg / reason 提示（_reasoning_effort_hint 等排查信息） */}
             {(event.msg || event.reason) && (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed text-warning-ink">
                 {event.msg && <div className="whitespace-pre-wrap">{event.msg}</div>}
                 {event.reason && <div className="mt-1 text-muted-foreground">{transportLabel('reason', event.reason)}</div>}
                 {/* 连续静默秒数是上面那句结论的证据：没有它，用户无法核对
@@ -486,13 +523,13 @@ export function EventDetailDialog({
                   {event.decision && (
                     <Badge
                       variant={event.decision === 'blocked' ? 'destructive' : 'secondary'}
-                      className="text-[11px]"
+                      className="text-2xs"
                     >
                       {t(DECISION_LABELS[event.decision] || event.decision)}
                     </Badge>
                   )}
                   {event.completeness && (
-                    <Badge variant="outline" className="text-[11px] font-normal">
+                    <Badge variant="outline" className="text-2xs font-normal">
                       {t(COMPLETENESS_LABELS[event.completeness] || event.completeness)}
                     </Badge>
                   )}
@@ -500,7 +537,7 @@ export function EventDetailDialog({
                 {reasonCodes.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {reasonCodes.map(([k, n]) => (
-                      <Badge key={k} variant="outline" className="text-[11px] font-normal">
+                      <Badge key={k} variant="outline" className="text-2xs font-normal">
                         {t(NER_SKIP_LABELS[k] || k)} × {n}
                       </Badge>
                     ))}
@@ -515,12 +552,12 @@ export function EventDetailDialog({
                 所以一旦命中就必须在这条事件的详情里说清「为什么漏、漏了几条」，
                 让用户能自己决定是调大预算还是关掉语义识别。 */}
             {event.ner_truncated && (
-              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400">
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed text-warning-ink">
                 <div className="font-semibold">{t('detail.nerDegraded')}</div>
                 <div className="mt-1 text-muted-foreground">{t('detail.nerDegradedHint')}</div>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {Object.entries(event.ner_skip_reasons ?? {}).map(([k, n]) => (
-                    <Badge key={k} variant="outline" className="text-[11px] font-normal">
+                    <Badge key={k} variant="outline" className="text-2xs font-normal">
                       {t(NER_SKIP_LABELS[k] || k)} × {n}
                     </Badge>
                   ))}
@@ -545,17 +582,17 @@ export function EventDetailDialog({
                   </div>
                   <div className="flex items-center gap-3 text-xs">
                     {(event.count ?? 0) > 0 && (
-                      <span className="text-blue-600 dark:text-blue-400">
+                      <span className="text-primary-ink">
                         {t('logs.colMasked')} <strong>{event.count}</strong>
                       </span>
                     )}
                     {(event.restored ?? 0) > 0 && (
-                      <span className="text-emerald-600 dark:text-emerald-400">
+                      <span className="text-success-ink">
                         {t('logs.colRestored')} <strong>{event.restored}</strong>
                       </span>
                     )}
                     {(event.unresolved ?? 0) > 0 && (
-                      <span className="text-amber-600 dark:text-amber-400" title={t('logs.unresolvedHint')}>
+                      <span className="text-warning-ink" title={t('logs.unresolvedHint')}>
                         {t('logs.colUnresolved')} <strong>{event.unresolved}</strong>
                       </span>
                     )}
@@ -575,10 +612,10 @@ export function EventDetailDialog({
                         **必须看得见**：设成 warn 就是明文出网，用户得知道放行了什么，
                         否则和关掉规则没区别，却还留着「我设了 warn」的误解。 */}
                     {(event.warned ?? 0) > 0 && (
-                      <span className="text-amber-600 dark:text-amber-400" title={t('logs.warnedHint')}>
+                      <span className="text-warning-ink" title={t('logs.warnedHint')}>
                         {t('logs.colWarned')} <strong>{event.warned}</strong>
                         {Array.isArray(event.warned_labels) && event.warned_labels.length > 0 && (
-                          <span className="ml-1 font-mono text-[10px] opacity-80">
+                          <span className="ml-1 font-mono text-2xs opacity-80">
                             {event.warned_labels.join(',')}
                           </span>
                         )}
@@ -596,7 +633,7 @@ export function EventDetailDialog({
                       <span className="text-muted-foreground" title={t('logs.egressSkippedHint')}>
                         {t('logs.colEgressSkipped')}
                         {event.egress_skip_reason && (
-                          <span className="ml-1 font-mono text-[10px] opacity-80">
+                          <span className="ml-1 font-mono text-2xs opacity-80">
                             {event.egress_skip_reason}
                           </span>
                         )}
@@ -604,13 +641,13 @@ export function EventDetailDialog({
                     )}
                   </div>
                 </div>
-                <p className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
+                <p className="mt-1.5 text-2xs text-muted-foreground leading-relaxed">
                   {stageInfo.desc}
                 </p>
                 {/* 未还原占位符样本：让「模型把占位符写错/自造」与「映射过期」一眼可分。
                     旧事件没有这个字段时不渲染（不给正常请求加噪声）。 */}
                 {Array.isArray(event.unresolved_samples) && event.unresolved_samples.length > 0 && (
-                  <div className="mt-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] leading-snug text-amber-700 dark:text-amber-300">
+                  <div className="mt-1.5 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-2xs leading-snug text-warning-ink">
                     <span>{t('logs.unresolvedSamples')}</span>
                     <span className="ml-1 font-mono">{event.unresolved_samples.join(' / ')}</span>
                   </div>
@@ -618,7 +655,7 @@ export function EventDetailDialog({
                 {/* 外来/示例占位符样本：本机从未签发过的那些。用中性色与上面那条区分——
                     这条不是故障，是「模型/历史里带来的、本机无能为力的东西」。 */}
                 {Array.isArray(event.foreign_samples) && event.foreign_samples.length > 0 && (
-                  <div className="mt-1.5 rounded border border-border bg-muted/40 px-2 py-1 text-[11px] leading-snug text-muted-foreground">
+                  <div className="mt-1.5 rounded border border-border bg-muted/40 px-2 py-1 text-2xs leading-snug text-muted-foreground">
                     <span>{t('logs.foreignSamples')}</span>
                     <span className="ml-1 font-mono">{event.foreign_samples.join(' / ')}</span>
                   </div>
@@ -653,32 +690,32 @@ export function EventDetailDialog({
                       // （notRestored 且无此标记）处置完全不同：前者要查映射，后者本来正常。
                       const unresolvedEcho = notRestored && item.unresolved === true
                       return (
-                        <div key={item.label + idx} className={cn("rounded-lg border bg-card p-3", isRestored && "border-emerald-500/30 bg-emerald-500/5", unresolvedEcho && "border-amber-500/30 bg-amber-500/5")}>
+                        <div key={item.label + idx} className={cn("rounded-lg border bg-card p-3", isRestored && "border-success/30 bg-success/5", unresolvedEcho && "border-warning/30 bg-warning/5")}>
                           <div className="flex items-center justify-between gap-2">
                             <div className="flex items-center gap-2">
                               {isRestored && (
-                                <span className="flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400" title={t('detail.itemRestored')}>
+                                <span className="flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-2xs font-medium text-success-ink" title={t('detail.itemRestored')}>
                                   <CheckCircle2 className="h-3 w-3" />
                                   <span>{t('detail.itemRestored')}</span>
                                 </span>
                               )}
                               {notRestored && !unresolvedEcho && (
-                                <span className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground" title={t('detail.itemNotRestored')}>
+                                <span className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground" title={t('detail.itemNotRestored')}>
                                   <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />
                                   <span>{t('detail.itemNotRestored')}</span>
                                 </span>
                               )}
                               {unresolvedEcho && (
-                                <span className="flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400" title={t('detail.itemUnresolvedEchoHint')}>
-                                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500/70" />
+                                <span className="flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-2xs font-medium text-warning-ink" title={t('detail.itemUnresolvedEchoHint')}>
+                                  <span className="h-1.5 w-1.5 rounded-full bg-warning/70" />
                                   <span>{t('detail.itemUnresolvedEcho')}</span>
                                 </span>
                               )}
-                              <Badge variant="outline" className="font-mono text-[11px]">
+                              <Badge variant="outline" className="font-mono text-2xs">
                                 {item.label}
                               </Badge>
                               {item.from_history && (
-                                <Badge variant="secondary" className="text-[10px] font-normal text-muted-foreground">
+                                <Badge variant="secondary" className="text-2xs font-normal text-muted-foreground">
                                   {t('detail.fromHistory')}
                                 </Badge>
                               )}
@@ -701,7 +738,7 @@ export function EventDetailDialog({
                             {item.tok != null && (
                               <div className="flex items-start gap-2">
                                 <span className="w-12 shrink-0 text-muted-foreground">{t('detail.placeholder')}</span>
-                                <span className="break-all rounded bg-blue-500/10 px-1 text-blue-600 dark:text-blue-400">
+                                <span className="break-all rounded bg-primary/10 px-1 text-primary-ink">
                                   {item.tok}
                                 </span>
                               </div>
@@ -735,7 +772,7 @@ export function EventDetailDialog({
                 <div className="mb-2 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <h3 className="text-[13px] font-semibold">{t('detail.reqOriginal')}</h3>
-                    <span className="text-[11px] text-muted-foreground">
+                    <span className="text-2xs text-muted-foreground">
                       {event.dialog_req.length.toLocaleString()} {t('detail.chars')} · {tf('detail.approxTokens', { n: Math.ceil(event.dialog_req.length / 3.5).toLocaleString() })}
                     </span>
                   </div>
@@ -766,7 +803,7 @@ export function EventDetailDialog({
                     <h3 className="text-[13px] font-semibold">
                       {event.type === 'MASK' ? t('detail.userMsg') : event.type === 'RESTORE' ? t('detail.assistantMsg') : t('detail.bodyText')}
                     </h3>
-                    <span className="text-[11px] text-muted-foreground">
+                    <span className="text-2xs text-muted-foreground">
                       {event.dialog.length.toLocaleString()} {t('detail.chars')} · {tf('detail.approxTokens', { n: Math.ceil(event.dialog.length / 3.5).toLocaleString() })}
                     </span>
                   </div>

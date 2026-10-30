@@ -35,14 +35,14 @@ interface OutcomeMeta {
 }
 
 export const OUTCOME_META: Record<OutcomeKey, OutcomeMeta> = {
-  success: { icon: CheckCircle2, cls: 'text-emerald-600 dark:text-emerald-400', dot: 'bg-emerald-500' },
-  warn: { icon: AlertTriangle, cls: 'text-amber-600 dark:text-amber-400', dot: 'bg-amber-500' },
-  failed: { icon: XCircle, cls: 'text-red-600 dark:text-red-400', dot: 'bg-red-500' },
-  canceled: { icon: CircleSlash, cls: 'text-muted-foreground', dot: 'bg-slate-400' },
-  pending: { icon: Loader2, cls: 'text-blue-600 dark:text-blue-400', dot: 'bg-blue-500', spin: true },
-  incomplete: { icon: CircleDashed, cls: 'text-muted-foreground', dot: 'bg-slate-400' },
-  passthrough: { icon: ArrowRight, cls: 'text-muted-foreground', dot: 'bg-slate-400' },
-  alert: { icon: ShieldAlert, cls: 'text-amber-600 dark:text-amber-400', dot: 'bg-amber-500' },
+  success: { icon: CheckCircle2, cls: 'text-success-ink', dot: 'bg-success' },
+  warn: { icon: AlertTriangle, cls: 'text-warning-ink', dot: 'bg-warning' },
+  failed: { icon: XCircle, cls: 'text-destructive-ink', dot: 'bg-destructive' },
+  canceled: { icon: CircleSlash, cls: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+  pending: { icon: Loader2, cls: 'text-primary-ink', dot: 'bg-primary', spin: true },
+  incomplete: { icon: CircleDashed, cls: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+  passthrough: { icon: ArrowRight, cls: 'text-muted-foreground', dot: 'bg-muted-foreground' },
+  alert: { icon: ShieldAlert, cls: 'text-warning-ink', dot: 'bg-warning' },
 }
 
 /**
@@ -66,7 +66,7 @@ export function OutcomeBadge({
   return (
     <span className={cn('flex min-w-0 items-center gap-1', className)} title={hint ?? t(OUTCOME_HINT_KEY[outcome])}>
       <Icon className={cn('h-3.5 w-3.5 shrink-0', meta.cls, meta.spin && 'animate-spin')} />
-      <span className={cn('truncate text-[11px] font-medium', meta.cls)}>{t(OUTCOME_LABEL_KEY[outcome])}</span>
+      <span className={cn('truncate text-2xs font-medium', meta.cls)}>{t(OUTCOME_LABEL_KEY[outcome])}</span>
     </span>
   )
 }

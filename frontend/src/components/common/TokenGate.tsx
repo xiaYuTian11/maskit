@@ -81,15 +81,15 @@ export function TokenGate() {
           }}
           placeholder={t('tokenGate.placeholder')}
         />
-        {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+        {error && <p className="text-xs text-destructive-ink">{error}</p>}
         {originRejected && (
-          <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+          <div className="space-y-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning-ink">
             <p>{t('tokenGate.originMismatch')}</p>
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="w-full border-amber-500/40 text-xs text-amber-800 hover:bg-amber-500/20 dark:text-amber-200"
+              className="w-full border-warning/40 text-warning-ink hover:bg-warning/20"
               onClick={handleDisableOriginAndLogin}
               disabled={busy}
             >

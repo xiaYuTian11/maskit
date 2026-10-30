@@ -6,6 +6,8 @@
  * - 系统安全：证书安装 / 数据目录 / 审计配置
  * 保存走 POST /api/config 全量提交，warnings 必须展示（端口变化自动重启提示）
  */
+import { PageHeader } from '@/components/patterns/PageHeader'
+import { Section } from '@/components/patterns/Section'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -28,7 +30,6 @@ import {
   RefreshCw,
   List,
   Send,
-  HelpCircle,
   ExternalLink,
   Check,
   CheckCircle2,
@@ -67,7 +68,6 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Label } from '@/components/ui/label'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/lib/toast'
 import { isTauri, shieldFetch } from '@/lib/shield-fetch'
@@ -77,6 +77,7 @@ import { LabCard } from '@/components/settings/LabCard'
 import { VerificationCard } from '@/components/settings/VerificationCard'
 import { DiagnosticPreviewButton } from '@/components/settings/DiagnosticPreviewButton'
 import { cn, copyText } from '@/lib/utils'
+import { Hint } from '@/components/common/Hint'
 import dayjs from 'dayjs'
 import { useI18n } from '@/lib/i18n'
 import { AboutUpdateCard } from '@/components/settings/AboutUpdateCard'
@@ -364,18 +365,18 @@ function UpstreamForm({
           <div>
             <Label className="text-xs">{t('settings.upstream.targetBaseUrl')}</Label>
             <Input className="mt-1 h-8 font-mono text-xs" value={form.target} onChange={(e) => set('target', e.target.value)} placeholder={t('settings.upstream.targetPh')} />
-            <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.upstream.targetHint')}</p>
+            <p className="mt-1 text-2xs text-muted-foreground">{t('settings.upstream.targetHint')}</p>
           </div>
 
           {/* 路径白名单：多选 chip */}
           <div>
             <Label className="text-xs">{t('settings.upstream.paths')}</Label>
-            <p className="mt-1 text-[11px] text-muted-foreground">{t('settings.upstream.pathsHint')}</p>
+            <p className="mt-1 text-2xs text-muted-foreground">{t('settings.upstream.pathsHint')}</p>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {(form.paths ?? []).map((p) => (
-                <span key={p} className="group flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-[11px]">
+                <span key={p} className="group flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 font-mono text-2xs">
                   {p}
-                  <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => togglePath(p)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+                  <button type="button" className="text-muted-foreground opacity-60 hover:text-destructive group-hover:opacity-100" onClick={() => togglePath(p)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                 </span>
               ))}
               {presetPaths.map((p) => (
@@ -383,14 +384,14 @@ function UpstreamForm({
                   key={p}
                   type="button"
                   onClick={() => togglePath(p)}
-                  className="rounded-full border border-dashed border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                  className="rounded-full border border-dashed border-border bg-muted/40 px-2 py-0.5 font-mono text-2xs text-muted-foreground hover:border-primary/50 hover:text-foreground"
                 >
                   + {p}
                 </button>
               ))}
             </div>
             {form.paths?.includes('/v1') && (
-              <p className="mt-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+              <p className="mt-1 text-2xs text-success-ink">
                 {t('settings.upstream.wildcardHint')}
               </p>
             )}
@@ -400,7 +401,7 @@ function UpstreamForm({
                   togglePath(newPath.trim()); setNewPath('')
                 }
               }} />
-              <Button size="sm" variant="ghost" className="h-7 text-[11px]" onClick={() => { if (newPath.trim().startsWith('/')) { togglePath(newPath.trim()); setNewPath('') } }}>{t('settings.upstream.pathAdd')}</Button>
+              <Button size="xs" variant="ghost" className="" onClick={() => { if (newPath.trim().startsWith('/')) { togglePath(newPath.trim()); setNewPath('') } }}>{t('settings.upstream.pathAdd')}</Button>
             </div>
           </div>
 
@@ -409,7 +410,7 @@ function UpstreamForm({
               identity），不碰这里就绝不会注入任何头。仅在「客户端根本不发某个头、上游又要求」
               时才需要展开填写，例如 anthropic-beta: context-1m-2025-08-07。 */}
           <details
-            className="group rounded-lg border border-border/60 bg-muted/20"
+            className="group rounded-lg border border-border bg-muted/20"
             open={advOpen}
             onToggle={(e) => setAdvOpen(e.currentTarget.open)}
           >
@@ -417,7 +418,7 @@ function UpstreamForm({
               <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
               {t('settings.upstream.headersAdvanced')}
               {Object.keys(extraHeaders).length > 0 && (
-                <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px]">{Object.keys(extraHeaders).length}</span>
+                <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-2xs">{Object.keys(extraHeaders).length}</span>
               )}
             </summary>
             <div className="px-2.5 pb-2.5">
@@ -426,42 +427,40 @@ function UpstreamForm({
                   // 凭据头标红：这类头不该配在这里，非空值时保存会被拦下（见 saveChecked）。
                   // 历史配置里若残留，用户一眼就能看到该删哪行；值已清空的行等同于删行，不标红。
                   const cred = isCredentialHeader(k) && String(v ?? '').trim() !== ''
-                  const base = 'h-7 font-mono text-[11px]'
+                  const base = 'h-7 font-mono text-2xs'
                   return (
                     <div key={k} className="flex items-center gap-1.5">
                       <Input
-                        className={`${base} w-36 ${cred ? 'border-destructive/60 text-destructive' : ''}`}
+                        className={`${base} w-36 ${cred ? 'border-destructive/60 text-destructive-ink' : ''}`}
                         value={k}
                         readOnly
                         title={cred ? t('settings.upstream.headerCredentialRow') : undefined}
                       />
                       <Input className={`${base} flex-1`} value={v} onChange={(e) => setHeader(k, e.target.value)} />
-                      <button type="button" className="shrink-0 text-muted-foreground opacity-60 hover:text-red-500" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+                      <button type="button" className="shrink-0 text-muted-foreground opacity-60 hover:text-destructive" onClick={() => removeHeader(k)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                     </div>
                   )
                 })}
                 <div className="flex items-center gap-1.5">
-                  <Input className="h-7 w-36 font-mono text-[11px]" value={newHeaderKey} onChange={(e) => setNewHeaderKey(e.target.value)} placeholder={t('settings.upstream.headerNamePh')} />
-                  <Input className="h-7 flex-1 font-mono text-[11px]" value={newHeaderVal} onChange={(e) => setNewHeaderVal(e.target.value)} placeholder={t('settings.upstream.headerValPh')} />
-                  <Button size="sm" variant="ghost" className="h-7 shrink-0 text-[11px]" onClick={() => { if (newHeaderKey.trim()) { setHeader(newHeaderKey, newHeaderVal); setNewHeaderKey(''); setNewHeaderVal('') } }}>{t('settings.upstream.headerAdd')}</Button>
+                  <Input className="h-7 w-36 font-mono text-2xs" value={newHeaderKey} onChange={(e) => setNewHeaderKey(e.target.value)} placeholder={t('settings.upstream.headerNamePh')} />
+                  <Input className="h-7 flex-1 font-mono text-2xs" value={newHeaderVal} onChange={(e) => setNewHeaderVal(e.target.value)} placeholder={t('settings.upstream.headerValPh')} />
+                  <Button size="xs" variant="ghost" className="shrink-0" onClick={() => { if (newHeaderKey.trim()) { setHeader(newHeaderKey, newHeaderVal); setNewHeaderKey(''); setNewHeaderVal('') } }}>{t('settings.upstream.headerAdd')}</Button>
                 </div>
               </div>
-              <p className="mt-1.5 text-[11px] text-muted-foreground">{t('settings.upstream.headerHint')}</p>
+              <p className="mt-1.5 text-2xs text-muted-foreground">{t('settings.upstream.headerHint')}</p>
             </div>
           </details>
 
-          <details className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
+          <details className="rounded-lg border border-border bg-muted/20 p-2.5">
             <summary className="cursor-pointer text-xs">{t('connection.policy')}</summary>
             <div className="mt-2 space-y-2 text-xs">
               <p className="text-muted-foreground">{t('connection.policyHint')}</p>
               {!deadlinesAvailable && <p role="status" className="text-muted-foreground">{t('connection.unavailable')}</p>}
               {http2 && <p className="text-muted-foreground">{t('connection.h1Only')}</p>}
-              <TooltipProvider delayDuration={200}>
                 <Label htmlFor="connection-reuse" className="flex items-center gap-1">
                   {t('connection.reuse')}
-                  <Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.reuseTooltip')}</TooltipContent></Tooltip>
+                  <Hint text={t('connection.reuseTooltip')} />
                 </Label>
-              </TooltipProvider>
               <Select value={policy.reuse} disabled={!reuseAvailable} onValueChange={(v) => setPolicy({ reuse: v as 'default' | 'never' })}>
                 <SelectTrigger id="connection-reuse" className="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -471,21 +470,15 @@ function UpstreamForm({
               </Select>
               <div className="grid grid-cols-3 gap-2">
                 <div>
-                  <TooltipProvider delayDuration={200}>
-                    <Label htmlFor="connection-idle" className="flex items-center gap-1">{t('connection.idleTtl')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.idleTtlTooltip')}</TooltipContent></Tooltip></Label>
-                  </TooltipProvider>
+                    <Label htmlFor="connection-idle" className="flex items-center gap-1">{t('connection.idleTtl')}<Hint text={t('connection.idleTtlTooltip')} /></Label>
                   <Input id="connection-idle" className="mt-1 h-8 text-xs" type="number" min="0.001" step="any" disabled={!reuseAvailable} value={policy.idle_ttl_s ?? ''} placeholder={t('connection.unchanged')} onChange={(e) => setPolicy({ idle_ttl_s: e.target.value === '' ? null : Number(e.target.value) })} />
                 </div>
                 <div>
-                  <TooltipProvider delayDuration={200}>
-                    <Label htmlFor="connection-connect" className="flex items-center gap-1">{t('connection.connectBudget')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.connectBudgetTooltip')}</TooltipContent></Tooltip></Label>
-                  </TooltipProvider>
+                    <Label htmlFor="connection-connect" className="flex items-center gap-1">{t('connection.connectBudget')}<Hint text={t('connection.connectBudgetTooltip')} /></Label>
                   <Input id="connection-connect" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.connect_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ connect_timeout_s: Number(e.target.value) })} />
                 </div>
                 <div>
-                  <TooltipProvider delayDuration={200}>
-                    <Label htmlFor="connection-tls" className="flex items-center gap-1">{t('connection.tlsBudget')}<Tooltip><TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger><TooltipContent className="max-w-[280px] text-xs">{t('connection.tlsBudgetTooltip')}</TooltipContent></Tooltip></Label>
-                  </TooltipProvider>
+                    <Label htmlFor="connection-tls" className="flex items-center gap-1">{t('connection.tlsBudget')}<Hint text={t('connection.tlsBudgetTooltip')} /></Label>
                   <Input id="connection-tls" className="mt-1 h-8 text-xs" type="number" min="1" max="120" disabled={!deadlinesAvailable} value={form.connection_policy?.tls_handshake_timeout_s ?? ''} placeholder={t('connection.unenforced')} onChange={(e) => setPolicy({ tls_handshake_timeout_s: Number(e.target.value) })} />
                 </div>
               </div>
@@ -508,22 +501,22 @@ function UpstreamForm({
             </label>
             {form.use_proxy && (
               (egressProxy?.enabled && egressProxy?.url) ? (
-                <div className="flex items-center gap-1.5 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+                <div className="flex items-center gap-1.5 rounded-md border border-success/20 bg-success/5 px-2.5 py-1.5 text-2xs text-success-ink">
                   <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
                   <span>{tf('settings.upstream.egressActiveHint', { url: egressProxy?.url ?? '' })}</span>
                 </div>
               ) : (
-                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-300">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 p-2.5 text-xs text-warning-ink">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-warning-ink" />
                   <div className="flex-1 space-y-1">
                     <p className="font-medium leading-none">{t('settings.upstream.egressNotConfiguredTitle')}</p>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.upstream.egressNotConfiguredDesc')}</p>
+                    <p className="text-2xs leading-relaxed text-muted-foreground">{t('settings.upstream.egressNotConfiguredDesc')}</p>
                     {onGoToEgress && (
                       <Button
                         type="button"
                         variant="outline"
-                        size="sm"
-                        className="mt-1 h-6 border-amber-500/30 bg-background px-2 text-[11px] text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                        size="2xs"
+                        className="mt-1 border-warning/30 bg-background px-2 text-warning-ink hover:bg-warning/10 dark:text-amber-300"
                         onClick={onGoToEgress}
                       >
                         {t('settings.upstream.goToEgressSettings')}
@@ -539,7 +532,7 @@ function UpstreamForm({
                   <Switch checked={!!form.takeover} onCheckedChange={(v) => set('takeover', v)} />
                   {t('settings.upstream.takeover')}
                 </label>
-                <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.upstream.takeoverHint')}</p>
+                <p className="text-2xs leading-relaxed text-muted-foreground">{t('settings.upstream.takeoverHint')}</p>
               </>
             )}
           </div>
@@ -557,20 +550,14 @@ function UpstreamForm({
 /**
  * 配置备份在数据目录中自动生成；此卡展示时间、结构摘要并提供一键回滚。
  */
+
 /** 开关行：label + ? 问号 Tooltip 说明 + Switch（全局统一样式） */
 function SettingToggle({ label, desc, checked, onChange }: { label: string; desc: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex cursor-pointer items-center justify-between gap-2 rounded-lg border bg-card/60 px-3 py-2.5">
+    <label className="flex cursor-pointer items-center justify-between gap-2 rounded-md border-b border-border px-1.5 py-2.5 transition-colors last:border-0 hover:bg-muted/60">
       <span className="flex min-w-0 items-center gap-1.5 text-[13px]">
         <span className="truncate">{label}</span>
-        <TooltipProvider delayDuration={200}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <HelpCircle className="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground/60" />
-            </TooltipTrigger>
-            <TooltipContent className="max-w-[280px] text-xs">{desc}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <Hint text={desc} />
       </span>
       <Switch checked={checked} onCheckedChange={onChange} className="scale-75" />
     </label>
@@ -615,14 +602,15 @@ function ConfigBackupCard() {
   }
 
   return (
-    <Card className="border bg-card">
+    <Card className="border bg-card shadow-card">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <div>
-          <CardTitle className="text-sm font-semibold">{t('settings.backup.title')}</CardTitle>
-          <p className="text-[11px] text-muted-foreground">{t('settings.backup.desc')}</p>
-          <p className="mt-1 text-xs text-muted-foreground">{t('settings.backup.desc2')}</p>
+          <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+            {t('settings.backup.title')}
+            <Hint text={`${t('settings.backup.desc')}　${t('settings.backup.desc2')}`} />
+          </CardTitle>
         </div>
-        <span className="shrink-0 rounded-lg border bg-muted/40 px-2.5 py-1 text-[11px] text-muted-foreground">
+        <span className="shrink-0 rounded-lg border bg-muted/40 px-2.5 py-1 text-2xs text-muted-foreground">
           {t('settings.backup.currentLabel')} <b className="font-mono text-foreground">{cur.upstreams ?? '—'}</b>
           {' · '}{t('settings.backup.wordLabel')} <b className="font-mono text-foreground">{cur.words ?? '—'}</b>
         </span>
@@ -641,10 +629,10 @@ function ConfigBackupCard() {
                 key={b.file}
                 className={cn(
                   'flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-xs',
-                  richer ? 'border-amber-500/40 bg-amber-500/5' : 'bg-muted/20',
+                  richer ? 'border-warning/40 bg-warning/5' : 'bg-muted/20',
                 )}
               >
-                <span className="font-mono text-[11px] text-muted-foreground">
+                <span className="font-mono text-2xs text-muted-foreground">
                   {b.mtime ? dayjs(b.mtime * 1000).format('YYYY-MM-DD HH:mm:ss') : '—'}
                 </span>
                 <span className="text-muted-foreground">
@@ -654,11 +642,11 @@ function ConfigBackupCard() {
                   {' · '}{t('settings.backup.summaryDomains')} <b className="font-mono text-foreground">{b.domains}</b>
                 </span>
                 {richer && (
-                  <Badge className="bg-amber-500/15 text-[10px] text-amber-600 hover:bg-amber-500/15 dark:text-amber-400">
+                  <Badge className="bg-warning/15 text-2xs text-warning-ink hover:bg-warning/15 dark:text-amber-400">
                     {t('settings.backup.richer')}
                   </Badge>
                 )}
-                <Button size="sm" variant="outline" className="ml-auto h-7 px-2.5 text-[11px]" onClick={() => setPending(b)}>
+                <Button size="xs" variant="outline" className="ml-auto px-2.5" onClick={() => setPending(b)}>
                   {t('settings.backup.restore')}
                 </Button>
               </div>
@@ -695,7 +683,7 @@ function ConfigBackupCard() {
 // ========== 主页面 ==========
 export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } = {}) {
   const { lang, setLang, t, tf } = useI18n()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   // 页面隐藏时停止轮询；可见时自动刷新
@@ -1236,47 +1224,52 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   return (
     <div className="space-y-5">
-      <div className="flex items-end justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {embeddedTab === 'words'
-              ? t('settings.pageTitle.words')
-              : embeddedTab === 'clients'
-                ? t('settings.pageTitle.clients')
-                : embeddedTab === 'extension'
-                  ? t('settings.pageTitle.extension')
-                  : t('settings.pageTitle.advanced')}
-          </h1>
-          <p className="mt-1 text-sm font-medium text-muted-foreground">
-            {embeddedTab === 'words'
-              ? t('settings.pageSubtitle.words')
-              : embeddedTab === 'clients'
-                ? t('settings.pageSubtitle.clients')
-                : embeddedTab === 'extension'
-                  ? t('settings.pageSubtitle.extension')
-                  : t('settings.pageSubtitle.advanced')}
-          </p>
-        </div>
-        {/* 原来这里是一个「保存全部」按钮，onClick 是 save({})——提交一个空补丁。
-            它不只是坏，而是多余：本页每个开关都在 onChange 里即时保存，
-            文本框按 Enter 提交，压根没有「待保存」的本地状态。
-            留着它反而制造「我的改动还没存」的错觉，点一下又什么都没发生。
-            改为如实说明当前行为，避免让用户误以为存在待提交状态。 */}
-        <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-          {saving
-            ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />{t('settings.saving')}</>
-            : <><Check className="h-3.5 w-3.5 text-emerald-500" />{t('settings.autoSaved')}</>}
-        </span>
-      </div>
+      {/* 原来这里是一个「保存全部」按钮，onClick 是 save({})——提交一个空补丁。
+      它不只是坏，而是多余：本页每个开关都在 onChange 里即时保存，
+      文本框按 Enter 提交，压根没有「待保存」的本地状态。
+      留着它反而制造「我的改动还没存」的错觉，点一下又什么都没发生。
+      改为如实说明当前行为，避免让用户误以为存在待提交状态。 */}
+      <PageHeader
+        title={embeddedTab === 'words'
+          ? t('settings.pageTitle.words')
+          : embeddedTab === 'clients'
+            ? t('settings.pageTitle.clients')
+            : embeddedTab === 'extension'
+              ? t('settings.pageTitle.extension')
+              : t('settings.pageTitle.advanced')}
+        subtitle={embeddedTab === 'words'
+          ? t('settings.pageSubtitle.words')
+          : embeddedTab === 'clients'
+            ? t('settings.pageSubtitle.clients')
+            : embeddedTab === 'extension'
+              ? t('settings.pageSubtitle.extension')
+              : t('settings.pageSubtitle.advanced')}
+        actions={
+          <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            {saving
+              ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />{t('settings.saving')}</>
+              : <><Check className="h-3.5 w-3.5 text-success-ink" />{t('settings.autoSaved')}</>}
+          </span>
+        }
+      />
 
       {!!cfg?._meta?.warnings?.length && (
-        <div role="alert" className="space-y-1 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+        <div role="alert" className="space-y-1 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive-ink">
           {cfg._meta.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
         </div>
       )}
 
       {/* embeddedTab（独立页模式）：隐藏 tab 栏，只渲染对应内容；URL 保持 /words /clients */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => {
+          setActiveTab(v)
+          if (!embeddedTab) {
+            setSearchParams(v === 'advanced' ? {} : { tab: v }, { replace: true })
+          }
+        }}
+        className="w-full"
+      >
         {!embeddedTab && (
           <TabsList>
             <TabsTrigger value="advanced">{t('settings.tab.advanced')}</TabsTrigger>
@@ -1310,7 +1303,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               value={clientSearch}
               onChange={(e) => setClientSearch(e.target.value)}
             />
-            <Button size="sm" variant="outline" className="h-8" onClick={() => setAdding(true)}>
+            <Button size="sm" variant="outline" className="" onClick={() => setAdding(true)}>
               <Plus className="mr-1 h-3.5 w-3.5" /> {t('settings.clients.add')}
             </Button>
           </div>
@@ -1332,15 +1325,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </div>
 
           {/* 网页版 AI 扩展引导 */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3.5 py-2.5 text-xs text-blue-700 dark:text-blue-300">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border bg-card px-3.5 py-2.5 text-xs text-muted-foreground shadow-card">
             <div className="flex items-center gap-2">
-              <Globe className="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
+              <Globe className="h-4 w-4 shrink-0 text-primary-ink" />
               <span>{t('settings.clients.extBridgeTip')}</span>
             </div>
             <Button
               size="sm"
               variant="outline"
-              className="h-7 border-blue-500/30 bg-background text-xs text-blue-700 hover:bg-blue-500/10 dark:text-blue-300"
+              className="h-7"
               onClick={() => navigate('/extension')}
             >
               {t('settings.clients.goToExtBridge')}
@@ -1348,15 +1341,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </div>
 
           {hasUnconfiguredEgress && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3.5 py-2.5 text-xs text-warning-ink">
               <div className="flex items-center gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <AlertCircle className="h-4 w-4 shrink-0 text-warning-ink" />
                 <span>{t('settings.clients.egressGlobalWarning')}</span>
               </div>
               <Button
                 size="sm"
                 variant="outline"
-                className="h-7 border-amber-500/30 bg-background text-xs text-amber-700 hover:bg-amber-500/10 dark:text-amber-300"
+                className="h-7 border-warning/30 bg-background text-warning-ink hover:bg-warning/10 dark:text-amber-300"
                 onClick={handleGoToEgress}
               >
                 {t('settings.clients.goToEgressSetting')}
@@ -1382,17 +1375,17 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               const paths: string[] = ((u.paths ?? []).length > 0 ? (u.paths as string[]) : ['/v1/chat/completions', '/v1/completions', '/v1/messages', '/v1/responses'])
                 .filter((p) => !(isStandardOpenAI && p === '/v1'))
               return (
-              <Card key={u.port} className="flex h-full flex-col border bg-card shadow-[var(--shadow-card)] transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-[var(--shadow-card-hover)]">
+              <Card key={u.port} className="flex h-full flex-col border bg-card shadow-card transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-card-hover">
                 <CardContent className="flex flex-1 flex-col gap-2.5 p-3.5">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-semibold">{u.name}</span>
-                    <Badge variant="outline" className="font-mono text-[10px]">
+                    <Badge variant="outline" className="font-mono text-2xs">
                       :{u.port}
                     </Badge>
                     {u.use_proxy && (
                       egressActive ? (
                         <Badge
-                          className="bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-600 hover:bg-amber-500/10 dark:text-amber-400"
+                          className="bg-warning/10 px-1.5 text-2xs font-medium text-warning-ink hover:bg-warning/10 dark:text-amber-400"
                           title={tf('settings.clients.egressActiveTip', { url: cfg?.egress_proxy?.url ?? '' })}
                         >
                           {t('settings.clients.egress')}
@@ -1400,7 +1393,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       ) : (
                         <Badge
                           variant="outline"
-                          className="gap-1 border-amber-500/40 bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                          className="gap-1 border-warning/40 bg-warning/10 px-1.5 text-2xs font-medium text-warning-ink"
                           title={t('settings.clients.egressDisabledTip')}
                         >
                           <AlertCircle className="h-3 w-3" />
@@ -1408,34 +1401,34 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                         </Badge>
                       )
                     )}
-                    <code className="ml-auto truncate font-mono text-[11px] text-muted-foreground" title={u.target}>
+                    <code className="ml-auto truncate font-mono text-2xs text-muted-foreground" title={u.target}>
                       {u.target}
                     </code>
                     <div className="flex items-center gap-1">
-                      <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => doTest(u)} disabled={testing === u.name}>
+                      <Button size="sm" variant="ghost" className="px-2" onClick={() => doTest(u)} disabled={testing === u.name}>
                         {testing === u.name ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plug className="h-3 w-3" />}
                         {t('settings.clients.test')}
                       </Button>
-                      <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setEditing(u)}>
+                      <Button size="sm" variant="ghost" className="px-2" onClick={() => setEditing(u)}>
                         <Pencil className="h-3 w-3" /> {t('settings.clients.edit')}
                       </Button>
-                      <Button size="sm" variant="ghost" className="h-8 px-2 text-xs text-red-600 hover:text-red-600 dark:text-red-400" onClick={() => setConfirmDelete(u.name)}>
+                      <Button size="sm" variant="ghost" className="px-2 text-destructive-ink hover:text-destructive-ink" onClick={() => setConfirmDelete(u.name)}>
                         <Trash2 className="h-3 w-3" />
                       </Button>
                     </div>
                   </div>
                   {/* Base URL 行：一键复制符合 SDK 规范的 Base URL（OpenAI 规范带 /v1） */}
                   <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-2.5 py-1.5">
-                    <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{t('settings.clients.baseUrl')}</span>
+                    <span className="shrink-0 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">{t('settings.clients.baseUrl')}</span>
                     <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground">{standardBaseUrl}</code>
                     <Button
-                      size="sm" variant="ghost" className="h-6 shrink-0 gap-1 px-2 text-[11px]"
+                      size="2xs" variant="ghost" className="shrink-0 gap-1 px-2"
                       onClick={() => triggerCopy(`url:${u.name}`, standardBaseUrl)}
                     >
                       {copiedMap[`url:${u.name}`] ? (
                         <>
-                          <Check className="h-3 w-3 text-emerald-500" />
-                          <span className="font-medium text-emerald-600 dark:text-emerald-400">{t('detail.copied')}</span>
+                          <Check className="h-3 w-3 text-success-ink" />
+                          <span className="font-medium text-success-ink">{t('detail.copied')}</span>
                         </>
                       ) : (
                         <>
@@ -1453,7 +1446,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     || Object.keys(u.extra_headers ?? {}).length > 0) && (
                   <div className="flex flex-wrap items-center gap-1.5">
                     {paths.length > 0 && (
-                      <span className="shrink-0 text-[10px] font-medium text-muted-foreground">{t('settings.clients.supportPaths')}</span>
+                      <span className="shrink-0 text-2xs font-medium text-muted-foreground">{t('settings.clients.supportPaths')}</span>
                     )}
                     {paths.map((p) => {
                       const isCopied = !!copiedMap[`path:${u.name}:${p}`]
@@ -1464,9 +1457,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                           title={tf('settings.clients.copyUrl', { url: `${baseUrl}${p}` })}
                           onClick={() => triggerCopy(`path:${u.name}:${p}`, `${baseUrl}${p}`)}
                           className={cn(
-                            'rounded-full border px-2 py-0.5 font-mono text-[10px] transition-all',
+                            'rounded-full border px-2 py-0.5 font-mono text-2xs transition-all',
                             isCopied
-                              ? 'border-emerald-500 bg-emerald-500/10 font-semibold text-emerald-600 dark:text-emerald-400'
+                              ? 'border-success bg-success/10 font-semibold text-success-ink'
                               : 'border-border bg-card text-muted-foreground hover:border-primary/40 hover:text-foreground',
                           )}
                         >
@@ -1475,17 +1468,17 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       )
                     })}
                     {(cfg?.capture_mode ?? 'reverse') !== 'reverse' && u.base_path && (
-                      <Badge variant="outline" className="font-mono text-[10px]" title={t('settings.clients.routePrefix')}>{tf('settings.clients.routePrefixVal', { p: u.base_path })}</Badge>
+                      <Badge variant="outline" className="font-mono text-2xs" title={t('settings.clients.routePrefix')}>{tf('settings.clients.routePrefixVal', { p: u.base_path })}</Badge>
                     )}
                     {Object.keys(u.extra_headers ?? {}).length > 0 && (
-                      <Badge variant="outline" className="font-mono text-[10px]" title={tf('settings.clients.injectedHeaders', { list: Object.keys(u.extra_headers ?? {}).join(', ') })}>
+                      <Badge variant="outline" className="font-mono text-2xs" title={tf('settings.clients.injectedHeaders', { list: Object.keys(u.extra_headers ?? {}).join(', ') })}>
                         {tf('settings.clients.headerCount', { n: Object.keys(u.extra_headers ?? {}).length })}
                       </Badge>
                     )}
                   </div>
                   )}
                   {testResult[u.name] && (
-                    <div className={cn('truncate text-[11px]', testResult[u.name].startsWith('✓') ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400')}>
+                    <div className={cn('truncate text-2xs', testResult[u.name].startsWith('✓') ? 'text-success-ink' : 'text-destructive-ink')}>
                       {testResult[u.name]}
                     </div>
                   )}
@@ -1494,7 +1487,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               )
             })}
             {upstreams.length === 0 && (
-              <Card className="border bg-card">
+              <Card className="border bg-card shadow-card">
                 <CardContent className="py-10 text-center text-sm text-muted-foreground">
                   {t('settings.clients.noClients')}
                 </CardContent>
@@ -1524,7 +1517,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               {tf('settings.words.count', { a: Object.keys(words).length, b: Object.values(words).reduce((a, b) => a + b.length, 0) })}
             </p>
             <div className="flex gap-1.5">
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => {
+              <Button size="sm" variant="outline" className="h-7" onClick={() => {
                 // 并集：保留已有禁用 + 新增 ≤2 字短词，不覆盖用户手动禁用的长词。
                 // 按分类下发 list_add 增量（服务端也是并集），避免整表覆盖。
                 const steps: ConfigPatch[] = []
@@ -1551,17 +1544,17 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     autoFocus
                   />
                 )}
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => newCatName === '' ? setNewCatName(' ') : addCategory(newCatName)}>
+                <Button size="sm" variant="outline" className="h-7" onClick={() => newCatName === '' ? setNewCatName(' ') : addCategory(newCatName)}>
                   <Plus className="mr-1 h-3 w-3" /> {t('settings.words.newCat')}
                 </Button>
               </div>
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setEnvImportOpen(true)}>
+              <Button size="sm" variant="outline" className="h-7" onClick={() => setEnvImportOpen(true)}>
                 <FileText className="mr-1 h-3 w-3" /> {t('settings.words.envImport')}
               </Button>
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setWordsImportOpen(true)}>
+              <Button size="sm" variant="outline" className="h-7" onClick={() => setWordsImportOpen(true)}>
                 <Upload className="mr-1 h-3 w-3" /> {t('settings.words.import')}
               </Button>
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={exportWords}>
+              <Button size="sm" variant="outline" className="h-7" onClick={exportWords}>
                 <Download className="mr-1 h-3 w-3" /> {t('settings.words.export')}
               </Button>
             </div>
@@ -1575,7 +1568,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             const emptyTable = !w?.engine_stale && (w?.configured ?? 0) > 0 && w?.engine_count === 0
             if (!bad.length && !emptyTable) return null
             return (
-              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-snug text-amber-700 dark:text-amber-300">
+              <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-2xs leading-snug text-warning-ink">
                 <div className="font-medium">
                   {tf('settings.words.tableIssues', { n: bad.length || (w?.configured ?? 0) })}
                 </div>
@@ -1591,7 +1584,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             )
           })()}
           {/* 分类词表：卡片式（每分类一张卡，网格布局） */}
-          <div className="rounded-lg border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground space-y-1">
+          <div className="rounded-lg border bg-muted/30 px-3 py-2 text-2xs text-muted-foreground space-y-1">
             <div>
               {t('settings.words.regexHint').split('{n}')[0]}<code className="font-mono">re:</code>{t('settings.words.regexHint').split('{n}').slice(1).join('{n}')}
             </div>
@@ -1613,13 +1606,16 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <button
                   type="button"
                   onClick={() => setWordSearch('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
           )}
+          {/* 等高拉伸（items-stretch）：分类间词条数差异大（1 条 vs 12 条），
+              试过 items-start 让卡片按内容收缩，结果两列高度参差、看起来像瀑布流，
+              比卡底留白更乱。留白是整洁的代价，参差不是。 */}
           <div className="grid items-stretch gap-3 md:grid-cols-2">
             {Object.entries(words).map(([cat, list]) => {
               const isCatDisabled = catDisabledList.includes(cat)
@@ -1630,7 +1626,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               <Card
                 key={cat}
                 className={cn(
-                  'flex h-full flex-col border bg-card shadow-[var(--shadow-card)] transition-all hover:shadow-[var(--shadow-card-hover)]',
+                  'flex h-full flex-col border bg-card shadow-card transition-all hover:shadow-card-hover',
                   isCatDisabled && 'border-dashed border-border/80 bg-muted/15 opacity-65 hover:opacity-100',
                 )}
               >
@@ -1643,11 +1639,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       title={isCatDisabled ? t('settings.words.catEnableHint') : t('settings.words.catDisableHint')}
                     />
                     <span className={cn('text-[13px] font-semibold', isCatDisabled && 'text-muted-foreground line-through')}>{cat}</span>
-                    <span className={cn('flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-semibold', isCatDisabled ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary')}>
+                    <span className={cn('flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-2xs font-semibold', isCatDisabled ? 'bg-muted text-muted-foreground' : 'bg-primary/10 text-primary-ink')}>
                       {list.length}
                     </span>
                     {isCatDisabled && (
-                      <span className="rounded bg-muted/80 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      <span className="rounded bg-muted/80 px-1.5 py-0.5 text-2xs font-medium text-muted-foreground">
                         {t('settings.words.catDisabledBadge')}
                       </span>
                     )}
@@ -1671,9 +1667,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       />
                     ) : null}
                     <Button
-                      size="sm"
+                      size="2xs"
                       variant="ghost"
-                      className="h-6 px-2 text-[11px]"
+                      className="px-2"
                       title={t('settings.words.regexTitle')}
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => {
@@ -1694,7 +1690,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     <Button
                       size="icon"
                       variant="ghost"
-                      className="h-6 w-6 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      className="h-6 w-6 text-muted-foreground hover:bg-destructive/10 hover:text-destructive-ink"
                       title={t('settings.words.deleteCat')}
                       onClick={() => {
                         if (list.length > 0) {
@@ -1738,7 +1734,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                             disabled
                               ? 'border-border bg-muted/30 text-muted-foreground line-through opacity-60'
                               : whole
-                                ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                ? 'border-warning/40 bg-warning/10 text-warning-ink'
                                 : 'border-primary/15 bg-primary/5 text-foreground hover:border-primary/40',
                           )}
                         >
@@ -1747,11 +1743,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                             onClick={nextAction}
                           >
                             {w}
-                            {whole && !disabled && <span className="ml-0.5 text-[9px] font-bold">{t('settings.words.wholeBadge')}</span>}
+                            {whole && !disabled && <span className="ml-0.5 text-2xs font-bold">{t('settings.words.wholeBadge')}</span>}
                           </button>
                           <button
                             type="button"
-                            className="text-muted-foreground opacity-50 transition-opacity hover:text-red-500 group-hover:opacity-100"
+                            className="text-muted-foreground opacity-50 transition-opacity hover:text-destructive group-hover:opacity-100"
                             onClick={() => removeWord(cat, w)}
                             title={t('settings.words.delTitle')}
                             aria-label={t('settings.words.delTitle')}
@@ -1770,7 +1766,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               )
             })}
             {Object.keys(words).length === 0 && (
-              <Card className="col-span-full border bg-card">
+              <Card className="col-span-full border bg-card shadow-card">
                 <CardContent className="py-10 text-center text-sm text-muted-foreground">
                   {t('settings.words.noCats')}
                 </CardContent>
@@ -1782,7 +1778,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           <Dialog open={!!confirmDeleteCat} onOpenChange={(open) => !open && setConfirmDeleteCat(null)}>
             <DialogContent className="max-w-md">
               <DialogHeader>
-                <DialogTitle className="flex items-center gap-2 text-destructive">
+                <DialogTitle className="flex items-center gap-2 text-destructive-ink">
                   <AlertTriangle className="h-5 w-5" />
                   {t('settings.words.confirmDeleteCatTitle')}
                 </DialogTitle>
@@ -1847,18 +1843,18 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </TabsContent>
 
             <TabsContent value="builtin" className="space-y-4">
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center justify-between space-y-0">
               <div>
                 <CardTitle className="text-sm font-semibold">{t('settings.words.builtinRules')}</CardTitle>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">{t('settings.words.builtinRulesHint')}</p>
+                <p className="mt-0.5 text-2xs text-muted-foreground">{t('settings.words.builtinRulesHint')}</p>
               </div>
               <div className="flex gap-1.5">
-                <Button size="sm" variant="outline" className="h-6 text-[11px]" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
+                <Button size="2xs" variant="outline" className="" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, true]))
                   save(() => saveBuiltinRules(next), t('settings.toast.allOn'))
                 }}>{t('settings.words.allOn')}</Button>
-                <Button size="sm" variant="outline" className="h-6 text-[11px]" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
+                <Button size="2xs" variant="outline" className="" disabled={Object.keys(builtinRules).length === 0} onClick={() => {
                   const next = Object.fromEntries(Object.keys(builtinRules).map((r) => [r, false]))
                   save(() => saveBuiltinRules(next), t('settings.toast.allOff'))
                 }}>{t('settings.words.allOff')}</Button>
@@ -1873,7 +1869,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <div key={group.key} className="space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-semibold text-foreground/80">{t(group.labelKey)}</span>
-                      <span className="rounded-full bg-muted px-1.5 py-0.2 font-mono text-[10px] text-muted-foreground">
+                      <span className="rounded-full bg-muted px-1.5 py-0.2 font-mono text-2xs text-muted-foreground">
                         {onCount}/{groupRules.length}
                       </span>
                     </div>
@@ -1892,9 +1888,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                             )}
                           >
                             <div className="min-w-0 pr-2">
-                              <span className={cn('font-mono text-xs', on && 'font-medium text-primary')}>{rule}</span>
+                              <span className={cn('font-mono text-xs', on && 'font-medium text-primary-ink')}>{rule}</span>
                               {ruleMeta[rule] && (
-                                <div className="truncate text-[10px] text-muted-foreground" title={ruleMeta[rule]}>{ruleMeta[rule]}</div>
+                                <div className="truncate text-2xs text-muted-foreground" title={ruleMeta[rule]}>{ruleMeta[rule]}</div>
                               )}
                             </div>
                             <div className="flex shrink-0 items-center gap-1">
@@ -1904,11 +1900,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                                   onChange={(e) => setRuleAction(rule, e.target.value)}
                                   title={t('settings.words.actionHint')}
                                   className={cn(
-                                    'h-5 rounded border bg-background px-1 font-mono text-[10px]',
+                                    'h-5 rounded border bg-background px-1 font-mono text-2xs',
                                     (ruleActions[rule] ?? 'mask') === 'warn'
-                                      ? 'border-amber-500/50 text-amber-600 dark:text-amber-400'
+                                      ? 'border-warning/50 text-warning-ink'
                                       : (ruleActions[rule] ?? 'mask') === 'block'
-                                        ? 'border-red-500/50 text-red-600 dark:text-red-400'
+                                        ? 'border-destructive/50 text-destructive-ink'
                                         : 'border-border text-muted-foreground',
                                   )}
                                 >
@@ -1929,7 +1925,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="space-y-1">
               <CardTitle className="text-sm font-semibold">{t('settings.words.secretPrefix')}</CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
@@ -1941,7 +1937,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {secretPrefixes.map((p) => (
                   <span key={p} className="group inline-flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
-                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => removeSecret(p, `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-destructive group-hover:opacity-100" onClick={() => removeSecret(p, `${t('settings.toast.removed')} ${p}`)} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
                 ))}
                 <div className="flex items-center gap-1.5">
@@ -1958,14 +1954,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     }}
                   />
                   <Button
-                    size="sm" variant="ghost" className="h-6 text-[11px]"
+                    size="2xs" variant="ghost" className=""
                     onClick={handleAddPrefix}
                   >
                     {t('settings.words.prefixAdd')}
                   </Button>
                 </div>
                 {secretPrefixes.length > 0 && (
-                  <Button size="sm" variant="ghost" className="h-6 text-[11px] text-muted-foreground" onClick={() => clearSecret()}>
+                  <Button size="2xs" variant="ghost" className="text-muted-foreground" onClick={() => clearSecret()}>
                     {t('settings.words.clear')}
                   </Button>
                 )}
@@ -1988,15 +1984,18 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             这里再配一遍，还互相矛盾。所以按模式条件显示，而不是删（透传模式仍需要）。
           */}
           {(cfg?.capture_mode ?? 'reverse') === 'reverse' ? (
-            <Card className="border bg-card">
+            <Card className="border bg-card shadow-card">
               <CardHeader>
-                <CardTitle className="text-sm font-semibold">{t('settings.advanced.trafficScope')}</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {t('settings.advanced.currentModeIs')}<b className="text-foreground">{t('dash.captureMode.reverse')}</b>{t('settings.advanced.reverseScopeHint')}
-                </p>
+                {/* 解释不再整段铺在卡里：它是一段「为什么这里没有全局配置」的原理说明，
+                    每次进设置页都要读一遍才会被忽略，占位成本却是永久的。
+                    收进标题旁的 ?：需要时 hover 看，不需要时只剩一行标题。 */}
+                <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                  {t('settings.advanced.trafficScope')}
+                  <Hint text={`${t('settings.advanced.currentModeIs')}${t('dash.captureMode.reverse')}${t('settings.advanced.reverseScopeHint')}`} />
+                </CardTitle>
               </CardHeader>
               <CardContent>
-                <Button size="sm" variant="outline" className="h-8 text-xs" onClick={() => navigate('/clients')}>
+                <Button size="sm" variant="outline" className="" onClick={() => navigate('/clients')}>
                   {t('settings.advanced.goClients')}
                 </Button>
               </CardContent>
@@ -2004,11 +2003,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           ) : (
           <>
           {/* 目标域名（仅透传模式生效） */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center justify-between space-y-0">
               <div>
-                <CardTitle className="text-sm font-semibold">{t('settings.advanced.targetDomains')}</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">{t('settings.advanced.targetDomainsHint')}</p>
+                <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                  {t('settings.advanced.targetDomains')}
+                  <Hint text={t('settings.advanced.targetDomainsHint')} />
+                </CardTitle>
               </div>
               <div className="flex items-end gap-2">
                 <Input
@@ -2024,7 +2025,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     }
                   }}
                 />
-                <Button size="sm" variant="ghost" className="h-8 text-[11px]" onClick={() => {
+                <Button size="sm" variant="ghost" className="text-2xs" onClick={() => {
                   if (newDomain.trim()) {
                     const domains = (cfg?.target_domains as string[] | undefined) ?? []
                     if (!domains.includes(newDomain.trim())) save(() => patchConfig({ key: 'target_domains', op: 'list_add', value: [newDomain.trim()] }), t('settings.toast.domainAdded'))
@@ -2038,7 +2039,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {((cfg?.target_domains as string[] | undefined) ?? []).map((d) => (
                   <span key={d} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {d}
-                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-destructive group-hover:opacity-100" onClick={() => {
                       save(() => patchConfig({ key: 'target_domains', op: 'list_remove', value: [d] }), tf('settings.toast.deleted', { name: d }))
                     }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
@@ -2051,11 +2052,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </Card>
 
           {/* 拦截路径 */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center justify-between space-y-0">
               <div>
-                <CardTitle className="text-sm font-semibold">{t('settings.advanced.interceptPaths')}</CardTitle>
-                <p className="mt-1 text-xs text-muted-foreground">{t('settings.advanced.interceptPathsHint')}</p>
+                <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                  {t('settings.advanced.interceptPaths')}
+                  <Hint text={t('settings.advanced.interceptPathsHint')} />
+                </CardTitle>
               </div>
               <div className="flex items-end gap-2">
                 <Input
@@ -2071,7 +2074,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     }
                   }}
                 />
-                <Button size="sm" variant="ghost" className="h-8 text-[11px]" onClick={() => {
+                <Button size="sm" variant="ghost" className="text-2xs" onClick={() => {
                   if (newPath.trim()) {
                     const paths = (cfg?.api_paths as string[] | undefined) ?? []
                     if (!paths.includes(newPath.trim())) save(() => patchConfig({ key: 'api_paths', op: 'list_add', value: [newPath.trim()] }), t('settings.toast.pathAdded'))
@@ -2085,7 +2088,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {((cfg?.api_paths as string[] | undefined) ?? []).map((p) => (
                   <span key={p} className="group flex items-center gap-1 rounded-full border bg-muted/30 px-2.5 py-0.5 font-mono text-xs">
                     {p}
-                    <button type="button" className="text-muted-foreground opacity-60 hover:text-red-500 group-hover:opacity-100" onClick={() => {
+                    <button type="button" className="text-muted-foreground opacity-60 hover:text-destructive group-hover:opacity-100" onClick={() => {
                       save(() => patchConfig({ key: 'api_paths', op: 'list_remove', value: [p] }), tf('settings.toast.deleted', { name: p }))
                     }} title={t('settings.words.delTitle')} aria-label={t('settings.words.delTitle')}><X className="h-3 w-3" /></button>
                   </span>
@@ -2096,7 +2099,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </>
           )}
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.advanced.engineBehavior')}</CardTitle>
             </CardHeader>
@@ -2128,10 +2131,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
           {/* 局域网访问。绑定地址在 app.run 时确定，改开关必须重启引擎才生效，
               所以这里只保存配置 + 提示，不在前端假装“已生效”。 */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.lanAccess')}</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">{t('settings.advanced.lanAccessHint')}</p>
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.advanced.lanAccess')}
+                <Hint text={t('settings.advanced.lanAccessHint')} />
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
               <SettingToggle
@@ -2142,30 +2147,30 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               />
               {!!cfg?.lan_access && (
                 <>
-                  <p className="text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+                  <p className="text-2xs leading-snug text-warning-ink">
                     {t('settings.advanced.lanAccessSecurity')}
                   </p>
                   {!!status?.lan_urls?.length && (
                     <div>
-                      <div className="text-[11px] text-muted-foreground">{t('settings.advanced.lanAccessUrls')}</div>
+                      <div className="text-2xs text-muted-foreground">{t('settings.advanced.lanAccessUrls')}</div>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {status.lan_urls.map((u) => (
-                          <code key={u} className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-[11px]">{u}</code>
+                          <code key={u} className="rounded border bg-muted/40 px-1.5 py-0.5 font-mono text-2xs">{u}</code>
                         ))}
                       </div>
                     </div>
                   )}
                   {/* 配置已开但仍绑在回环：说明本进程启动时开关还是关的 */}
                   {(status?.panel_host ?? '').startsWith('127.') && (
-                    <p className="text-[11px] text-muted-foreground">{t('settings.advanced.lanAccessRestart')}</p>
+                    <p className="text-2xs text-muted-foreground">{t('settings.advanced.lanAccessRestart')}</p>
                   )}
                   {/* 局域网用户没有本机 token，必须告诉用户令牌存在哪；
                       不给路径的话这个开关等于摆设（其它设备进不去面板）。 */}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <Button size="sm" variant="outline" className="h-7 text-[11px]" onClick={doOpenDataDir}>
+                    <Button size="xs" variant="outline" className="" onClick={doOpenDataDir}>
                       {t('settings.security.openDataDir')}
                     </Button>
-                    <span className="text-[11px] text-muted-foreground">{t('settings.advanced.lanAccessToken')}</span>
+                    <span className="text-2xs text-muted-foreground">{t('settings.advanced.lanAccessToken')}</span>
                   </div>
                 </>
               )}
@@ -2175,9 +2180,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           {/* 开关按功能分类：代理行为 / 日志与隐私 / 系统 */}
           <div className="grid gap-3 lg:grid-cols-3">
             {/* 代理行为 */}
-            <div className="rounded-lg border bg-muted/20 p-3">
-              <div className="mb-2 text-xs font-semibold text-muted-foreground">{t('settings.advanced.proxyBehavior')}</div>
-              <div className="space-y-2">
+            <div className="rounded-xl border bg-card p-4 shadow-card">
+              <div className="mb-2 text-sm font-semibold text-foreground">{t('settings.advanced.proxyBehavior')}</div>
+              <div>
                 {([
                   ['filter_enabled', t('settings.sw.filterEnabled'), t('settings.sw.filterEnabledDesc')],
                   ['fail_closed', t('settings.sw.failClosed'), t('settings.sw.failClosedDesc')],
@@ -2190,7 +2195,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {/* NER 依赖模型文件与 onnxruntime/tokenizers：开启但不可用时必须给出原因，
                     否则用户只看到「开了没效果」（原因由引擎 /api/status 提供）*/}
                 {!!(cfg as Record<string, unknown> | undefined)?.ner_enabled && status?.ner && !status.ner.available && (
-                  <p className="text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+                  <p className="text-2xs leading-snug text-warning-ink">
                     {tf('settings.sw.nerUnavailable', { reason: status.ner.reason || '—' })}
                   </p>
                 )}
@@ -2209,7 +2214,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     语义识别越容易超单请求预算，而严格模式一旦降级就在出网前阻断。
                     实测数字（0.16 秒/千字，缓存未命中）写在文案里，用户才能自己换算。 */}
                 {!!(cfg as Record<string, unknown> | undefined)?.ner_require_complete && (
-                  <p className="text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+                  <p className="text-2xs leading-snug text-warning-ink">
                     {t('settings.sw.nerRequireCompleteLongSession')}
                   </p>
                 )}
@@ -2218,12 +2223,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {!!(cfg as Record<string, unknown> | undefined)?.ner_enabled && (
                   <div className="pt-1">
                     <Label className="flex items-center gap-1 text-xs">{t('settings.sw.nerBudget')}
-                      <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
-                          <TooltipContent className="max-w-[300px] text-xs">{t('settings.sw.nerBudgetTooltip')}</TooltipContent>
-                        </Tooltip>
-                      </TooltipProvider>
+                      <Hint text={t('settings.sw.nerBudgetTooltip')} />
                     </Label>
                     <div className="mt-1 flex items-center gap-2">
                       <Input type="number" min={1} max={120} step={1} className="h-8 w-24 text-xs"
@@ -2245,7 +2245,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                           e.target.value = String(v)
                           if (v !== current) save({ ner_req_budget_s: v }, t('settings.toast.nerBudgetUpdated'))
                         }} />
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="text-2xs text-muted-foreground">
                         {status?.ner?.budget_env_override
                           ? tf('settings.sw.nerBudgetEnvFixed', { s: String(status?.ner?.req_budget_s ?? '') })
                           : t('settings.sw.nerBudgetHint')}
@@ -2256,7 +2256,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                         不显示的话，用户看到「预算 10 秒」却不知道引擎实际按几核、
                         开几线程在跑——而「2 核机器 CPU 跑满」的排查第一步就是看这个。 */}
                     {status?.ner?.governor?.budget_ms_per_s != null && (
-                      <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
+                      <p className="mt-1 text-2xs leading-snug text-muted-foreground">
                         {tf('settings.sw.nerGovernorLine', {
                           cores: String(status.ner.governor?.cpu_cores ?? '—'),
                           conc: String(status.ner.governor?.concurrency ?? '—'),
@@ -2288,7 +2288,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       .map((k) => tf('settings.sw.nerSkipItem', { label: labelOf(k), n: Number(skips[k]) }))
                     if (parts.length === 0) return null
                     return (
-                      <p className="text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+                      <p className="text-2xs leading-snug text-warning-ink">
                         {tf('settings.sw.nerSkips', { detail: parts.join(' / ') })}
                       </p>
                     )
@@ -2296,9 +2296,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </div>
             </div>
             {/* 日志与隐私 */}
-            <div className="rounded-lg border bg-muted/20 p-3">
-              <div className="mb-2 text-xs font-semibold text-muted-foreground">{t('settings.advanced.logPrivacy')}</div>
-              <div className="space-y-2">
+            <div className="rounded-xl border bg-card p-4 shadow-card">
+              <div className="mb-2 text-sm font-semibold text-foreground">{t('settings.advanced.logPrivacy')}</div>
+              <div>
                 {([
                   ['record_plaintext_words', t('settings.sw.recordPlaintext'), t('settings.sw.recordPlaintextDesc')],
                   // ext_record_events 放这一组而不是扩展卡片：落库发生在**引擎侧**，
@@ -2313,11 +2313,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </div>
             </div>
             {/* 系统 */}
-            <div className="rounded-lg border bg-muted/20 p-3">
-              <div className="mb-2 text-xs font-semibold text-muted-foreground">{t('settings.advanced.system')}</div>
-              <div className="space-y-2">
+            <div className="rounded-xl border bg-card p-4 shadow-card">
+              <div className="mb-2 text-sm font-semibold text-foreground">{t('settings.advanced.system')}</div>
+              <div>
                 {/* 界面语言切换（i18n） */}
-                <div className="flex items-center justify-between gap-2 rounded-lg border bg-card/60 px-3 py-2.5">
+                <div className="flex items-center justify-between gap-2 border-b border-border px-1.5 py-2.5 transition-colors last:border-0 hover:bg-muted/60">
                   <span className="text-[13px]">{t('settings.language')}</span>
                   <Select value={lang} onValueChange={(v) => setLang(v as 'zh' | 'en')}>
                     <SelectTrigger className="h-7 w-28 text-xs"><SelectValue /></SelectTrigger>
@@ -2340,14 +2340,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     toggle('autostart', v)
                   }
                 }} />
-                <p className="text-[11px] text-muted-foreground/80">
+                <p className="text-2xs text-muted-foreground">
                   {t('settings.advanced.moreSwitchesHint')}
                 </p>
               </div>
             </div>
           </div>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.advanced.streamExclude')}</CardTitle>
             </CardHeader>
@@ -2369,7 +2369,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       }
                     }}
                   />
-                  <Button size="sm" variant="ghost" className="h-6 text-[11px]" onClick={() => {
+                  <Button size="2xs" variant="ghost" className="" onClick={() => {
                     if (newExcludeHost.trim() && !streamExclude.includes(newExcludeHost.trim())) {
                       save(() => patchConfig({ key: 'stream_exclude_hosts', op: 'list_add', value: [newExcludeHost.trim()] }), t('settings.toast.added'))
                       setNewExcludeHost('')
@@ -2377,20 +2377,20 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   }}>{t('settings.advanced.hostAdd')}</Button>
                 </div>
               </div>
-              <p className="mt-2 text-[11px] text-muted-foreground">{t('settings.advanced.streamExcludeHint')}</p>
+              <p className="mt-2 text-2xs text-muted-foreground">{t('settings.advanced.streamExcludeHint')}</p>
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center gap-2 space-y-0">
-              <Radar className="h-4 w-4 text-primary" />
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.auditProbe')}</CardTitle>
-              <Badge variant="outline" className="ml-auto text-[11px]">{t('settings.advanced.auditTokenBadge')}</Badge>
+              <Radar className="h-4 w-4 text-primary-ink" />
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.advanced.auditProbe')}
+                <Hint text={t('settings.advanced.auditProbeDesc')} />
+              </CardTitle>
+              <Badge variant="outline" className="ml-auto text-2xs">{t('settings.advanced.auditTokenBadge')}</Badge>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                {t('settings.advanced.auditProbeDesc')}
-              </p>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="min-w-[160px]">
                   <Label className="text-xs">{t('settings.advanced.upstream')}</Label>
@@ -2409,12 +2409,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 </div>
                 <div>
                   <Label className="flex items-center gap-1 text-xs">{t('settings.advanced.profile')}
-                    <TooltipProvider delayDuration={200}>
-                      <Tooltip>
-                        <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
-                        <TooltipContent className="max-w-[280px] text-xs">{t('settings.advanced.profileTooltip')}</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
+                    <Hint text={t('settings.advanced.profileTooltip')} />
                   </Label>
                   <Select value={auditProfile} onValueChange={setAuditProfile}>
                     <SelectTrigger className="mt-1 h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
@@ -2440,37 +2435,37 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               {auditRunning && (
                 <div className="rounded-lg border border-primary/30 bg-primary/5 p-3">
                   <div className="flex items-center gap-2">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary-ink" />
                     <span className="text-xs font-medium">{auditJob?.phase || t('settings.advanced.auditRunning')}</span>
-                    <Badge variant="outline" className="ml-auto shrink-0 font-mono text-[11px]">{auditDone}/{auditTotal}</Badge>
+                    <Badge variant="outline" className="ml-auto shrink-0 font-mono text-2xs">{auditDone}/{auditTotal}</Badge>
                   </div>
                   <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                    <div className="h-full rounded-full bg-gradient-to-r from-primary to-cyan-500 transition-[width] duration-500" style={{ width: `${auditProgress}%` }} />
+                    <div className="h-full rounded-full bg-primary transition-[width] duration-500" style={{ width: `${auditProgress}%` }} />
                   </div>
                 </div>
               )}
               {!auditRunning && auditJob?.phase && (
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   {t('settings.advanced.lastTask')}{auditJob.phase}
                   {auditJob.error ? tf('settings.advanced.failed', { e: auditJob.error.slice(0, 120) }) : ''}
                 </p>
               )}
               {auditReport && (
-                <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap rounded-lg bg-muted/60 p-3 font-mono text-[11px] leading-relaxed">{auditReport}</pre>
+                <pre className="max-h-[300px] overflow-auto whitespace-pre-wrap rounded-lg bg-muted/60 p-3 font-mono text-2xs leading-relaxed">{auditReport}</pre>
               )}
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader className="flex-row items-center gap-2 space-y-0">
-              <Coins className="h-4 w-4 text-primary" />
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.priceSync')}</CardTitle>
-              <Badge variant="outline" className="ml-auto text-[11px]">{t('settings.advanced.priceSyncAuto')}</Badge>
+              <Coins className="h-4 w-4 text-primary-ink" />
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.advanced.priceSync')}
+                <Hint text={t('settings.advanced.priceSyncHint')} />
+              </CardTitle>
+              <Badge variant="outline" className="ml-auto text-2xs">{t('settings.advanced.priceSyncAuto')}</Badge>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-xs text-muted-foreground">
-                {t('settings.advanced.priceSyncHint')}
-              </p>
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
                   <Switch
@@ -2501,14 +2496,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   <List className="h-3.5 w-3.5" />{t('settings.advanced.viewPrices')}
                 </Button>
                 {priceSyncState && (
-                  <span className="text-[11px] text-muted-foreground">
+                  <span className="text-2xs text-muted-foreground">
                     {priceSyncState.syncing
                       ? t('settings.advanced.syncing')
                       : priceSyncState.synced_at > 0
                         ? tf('settings.advanced.syncedAt', { time: dayjs(priceSyncState.synced_at * 1000).format('MM-DD HH:mm') })
                         : t('settings.advanced.notSynced')}
                     {priceSyncState.last_error && (
-                      <span className="ml-1 text-red-500">{tf('settings.advanced.syncFailed', { e: priceSyncState.last_error.slice(0, 60) })}</span>
+                      <span className="ml-1 text-destructive">{tf('settings.advanced.syncFailed', { e: priceSyncState.last_error.slice(0, 60) })}</span>
                     )}
                   </span>
                 )}
@@ -2522,7 +2517,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {t('settings.priceList.title')}
-              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">{tf('settings.priceList.countUnit', { n: priceList?.count ?? 0 })}</span>
+              <span className="rounded bg-muted px-1.5 py-0.5 text-2xs font-normal text-muted-foreground">{tf('settings.priceList.countUnit', { n: priceList?.count ?? 0 })}</span>
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-2">
@@ -2551,7 +2546,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     type="button"
                     onClick={() => setPriceSearch(v.value)}
                     className={cn(
-                      'rounded-full px-2.5 py-0.5 text-[11px] font-medium transition-colors',
+                      'rounded-full px-2.5 py-0.5 text-2xs font-medium transition-colors',
                       active
                         ? 'bg-primary text-primary-foreground'
                         : 'bg-muted/70 text-muted-foreground hover:bg-muted hover:text-foreground',
@@ -2565,7 +2560,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </div>
           <div className="max-h-[380px] overflow-auto rounded-lg border">
             <table className="w-full text-left text-xs">
-              <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+              <thead className="sticky top-0 bg-muted">
                 <tr className="text-muted-foreground">
                   <th className="px-3 py-2 font-medium">{t('logs.colModel')}</th>
                   <th className="px-3 py-2 text-right font-medium">{t('settings.priceList.input')}</th>
@@ -2603,9 +2598,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         </DialogContent>
       </Dialog>
 
-          <Card id="egress-proxy" className="border bg-card scroll-mt-6">
+          <Card id="egress-proxy" className="border bg-card shadow-card scroll-mt-6">
             <CardHeader>
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.egress')}</CardTitle>
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.advanced.egress')}
+                <Hint text={t('settings.advanced.egressTip')} />
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <label className="flex cursor-pointer select-none items-center gap-2 text-xs text-muted-foreground transition-colors hover:text-foreground">
@@ -2625,25 +2623,17 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   if (v !== cur.url) save(() => patchConfig({ key: 'egress_proxy', op: 'set', path: ['url'], value: v }), t('settings.toast.egressUpdated'))
                 }}
               />
-              <p className="text-[11px] text-muted-foreground">
-                {t('settings.advanced.egressTip')}
-              </p>
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.advanced.sessionDiag')}</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
               <div>
                 <Label className="flex items-center gap-1 text-xs">{t('settings.advanced.sessionTtl')}
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
-                      <TooltipContent className="max-w-[280px] text-xs">{t('settings.advanced.sessionTtlTooltip')}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <Hint text={t('settings.advanced.sessionTtlTooltip')} />
                 </Label>
                 {/* onBlur 存盘：避免把输入过程中的中间值写进配置。 */}
                 <Input type="number" className="mt-1 h-8 text-xs"
@@ -2663,18 +2653,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
-            <CardHeader>
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.dataRetention')}</CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-wrap items-center gap-3">
+          <Section
+            title={t('settings.advanced.dataRetention')}
+            contentClassName="flex flex-wrap items-center gap-3"
+          >
               <Label className="flex items-center gap-1 text-xs">{t('settings.advanced.retentionDays')}
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild><HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60" /></TooltipTrigger>
-                    <TooltipContent className="max-w-[300px] text-xs">{t('settings.advanced.retentionTooltip')}</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <Hint text={t('settings.advanced.retentionTooltip')} />
               </Label>
               <Input
                 type="number"
@@ -2709,24 +2693,25 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   if (v !== current) save({ log_retention_days: v }, t('settings.toast.retentionUpdated'))
                 }}
               />
-              <span className="text-[11px] text-muted-foreground">{t('settings.advanced.retentionHint')}</span>
-            </CardContent>
-          </Card>
+              <span className="text-2xs text-muted-foreground">{t('settings.advanced.retentionHint')}</span>
+          </Section>
 
           {/* 内存映射（§D3.3）：清日志/清统计/清映射是三个独立动作，不合并成
               「彻底清除」——那会让只想清对话日志的用户把趋势图一起抹掉。 */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
-              <CardTitle className="text-sm font-semibold">{t('settings.advanced.mappingTitle')}</CardTitle>
+              <CardTitle className="flex items-center gap-1.5 text-sm font-semibold">
+                {t('settings.advanced.mappingTitle')}
+                <Hint text={t('settings.advanced.mappingDesc')} />
+              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className="text-[11px] leading-relaxed text-muted-foreground">{t('settings.advanced.mappingDesc')}</p>
               <div className="flex flex-wrap items-center gap-3">
-                <Button size="sm" variant="outline" className="h-8 text-xs"
+                <Button size="sm" variant="outline" className=""
                   onClick={() => setConfirmClearMappings(true)}>
                   {t('settings.advanced.mappingClear')}
                 </Button>
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   {mappingStats
                     ? tf('settings.advanced.mappingStat', {
                         sessions: String((mappingStats.panel?.sessions ?? 0) + (mappingStats.engine?.sessions ?? 0)),
@@ -2747,7 +2732,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           {/* 配置备份与回滚 */}
           <ConfigBackupCard />
           {/* 控制面访问安全：Origin 校验开关（反代/CDN 回源 403 逃生舱） */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.security.access')}</CardTitle>
             </CardHeader>
@@ -2762,7 +2747,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </Card>
           {/* 证书安装：reverse 模式不需要证书，隐藏避免误操作。
               explicit/local 模式需要证书，未来如果启用这些模式再恢复此卡片 */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.security.auditProbe')}</CardTitle>
             </CardHeader>
@@ -2787,7 +2772,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-3">
                   {Object.entries(auditSignals).map(([sig, on]) => (
                     <label key={sig} className="flex cursor-pointer items-center justify-between rounded-lg border bg-muted/30 px-3 py-2">
-                      <span className="font-mono text-[11px]">{sig}</span>
+                      <span className="font-mono text-2xs">{sig}</span>
                       <Switch checked={on} onCheckedChange={(v) => toggleAuditSignal(sig, v)} className="scale-75" />
                     </label>
                   ))}
@@ -2796,12 +2781,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.security.health')}</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap items-center gap-3">
-              <Button size="sm" variant="outline" className="h-8" onClick={async () => {
+              <Button size="sm" variant="outline" className="" onClick={async () => {
                 if (healthChecking) return
                 setHealthChecking(true)
                 try {
@@ -2811,7 +2796,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               }} loading={healthChecking}>
                 {t('settings.tools.healthCheck')}
               </Button>
-              <Button size="sm" variant="outline" className="h-8" onClick={async () => {
+              <Button size="sm" variant="outline" className="" onClick={async () => {
                 if (netRestoring) return
                 setNetRestoring(true)
                 try {
@@ -2822,7 +2807,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 {t('settings.tools.recover')}
               </Button>
               {healthInfo && (
-                <pre className="w-full overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-[11px]">
+                <pre className="w-full overflow-auto rounded-lg border bg-muted/30 p-3 font-mono text-2xs">
                   {JSON.stringify(healthInfo, null, 2).slice(0, 1500)}
                 </pre>
               )}
@@ -2833,7 +2818,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               */}
               <div className="w-full space-y-2 border-t pt-3">
                 <div className="flex flex-wrap items-center gap-3">
-                  <Button size="sm" variant="outline" className="h-8" onClick={async () => {
+                  <Button size="sm" variant="outline" className="" onClick={async () => {
                     if (selfChecking) return
                     setSelfChecking(true)
                     try {
@@ -2846,7 +2831,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     {selfCheck ? t('settings.selfcheck.rerun') : t('settings.selfcheck.run')}
                   </Button>
                   {selfCheck && (
-                    <Button size="sm" variant="outline" className="h-8" onClick={async () => {
+                    <Button size="sm" variant="outline" className="" onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(selfCheck.summary_line + '\n' +
                           selfCheck.findings.map((f) => `[${f.severity}] ${f.title} | ${f.evidence} | ${f.action}`).join('\n'))
@@ -2857,14 +2842,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                     </Button>
                   )}
                   <DiagnosticPreviewButton />
-                  <span className="text-[11px] text-muted-foreground">{t('settings.selfcheck.hint')}</span>
+                  <span className="text-2xs text-muted-foreground">{t('settings.selfcheck.hint')}</span>
                 </div>
                 {selfCheck && (
                   <div className="space-y-2">
                     <div className={
-                      selfCheck.overall === 'high' ? 'text-xs font-medium text-destructive'
-                        : selfCheck.overall === 'medium' ? 'text-xs font-medium text-amber-600'
-                        : 'text-xs font-medium text-emerald-600'
+                      selfCheck.overall === 'high' ? 'text-xs font-medium text-destructive-ink'
+                        : selfCheck.overall === 'medium' ? 'text-xs font-medium text-warning-ink'
+                        : 'text-xs font-medium text-success-ink'
                     }>
                       {selfCheck.overall === 'high'
                         ? tf('settings.selfcheck.overallHigh', { n: String(selfCheck.findings.length) })
@@ -2878,9 +2863,9 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                         <li key={f.id} className="rounded-lg border bg-muted/20 p-2">
                           <div className="flex items-start gap-2">
                             <span className={
-                              f.severity === 'high' ? 'mt-0.5 shrink-0 rounded bg-destructive/15 px-1.5 py-0.5 text-[10px] font-semibold text-destructive'
-                                : f.severity === 'medium' ? 'mt-0.5 shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700'
-                                  : 'mt-0.5 shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground'
+                              f.severity === 'high' ? 'mt-0.5 shrink-0 rounded bg-destructive/15 px-1.5 py-0.5 text-2xs font-semibold text-destructive-ink'
+                                : f.severity === 'medium' ? 'mt-0.5 shrink-0 rounded bg-warning/15 px-1.5 py-0.5 text-2xs font-semibold text-warning-ink'
+                                  : 'mt-0.5 shrink-0 rounded bg-muted px-1.5 py-0.5 text-2xs font-semibold text-muted-foreground'
                             }>
                               {f.severity === 'high' ? t('settings.selfcheck.sevHigh')
                                 : f.severity === 'medium' ? t('settings.selfcheck.sevMedium')
@@ -2890,11 +2875,11 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                               <div className="text-xs font-medium">
                                 {f.title}
                                 {f.verified === false && (
-                                  <span className="ml-1 text-[10px] text-muted-foreground">({t('settings.selfcheck.unverified')})</span>
+                                  <span className="ml-1 text-2xs text-muted-foreground">({t('settings.selfcheck.unverified')})</span>
                                 )}
                               </div>
-                              <div className="font-mono text-[11px] text-muted-foreground">{f.evidence}</div>
-                              <div className="text-[11px]">
+                              <div className="font-mono text-2xs text-muted-foreground">{f.evidence}</div>
+                              <div className="text-2xs">
                                 <span className="text-muted-foreground">{t('settings.selfcheck.action')}：</span>{f.action}
                               </div>
                             </div>
@@ -2903,12 +2888,12 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                       ))}
                     </ul>
                     {selfCheck.ok_items && selfCheck.ok_items.length > 0 && (
-                      <div className="text-[11px] text-muted-foreground">
+                      <div className="text-2xs text-muted-foreground">
                         {t('settings.selfcheck.okTitle')}：{selfCheck.ok_items.map((o) => o.note).join(' / ')}
                       </div>
                     )}
                     {selfCheck.input_errors && selfCheck.input_errors.length > 0 && (
-                      <div className="text-[11px] text-amber-700">
+                      <div className="text-2xs text-warning-ink">
                         {t('settings.selfcheck.inputErrors')}：{selfCheck.input_errors.map((e) => e.error).join('；').slice(0, 300)}
                       </div>
                     )}
@@ -2918,15 +2903,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             </CardContent>
           </Card>
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('about.dataDir')}</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-wrap items-center gap-3">
-              <Button size="sm" variant="outline" className="h-8" onClick={doOpenDataDir}>
+              <Button size="sm" variant="outline" className="" onClick={doOpenDataDir}>
                 <FolderOpen className="mr-1.5 h-3.5 w-3.5" />{t('settings.security.openDataDir')}
               </Button>
-              <code className="text-[11px] text-muted-foreground">{cfg?.data_root ?? '%APPDATA%\\Maskit'}</code>
+              <code className="text-2xs text-muted-foreground">{cfg?.data_root ?? '%APPDATA%\\Maskit'}</code>
             </CardContent>
           </Card>
         </TabsContent>
@@ -2938,7 +2923,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           {/* 更新卡只放「关于」页一处：这里原本也渲染了一份，同一张卡出现在两个 tab，
               用户在哪点都行反而不知道该信哪个，版本/更新日志也会各查一次接口。 */}
 
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('settings.tools.realTest')}</CardTitle>
             </CardHeader>
@@ -2971,7 +2956,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 onChange={(e) => setDemoText(e.target.value)}
               />
               <div className="flex gap-2">
-                <Button size="sm" className="h-8" disabled={realTesting} onClick={async () => {
+                <Button size="sm" className="" disabled={realTesting} onClick={async () => {
                   if (!demoUpstream) { toast(t('settings.toast.chooseClient'), 'error'); return }
                   if (!demoApiKey) { toast(t('settings.toast.needApiKey'), 'error'); return }
                   const u = upstreams.find((x) => x.name === demoUpstream)
@@ -2991,23 +2976,23 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   {realTesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
                   {t('settings.tools.sendTest')}
                 </Button>
-                <Button size="sm" variant="outline" className="h-8" onClick={() => setDemoText(t('settings.tools.sampleText'))}>
+                <Button size="sm" variant="outline" className="" onClick={() => setDemoText(t('settings.tools.sampleText'))}>
                   {t('settings.tools.fillSample')}
                 </Button>
               </div>
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-2xs text-muted-foreground">
                 {t('settings.tools.hint')}
               </p>
               {demoResult && (
                 <div className="space-y-2 rounded-lg border bg-muted/30 p-3 text-xs">
                   {demoResult.ok ? (
                     <>
-                      <div className="font-mono text-emerald-600 dark:text-emerald-400">
+                      <div className="font-mono text-success-ink">
                         <span className="text-muted-foreground">{t('settings.tools.upstreamResp')}</span>{demoResult.masked}
                       </div>
                     </>
                   ) : (
-                    <div className="text-red-600 dark:text-red-400">{demoResult.error || demoResult.masked}</div>
+                    <div className="text-destructive-ink">{demoResult.error || demoResult.masked}</div>
                   )}
                 </div>
               )}
@@ -3037,7 +3022,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           />
 
           {/* 更新日志 */}
-          <Card className="border bg-card">
+          <Card className="border bg-card shadow-card">
             <CardHeader>
               <CardTitle className="text-sm font-semibold">{t('about.changelog')}</CardTitle>
             </CardHeader>
@@ -3045,18 +3030,18 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               {siteRelease ? (
                 <>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge className="bg-primary/15 text-[11px] text-primary">{tf('settings.about.latestBadge', { v: siteRelease.version })}</Badge>
-                    <span className="text-[11px] text-muted-foreground">{tf('settings.about.publishedAt', { d: siteRelease.pub_date && dayjs(siteRelease.pub_date).isValid() ? dayjs(siteRelease.pub_date).format('YYYY-MM-DD') : '—' })}</span>
+                    <Badge className="bg-primary/15 text-2xs text-primary-ink">{tf('settings.about.latestBadge', { v: siteRelease.version })}</Badge>
+                    <span className="text-2xs text-muted-foreground">{tf('settings.about.publishedAt', { d: siteRelease.pub_date && dayjs(siteRelease.pub_date).isValid() ? dayjs(siteRelease.pub_date).format('YYYY-MM-DD') : '—' })}</span>
                     {siteRelease.version === status?.version && (
-                      <span className="text-[11px] text-emerald-600 dark:text-emerald-400">{t('about.currentLatest')}</span>
+                      <span className="text-2xs text-success-ink">{t('about.currentLatest')}</span>
                     )}
                   </div>
                   {siteRelease.notes && (
                     <p className="whitespace-pre-wrap rounded-lg bg-muted/40 p-3 text-xs leading-relaxed">{siteRelease.notes}</p>
                   )}
                   <div className="flex items-center gap-3 pt-1">
-                    <p className="text-[11px] text-muted-foreground">{t('settings.about.changelogLinkHint')}</p>
-                    <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={openSiteChangelog}>
+                    <p className="text-2xs text-muted-foreground">{t('settings.about.changelogLinkHint')}</p>
+                    <Button size="xs" variant="outline" className="gap-1" onClick={openSiteChangelog}>
                       <ExternalLink className="h-3 w-3" />{t('settings.about.viewSiteChangelog')}
                     </Button>
                   </div>
@@ -3112,7 +3097,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           </DialogHeader>
           {/* 主动探针关闭时明示「临时启用 + 自动恢复」（W1-4）：与审计中心同一口径 */}
           {!auditCfg.active_probes && (
-            <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-500">
+            <p className="text-xs leading-relaxed text-warning-ink">
               {t('settings.confirm.auditTempProbes')}
             </p>
           )}

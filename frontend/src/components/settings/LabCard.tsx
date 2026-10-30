@@ -58,7 +58,7 @@ export function LabCard() {
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle className="flex items-center gap-2 text-sm font-semibold">
           <FlaskConical className="h-4 w-4" />
           {t('settings.lab.title')}
         </CardTitle>
@@ -72,18 +72,18 @@ export function LabCard() {
           onChange={(e) => setText(e.target.value)}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" className="h-7 text-xs" onClick={run} disabled={running || tooLong}>
+          <Button size="sm" className="h-7" onClick={run} disabled={running || tooLong}>
             {running ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Play className="mr-1 h-3 w-3" />}
             {t('settings.lab.run')}
           </Button>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => { setText(SAMPLE); setResult(null) }}>
+          <Button size="sm" variant="outline" className="h-7" onClick={() => { setText(SAMPLE); setResult(null) }}>
             {t('settings.lab.fillSample')}
           </Button>
-          <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => { setText(''); setResult(null) }}>
+          <Button size="sm" variant="outline" className="h-7" onClick={() => { setText(''); setResult(null) }}>
             <RotateCcw className="mr-1 h-3 w-3" />
             {t('settings.lab.clear')}
           </Button>
-          <span className={tooLong ? 'text-[11px] text-red-600 dark:text-red-400' : 'text-[11px] text-muted-foreground'}>
+          <span className={tooLong ? 'text-2xs text-destructive-ink' : 'text-2xs text-muted-foreground'}>
             {tf('settings.lab.counter', { n: text.length, max: MAX_CHARS })}
           </span>
         </div>
@@ -91,40 +91,40 @@ export function LabCard() {
         {result?.ok && (
           <div className="space-y-3 rounded-lg border bg-muted/30 p-3 text-xs">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="outline" className="text-2xs">
                 {tf('settings.lab.unique', { n: result.count ?? 0 })}
               </Badge>
-              <Badge variant="outline" className="text-[10px]">
+              <Badge variant="outline" className="text-2xs">
                 {tf('settings.lab.occurrences', { n: result.occurrences ?? 0 })}
               </Badge>
               <Badge
                 variant="outline"
                 className={result.roundtrip_ok
-                  ? 'border-emerald-500/40 text-[10px] text-emerald-600 dark:text-emerald-400'
-                  : 'border-red-500/40 text-[10px] text-red-600 dark:text-red-400'}
+                  ? 'border-success/40 text-2xs text-success-ink'
+                  : 'border-destructive/40 text-2xs text-destructive-ink'}
               >
                 {result.roundtrip_ok ? t('settings.lab.roundtripOk') : t('settings.lab.roundtripBad')}
               </Badge>
-              <span className="text-[10px] text-muted-foreground">
+              <span className="text-2xs text-muted-foreground">
                 {tf('settings.lab.timing', { mask: result.mask_ms ?? 0, restore: result.restore_ms ?? 0 })}
               </span>
             </div>
 
             <div>
-              <div className="mb-1 text-[11px] text-muted-foreground">{t('settings.lab.masked')}</div>
-              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{result.masked}</pre>
+              <div className="mb-1 text-2xs text-muted-foreground">{t('settings.lab.masked')}</div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-2xs">{result.masked}</pre>
             </div>
 
             {result.restored !== undefined && (
               <div>
-                <div className="mb-1 text-[11px] text-muted-foreground">{t('settings.lab.restored')}</div>
-                <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-muted-foreground">{result.restored}</pre>
+                <div className="mb-1 text-2xs text-muted-foreground">{t('settings.lab.restored')}</div>
+                <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-2xs text-muted-foreground">{result.restored}</pre>
               </div>
             )}
 
             {(result.items?.length ?? 0) > 0 && (
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-[11px]">
+                <table className="w-full text-left text-2xs">
                   <thead className="text-muted-foreground">
                     <tr>
                       <th className="py-1 pr-2 font-normal">{t('settings.lab.colToken')}</th>
@@ -136,7 +136,7 @@ export function LabCard() {
                   </thead>
                   <tbody className="font-mono">
                     {result.items!.map((it) => (
-                      <tr key={it.token} className="border-t border-border/50">
+                      <tr key={it.token} className="border-t border-border">
                         <td className="py-1 pr-2 break-all">{it.token}</td>
                         <td className="py-1 pr-2">{it.label}</td>
                         <td className="py-1 pr-2">{it.original_len}</td>
@@ -152,14 +152,14 @@ export function LabCard() {
             )}
 
             {result.unresolved ? (
-              <p className="text-red-600 dark:text-red-400">
+              <p className="text-destructive-ink">
                 {tf('settings.lab.unresolved', { n: result.unresolved })}
               </p>
             ) : null}
           </div>
         )}
 
-        <p className="text-[11px] leading-snug text-muted-foreground/80">{t('settings.lab.hint')}</p>
+        <p className="text-2xs leading-snug text-muted-foreground">{t('settings.lab.hint')}</p>
       </CardContent>
     </Card>
   )

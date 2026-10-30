@@ -163,7 +163,7 @@ export function EnvImportDialog({
             <FileText className="h-4 w-4 text-muted-foreground" />
             {t('settings.words.envTitle')}
           </DialogTitle>
-          <DialogDescription className="text-[11px] leading-relaxed">
+          <DialogDescription className="text-2xs leading-relaxed">
             {t('settings.words.envCredHint')}
           </DialogDescription>
         </DialogHeader>
@@ -184,14 +184,14 @@ export function EnvImportDialog({
               <Button
                 size="sm"
                 variant="outline"
-                className="h-7 text-xs"
+                className="h-7"
                 onClick={() => fileRef.current?.click()}
               >
                 <Upload className="mr-1 h-3 w-3" />
                 {t('settings.words.envPickFile')}
               </Button>
               {raw && (
-                <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => reparse('')}>
+                <Button size="sm" variant="ghost" className="h-7" onClick={() => reparse('')}>
                   <X className="mr-1 h-3 w-3" />
                   {t('common.clear')}
                 </Button>
@@ -200,7 +200,7 @@ export function EnvImportDialog({
           </div>
 
           <Textarea
-            className="h-28 resize-none font-mono text-[11px] leading-relaxed"
+            className="h-28 resize-none font-mono text-2xs leading-relaxed"
             placeholder={t('settings.words.envPastePh')}
             value={raw}
             onChange={(e) => reparse(e.target.value)}
@@ -210,7 +210,7 @@ export function EnvImportDialog({
           {entries.length > 0 && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">
+                <span className="text-2xs text-muted-foreground">
                   {tf('settings.words.envSummary', {
                     n: entries.length,
                     s: entries.filter((e) => e.secret).length,
@@ -218,25 +218,25 @@ export function EnvImportDialog({
                 </span>
                 <div className="flex items-center gap-0.5">
                   <Button
-                    size="sm"
+                    size="2xs"
                     variant="ghost"
-                    className="h-6 px-2 text-[11px]"
+                    className="px-2"
                     onClick={() => setPicked(entries.map((_, i) => !!targets[i]))}
                   >
                     {t('settings.words.envSelectAll')}
                   </Button>
                   <Button
-                    size="sm"
+                    size="2xs"
                     variant="ghost"
-                    className="h-6 px-2 text-[11px]"
+                    className="px-2"
                     onClick={() => setPicked(entries.map((e) => e.secret))}
                   >
                     {t('settings.words.envSelectSecrets')}
                   </Button>
                   <Button
-                    size="sm"
+                    size="2xs"
                     variant="ghost"
-                    className="h-6 px-2 text-[11px]"
+                    className="px-2"
                     onClick={() => setPicked(entries.map(() => false))}
                   >
                     {t('settings.words.envSelectNone')}
@@ -248,7 +248,7 @@ export function EnvImportDialog({
                   表头的 sticky 会贴着该容器顶部生效（两个嵌套滚动区反而更难用）。 */}
               <div className="overflow-x-auto rounded-lg border">
                 <table className="w-full text-left text-xs">
-                  <thead className="sticky top-0 bg-muted/80 backdrop-blur">
+                  <thead className="sticky top-0 bg-muted">
                     <tr className="text-muted-foreground">
                       <th className="w-8 px-3 py-2" />
                       <th className="px-2 py-2 font-medium">{t('settings.words.envColKey')}</th>
@@ -275,22 +275,22 @@ export function EnvImportDialog({
                           </td>
                           <td className="px-2 py-1.5">
                             <div className="flex items-center gap-1.5">
-                              <span className="font-mono text-[11px]">{e.key}</span>
+                              <span className="font-mono text-2xs">{e.key}</span>
                               {e.secret && (
                                 <Badge
                                   variant="outline"
-                                  className="h-4 shrink-0 px-1 text-[9px] font-normal text-amber-600 dark:text-amber-400"
+                                  className="h-4 shrink-0 px-1 text-2xs font-normal text-warning-ink"
                                 >
                                   {t('settings.words.envSecretBadge')}
                                 </Badge>
                               )}
                             </div>
-                            <div className="text-[10px] text-muted-foreground/70">
+                            <div className="text-2xs text-muted-foreground">
                               {tf('settings.words.envLine', { n: e.line })}
                             </div>
                           </td>
                           <td
-                            className="max-w-0 truncate px-2 py-1.5 font-mono text-[11px] text-muted-foreground"
+                            className="max-w-0 truncate px-2 py-1.5 font-mono text-2xs text-muted-foreground"
                             title={previewValue(e.value, e.secret)}
                           >
                             {previewValue(e.value, e.secret)}
@@ -301,7 +301,7 @@ export function EnvImportDialog({
                                 而 Radix Select 嵌在 Radix Dialog 的焦点陷阱里也更容易出怪问题。 */}
                             <select
                               className={cn(
-                                'h-6 w-full rounded-md border bg-background px-1 text-[11px]',
+                                'h-6 w-full rounded-md border bg-background px-1 text-2xs',
                                 targets[i] ? 'border-input text-foreground' : 'border-dashed border-border text-muted-foreground',
                               )}
                               value={targets[i] ?? ''}
@@ -333,7 +333,7 @@ export function EnvImportDialog({
           )}
 
           {parsed && entries.length === 0 && raw.trim() !== '' && (
-            <div className="rounded-lg border border-dashed px-3 py-2 text-[11px] text-muted-foreground">
+            <div className="rounded-lg border border-dashed px-3 py-2 text-2xs text-muted-foreground">
               {t('settings.words.envEmpty')}
             </div>
           )}
@@ -342,7 +342,7 @@ export function EnvImportDialog({
             <div className="rounded-lg border bg-muted/30">
               <button
                 type="button"
-                className="flex w-full items-center justify-between px-3 py-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+                className="flex w-full items-center justify-between px-3 py-1.5 text-2xs text-muted-foreground hover:text-foreground"
                 onClick={() => setShowSkipped((v) => !v)}
               >
                 <span>{tf('settings.words.envSkippedTitle', { n: parsed.skipped.length })}</span>
@@ -351,9 +351,9 @@ export function EnvImportDialog({
                 />
               </button>
               {showSkipped && (
-                <ul className="max-h-28 space-y-0.5 overflow-auto border-t border-border/60 px-3 py-1.5">
+                <ul className="max-h-28 space-y-0.5 overflow-auto border-t border-border px-3 py-1.5">
                   {parsed.skipped.map((s, i) => (
-                    <li key={`${s.line}:${i}`} className="text-[10px] text-muted-foreground">
+                    <li key={`${s.line}:${i}`} className="text-2xs text-muted-foreground">
                       {tf('settings.words.envLine', { n: s.line })} · {s.reasonKey ? tf(s.reasonKey, s.reasonArgs) : s.reason}
                     </li>
                   ))}
@@ -364,19 +364,19 @@ export function EnvImportDialog({
         </div>
 
         <DialogFooter className="items-center gap-2 sm:justify-between">
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-2xs text-muted-foreground">
             {needCat > 0 ? tf('settings.words.envNeedCat', { n: needCat }) : ''}
           </span>
           <div className="flex items-center gap-2">
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 text-xs"
+              className=""
               onClick={() => onOpenChange(false)}
             >
               {t('common.cancel')}
             </Button>
-            <Button size="sm" className="h-8 text-xs" disabled={readyCount === 0} onClick={doImport}>
+            <Button size="sm" className="" disabled={readyCount === 0} onClick={doImport}>
               {tf('settings.words.envConfirm', { n: readyCount })}
             </Button>
           </div>

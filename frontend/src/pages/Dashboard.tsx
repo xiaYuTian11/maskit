@@ -18,20 +18,19 @@ import {
   Activity,
   Shield,
   Zap,
+  Coins,
   AlertCircle,
   AlertTriangle,
   Globe,
   X,
   Clock,
   ArrowRight,
-  HelpCircle,
-  Coins,
   Gauge,
   Loader2,
   LockKeyhole,
 } from 'lucide-react'
 import { getStatus, dismissAutoRecover } from '@/api/proxy'
-import { getTodayStats, getRestoreItems, getConfig, saveConfig, getHealth, getStatsModels } from '@/api/settings'
+import { getTodayStats, getRestoreItems, getConfig, saveConfig, getHealth, getStatsModels, getStatsHistory, type StatsHistoryPoint } from '@/api/settings'
 import { getLogs } from '@/api/logs'
 import { mergeMaskRestore, type MergedEvent } from '@/lib/log-events'
 import { EventTypeIcon, EVENT_TYPE_META } from '@/components/events/EventTypeIcon'
@@ -44,11 +43,13 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { cn, formatCompactNumber, formatTokensShort, formatBytes, formatPercent } from '@/lib/utils'
 import { CRED_LABELS, maskWord } from '@/lib/sensitive-word'
 import { groupWordsByIngress, ingressQuery } from '@/lib/ingress-groups'
+import { Hint } from '@/components/common/Hint'
+import { StatCard } from '@/components/patterns/StatCard'
+import { PageHeader } from '@/components/patterns/PageHeader'
 import { toast } from '@/lib/toast'
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
@@ -78,12 +79,81 @@ function renderStatValue(v?: string | null) {
   if (typeof v === 'string' && v.startsWith('$')) {
     return (
       <>
-        <span className="mr-0.5 text-[20px] font-normal text-muted-foreground/80">$</span>
+        <span className="mr-0.5 text-[20px] font-normal text-muted-foreground">$</span>
         <span>{v.slice(1)}</span>
       </>
     )
   }
   return v ?? '—'
+}
+
+/**
+ * 迷你趋势图：一条面积折线，不引图表库。
+ *
+ * 为什么首页需要它：6 张数字卡 + 一堆开关，整页没有任何「视觉主体」，
+ * 材质调得再细也只是「干净」。一张横跨的曲线卡能把视线先钉住，
+ * 其余信息退成背景 —— 这是「好看」和「不难看」的分界。
+ */
+function Sparkline({ points }: { points: StatsHistoryPoint[] }) {
+  const W = 800
+  const H = 120
+  const pad = { t: 10, r: 8, b: 22, l: 8 }
+  const vals = points.map((p) => p.requests ?? 0)
+  const max = Math.max(1, ...vals)
+  const n = Math.max(1, vals.length - 1)
+  const x = (i: number) => pad.l + (i / n) * (W - pad.l - pad.r)
+  const y = (v: number) => pad.t + (1 - v / max) * (H - pad.t - pad.b)
+
+  // Catmull-Rom → 三次贝塞尔：控制点取相邻点的切线（p1 + (p2-p0)/6），
+  // 曲线贴合数据点。用「中点做控制点」会过度圆润，7 个点的日数据会被画成一团软波。
+  let path = ''
+  if (vals.length > 1) {
+    path = `M ${x(0)} ${y(vals[0])}`
+    for (let i = 0; i < vals.length - 1; i++) {
+      const p0 = { x: x(Math.max(0, i - 1)), y: y(vals[Math.max(0, i - 1)]) }
+      const p1 = { x: x(i), y: y(vals[i]) }
+      const p2 = { x: x(i + 1), y: y(vals[i + 1]) }
+      const p3 = { x: x(Math.min(vals.length - 1, i + 2)), y: y(vals[Math.min(vals.length - 1, i + 2)]) }
+      const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 }
+      const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 }
+      path += ` C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`
+    }
+  }
+  const area = vals.length > 1 ? `${path} L ${x(vals.length - 1)} ${H - pad.b} L ${x(0)} ${H - pad.b} Z` : ''
+  const last = vals.length - 1
+  const firstLabel = points[0]?.label ?? ''
+  const lastLabel = points[last]?.label ?? ''
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="mt-3 block w-full" style={{ height: 120 }} preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="spark-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="hsl(var(--primary))" stopOpacity="0.30" />
+          <stop offset="100%" stopColor="hsl(var(--primary))" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {area && <path d={area} fill="url(#spark-fill)" />}
+      {path && (
+        <path
+          d={path}
+          fill="none"
+          stroke="hsl(var(--primary))"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      )}
+      {last >= 0 && (
+        <circle cx={x(last)} cy={y(vals[last])} r="3.5" fill="hsl(var(--primary))" stroke="hsl(var(--card))" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      )}
+      {/* 首尾日期锚点：没有它，曲线只是「一条好看的线」，看不出覆盖了哪几天 */}
+      <g fill="hsl(var(--muted-foreground))" fontSize="10" fontFamily="inherit">
+        <text x={pad.l} y={H - 6}>{firstLabel}</text>
+        <text x={W - pad.r} y={H - 6} textAnchor="end">{lastLabel}</text>
+      </g>
+    </svg>
+  )
 }
 
 export default function Dashboard() {
@@ -245,43 +315,96 @@ export default function Dashboard() {
   const maskNum = formatCompactNumber(stats?.mask_events ?? 0, unitSystem)
   const restoreNum = formatCompactNumber(stats?.restored ?? 0, unitSystem)
   const alertNum = formatCompactNumber(stats?.alerts ?? 0, unitSystem)
+  // 趋势卡与下面 6 张卡共用一个区间控件：原先两块各有一组胶囊，纵向相邻、长得一模一样、
+  // 作用域却不同（一块管曲线、一块管卡片），用户没有线索能分清。
+  // 今日没有「多日趋势」可画，退化成近 7 天，标题跟着改写。
+  const trendDays: 7 | 30 = statsRange === '30d' ? 30 : 7
+  const { data: trendData } = useQuery({
+    queryKey: ['statsHistory', 'day', trendDays],
+    queryFn: () => getStatsHistory(trendDays, 'day'),
+    refetchInterval: hidden ? false : 60000,
+  })
+  const trendPoints = useMemo(() => trendData?.data ?? [], [trendData])
+  // 副指标必须与曲线同口径：它们原先取自 stats（跟随下方 6 卡的区间），
+  // 于是「近 7 天 7,990」下面挂着「已脱敏 1,284」，两个数说的不是同一件事。
+  const trendTotals = useMemo(
+    () =>
+      trendPoints.reduce(
+        (acc, p) => ({
+          requests: acc.requests + (p.requests ?? 0),
+          masks: acc.masks + (p.mask_events ?? 0),
+          restored: acc.restored + (p.restored ?? 0),
+          alerts: acc.alerts + (p.alerts ?? 0),
+        }),
+        { requests: 0, masks: 0, restored: 0, alerts: 0 },
+      ),
+    [trendPoints],
+  )
+  // 环比：最后一点 vs 前一点（日粒度）。没有前一日样本就不显示 —— 不拿 0 当分母，
+  // 也不在没有数据时编一个趋势出来。
+  const trendDelta = useMemo(() => {
+    if (trendPoints.length < 2) return null
+    const prev = trendPoints[trendPoints.length - 2]?.requests ?? 0
+    const cur = trendPoints[trendPoints.length - 1]?.requests ?? 0
+    if (prev <= 0) return null
+    return Math.round(((cur - prev) / prev) * 100)
+  }, [trendPoints])
+
   const tokenNum = formatCompactNumber(tokensTotal, unitSystem)
 
-  // 6 张统计卡（i18n）
-  const statCards = [
+  // 6 张统计卡（i18n）。字段即 <StatCard> 的入参，样式一律由组件决定，
+  // 这里只描述数据——旧版每个元素还带 icon/iconBg/num（渲染类名），
+  // 一处视觉结果散在数组里，改版时最容易漏。
+  interface DashStatCard {
+    label: string
+    icon?: React.ComponentType<{ className?: string }>
+    iconTone?: 'primary' | 'success' | 'warning' | 'muted'
+    value: string
+    fullValue?: string
+    isCompact?: boolean
+    hint?: string
+    hintTitle?: string
+    sub?: { label: string; value: number | string; title?: string }[]
+    tone?: 'warning' | 'danger'
+    to?: string
+    onClick?: () => void
+  }
+  const hasAlert = (stats?.alerts ?? 0) > 0
+  const statCards: DashStatCard[] = [
     {
       label: t('dash.reqToday'),
+      icon: Activity,
       value: reqNum.compact,
       fullValue: reqNum.full,
       isCompact: reqNum.isCompact,
       hint: t('dash.reqHint'),
-      icon: Activity, num: 'text-blue-600 dark:text-blue-400',
-      iconBg: 'from-blue-500/15 to-blue-500/5 text-blue-600 dark:text-blue-400',
       to: '/logs',
     },
     {
       label: t('dash.maskedReq'),
+      icon: Shield,
+      iconTone: 'primary',
       value: maskNum.compact,
       fullValue: maskNum.full,
       isCompact: maskNum.isCompact,
       hint: `${t('dash.maskedHint')} ${formatTokensShort(stats?.masked_items ?? 0, unitSystem)}`,
       hintTitle: `${t('dash.maskedHint')} ${(stats?.masked_items ?? 0).toLocaleString()}`,
-      icon: Shield, num: 'text-emerald-600 dark:text-emerald-400',
-      iconBg: 'from-emerald-500/15 to-emerald-500/5 text-emerald-600 dark:text-emerald-400',
       onClick: () => setMaskedOpen(true),
     },
     {
       label: t('dash.restored'),
+      icon: ShieldCheck,
+      iconTone: 'success',
       value: restoreNum.compact,
       fullValue: restoreNum.full,
       isCompact: restoreNum.isCompact,
       hint: t('dash.restoredHint'),
-      icon: ShieldCheck, num: 'text-emerald-600 dark:text-emerald-400',
-      iconBg: 'from-teal-500/15 to-teal-500/5 text-teal-600 dark:text-teal-400',
       onClick: () => setRestoredOpen(true),
     },
     {
       label: t('dash.alerts'),
+      icon: AlertCircle,
+      iconTone: hasAlert ? 'warning' : 'muted',
       value: alertNum.compact,
       fullValue: alertNum.full,
       isCompact: alertNum.isCompact,
@@ -296,72 +419,67 @@ export default function Dashboard() {
         // 本机签发过的）。恒显示（0 也是值），避免有时有有时无让用户以为漏了。
         { label: t('dash.foreignTokens'), value: stats?.restore_by_status?.foreign ?? 0, title: t('dash.foreignTokensHint') },
       ],
-      icon: AlertCircle, num: 'text-amber-600 dark:text-amber-400',
-      iconBg: 'from-amber-500/15 to-amber-500/5 text-amber-600 dark:text-amber-400',
+      tone: hasAlert ? 'warning' : undefined,
       to: '/logs',
     },
     {
       label: t('dash.tokenToday'),
+      icon: Zap,
       value: tokenNum.compact,
       fullValue: tokenNum.full,
       isCompact: tokenNum.isCompact,
       hint: `${t('dash.tokenHint')} ${formatTokensShort(stats?.tokens.prompt ?? 0, unitSystem)} · ${formatTokensShort(stats?.tokens.completion ?? 0, unitSystem)}`,
       hintTitle: `${t('dash.tokenHint')} ${(stats?.tokens.prompt ?? 0).toLocaleString()} · ${(stats?.tokens.completion ?? 0).toLocaleString()}`,
-      icon: Zap, num: 'text-violet-600 dark:text-violet-400',
-      iconBg: 'from-violet-500/15 to-violet-500/5 text-violet-600 dark:text-violet-400',
       to: '/stats',
     },
     {
       // 今日费用估算：按模型价格 × 今日 token 用量估算，未定价模型不计入；
       // 请求加载中显示破折号，有请求但全部未定价时提示估算不可用（不展示假 0 账单）。
       label: t('dash.costToday'),
+      icon: Coins,
       value: !todayCostReady || todayCostUnavailable ? '—' : `$${Number(todayCost || 0).toFixed(4)}`,
       hint: !todayCostReady ? t('common.loading') : todayCostUnavailable ? t('dash.costUnavailable') : t('dash.costHint'),
-      icon: Coins, num: 'text-emerald-600 dark:text-emerald-400',
-      iconBg: 'from-emerald-500/15 to-emerald-500/5 text-emerald-600 dark:text-emerald-400',
       to: '/stats',
     },
   ]
 
   return (
-    <div className="space-y-5">
-      <h1 className="sr-only">{t('nav.dashboard')}</h1>
+    <div className="space-y-6">
+      {/* 页面标题：Logs / Settings 都有可见大标题，只有控制台把它藏成 sr-only，
+          于是这一页从状态条直接开始 —— 没有标题层级，整片内容缺一个「从哪读起」。 */}
+      <PageHeader title={t('nav.dashboard')} subtitle={t('dash.subtitle')} />
       {/* ===== 大状态横幅 ===== */}
       <div
         className={cn(
-          'flex flex-wrap items-center gap-4 rounded-2xl border p-5 transition-all duration-300 backdrop-blur-md',
-          isStarting || isStopping
-            ? 'border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-amber-500/5'
-            : running && filterOn
-              ? 'border-emerald-500/30 bg-gradient-to-br from-emerald-500/10 to-emerald-500/5'
-              : running
-                ? 'border-amber-500/30 bg-gradient-to-br from-amber-500/10 to-amber-500/5'
-                : 'border-border bg-gradient-to-br from-muted/40 to-muted/10',
+          // 状态条：单行、中性底，状态靠图标与文案表达。旧版每种状态一个渐变底色
+          // （绿/橙/灰三套），每屏最大的一块颜色被一个「一直在那里」的常驻区占死，
+          // 真正需要颜色的告警反而看不出。
+          'flex flex-wrap items-center gap-4 rounded-xl border border-border bg-card px-4 py-3.5 transition-colors duration-300',
         )}
       >
         <div
           className={cn(
-            'flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-white shadow-lg',
+            'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg',
             isStarting || isStopping
-              ? 'bg-gradient-to-br from-amber-500 to-orange-500 shadow-amber-500/25'
+              ? 'bg-warning/10 text-warning-ink'
               : running && filterOn
-                ? 'bg-gradient-to-br from-emerald-500 to-green-500 shadow-emerald-500/25'
+                ? 'bg-primary/10 text-primary-ink'
                 : running
-                  ? 'bg-gradient-to-br from-amber-500 to-orange-500 shadow-amber-500/25'
-                  : 'bg-gradient-to-br from-slate-400 to-slate-500 shadow-slate-500/25',
+                  ? 'bg-warning/10 text-warning-ink'
+                  : 'bg-muted text-muted-foreground',
           )}
         >
           {isStarting || isStopping ? (
-            <Loader2 className="h-6 w-6 animate-spin" />
+            <Loader2 className="h-[18px] w-[18px] animate-spin" />
           ) : running && filterOn ? (
-            <ShieldCheck className="h-6 w-6" />
+            <ShieldCheck className="h-[18px] w-[18px]" />
           ) : (
-            <ShieldOff className="h-6 w-6" />
+            <ShieldOff className="h-[18px] w-[18px]" />
           )}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-lg font-bold tracking-tight">
+            <span className="text-[15px] font-semibold tracking-tight">
               {isStarting
                 ? t('dash.startingTitle')
                 : isStopping
@@ -373,12 +491,12 @@ export default function Dashboard() {
                       : t('dash.filterOff')}
             </span>
             {running && !isStarting && (
-              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              <span className="rounded-md border border-border bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                 {t(`dash.captureMode.${status?.capture_mode ?? 'reverse'}`)}
               </span>
             )}
           </div>
-          <p className="mt-1 text-[13px] text-muted-foreground">
+          <p className="mt-0.5 text-[12px] text-muted-foreground">
             {isStarting
               ? t('dash.startingDesc')
               : running
@@ -401,9 +519,74 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* 趋势焦点卡：整页唯一的「视觉主体」。
+          在此之前，控制台是 6 张等权数字卡叠一堆开关，视线无处停留；
+          一张横跨的曲线把「现在什么态势」先讲清楚，其余信息自然退成背景。 */}
+      <Card className="border bg-card shadow-card">
+        <CardContent className="p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0">
+              {/* 用「区间累计」而不是「今日」：下面 6 张卡已经是今日口径，
+                  焦点卡再报一次今日请求就是重复信息，占着最贵的位置说同一件事。 */}
+              <div className="text-[12px] font-medium text-muted-foreground">
+                {trendDays === 7 ? t('dash.stats7d') : t('dash.stats30d')}
+              </div>
+              <div className="mt-1.5 flex items-baseline gap-2.5">
+                <div
+                  className="text-[42px] font-semibold leading-none tabular-nums tracking-[-0.03em]"
+                  title={String(trendTotals.requests)}
+                >
+                  {formatCompactNumber(trendTotals.requests, unitSystem).compact}
+                </div>
+                {trendDelta !== null && (
+                  <span
+                    className={cn(
+                      'text-[13px] font-medium tabular-nums',
+                      trendDelta > 0
+                        ? 'text-success-ink'
+                        : trendDelta < 0
+                          ? 'text-destructive-ink'
+                          : 'text-muted-foreground',
+                    )}
+                  >
+                    {trendDelta > 0 ? '↑' : trendDelta < 0 ? '↓' : '·'} {Math.abs(trendDelta)}%
+                  </span>
+                )}
+              </div>
+              <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-foreground">
+                <span>
+                  {t('dash.maskedReq')}{' '}
+                  <b className="font-medium tabular-nums text-foreground">
+                    {formatCompactNumber(trendTotals.masks, unitSystem).compact}
+                  </b>
+                </span>
+                <span>
+                  {t('dash.restored')}{' '}
+                  <b className="font-medium tabular-nums text-foreground">
+                    {formatCompactNumber(trendTotals.restored, unitSystem).compact}
+                  </b>
+                </span>
+                <span>
+                  {t('dash.alerts')}{' '}
+                  <b
+                    className={cn(
+                      'font-medium tabular-nums',
+                      trendTotals.alerts > 0 ? 'text-warning-ink' : 'text-foreground',
+                    )}
+                  >
+                    {formatCompactNumber(trendTotals.alerts, unitSystem).compact}
+                  </b>
+                </span>
+              </div>
+            </div>
+          </div>
+          <Sparkline points={trendPoints} />
+        </CardContent>
+      </Card>
+
       {/* 引擎错误横幅 */}
       {status?.last_error && !status.auto_recover_fail && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
+        <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{t('dash.engineError')}{status.last_error}</span>
           <DiagnosticPreviewButton />
@@ -412,7 +595,7 @@ export default function Dashboard() {
 
       {/* 环境变量 token 被忽略：Docker 无头用户翻不到启动日志，必须首屏可见 */}
       {status?.panel_token_env_rejected && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+        <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning-ink">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1">{t('dash.panelTokenRejected')}</span>
         </div>
@@ -420,7 +603,7 @@ export default function Dashboard() {
 
       {/* 自动恢复横幅 */}
       {status?.auto_recovered_at && !status.auto_recover_fail && (
-        <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-600 dark:text-emerald-400">
+        <div className="flex items-center gap-2 rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-success-ink">
           <ShieldCheck className="h-4 w-4 shrink-0" />
           <span>{tf('dash.autoRecovered', { time: status.auto_recovered_at ? dayjs(status.auto_recovered_at).format('HH:mm:ss') : '—' })}</span>
           <Button size="icon" variant="ghost" className="ml-auto h-6 w-6 shrink-0" onClick={dismiss}>
@@ -429,7 +612,7 @@ export default function Dashboard() {
         </div>
       )}
       {status?.auto_recover_fail && (
-        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
+        <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{t('dash.autoRecoverFail')}{status.auto_recover_fail}</span>
           <Button size="icon" variant="ghost" className="ml-auto h-6 w-6 shrink-0" onClick={dismiss}>
@@ -440,8 +623,8 @@ export default function Dashboard() {
 
       {/* 向导横幅 */}
       {status?.wizard_recommended && (
-        <div className="flex items-center gap-3 rounded-xl border bg-gradient-to-r from-primary/10 to-transparent p-4 backdrop-blur-md">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 font-bold text-primary">1</div>
+        <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/15 font-bold text-primary-ink">1</div>
           <div className="min-w-0 flex-1 text-sm">
             <div className="font-semibold">{t('dash.wizardTitle')}</div>
             <div className="mt-0.5 text-xs text-muted-foreground">
@@ -457,9 +640,9 @@ export default function Dashboard() {
 
       {/* 写队列健康告警：drops/dead_letters/restarts > 0 时显示 */}
       {hasWriterIssues && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
-          <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-          <span className="text-amber-700 dark:text-amber-300">
+        <div className="flex items-center gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-warning-ink" />
+          <span className="text-warning-ink">
             {t('dash.writerIssue')}
             {ws.event_writer?.drops ? tf('dash.writerDropped', { n: ws.event_writer.drops }) : ''}
             {ws.audit_writer?.drops ? ` / ${tf('dash.writerAuditDropped', { n: ws.audit_writer.drops })}` : ''}
@@ -470,89 +653,54 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ===== 5 张统计卡 ===== */}
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-muted-foreground">
+      {/* ===== 统计分组 =====
+          6 张卡放进一块灰底面板，而不是直接铺在页面底色上。
+          同一张白卡压 #ebebed 与压在 #e1e1e4 上是两个观感：后者让「这 6 张说的是
+          同一件事」在视觉上成立，页面也终于有了块面，而不是一片白卡平铺到底。 */}
+      <section className="rounded-2xl border border-border/70 bg-muted/60 p-2.5">
+      <div className="mb-2.5 flex items-center justify-between px-1.5 pt-0.5">
+        <h2 className="text-[13px] font-semibold text-muted-foreground">
           {statsRange === 'today' ? t('dash.statsToday') : statsRange === '7d' ? t('dash.stats7d') : t('dash.stats30d')}
         </h2>
-        <div className="flex items-center gap-1 rounded-lg bg-muted/60 p-0.5 text-xs">
+        <div className="flex items-center gap-1 rounded-full bg-background/70 p-1 text-xs">
           {([['today', t('dash.today')], ['7d', t('dash.7d')], ['30d', t('dash.30d')]] as const).map(([k, label]) => (
             <button
               key={k}
               type="button"
               onClick={() => setStatsRange(k)}
-              className={cn('rounded-md px-2.5 py-1 font-medium transition-colors', statsRange === k ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground')}
+              className={cn('rounded-full px-3 py-1 font-medium transition-all', statsRange === k ? 'bg-card text-foreground shadow-[0_1px_2px_rgb(0_0_0/0.18)] ring-1 ring-black/5 dark:ring-white/10' : 'text-muted-foreground hover:text-foreground')}
             >
               {label}
             </button>
           ))}
         </div>
       </div>
-      {/* 6 卡：2-3 列为主，配合 max-w-[1200px] 容器保持 3 列两行优雅呈现 */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* 6 卡：窄屏 2 列、中屏 3 列，≥1536px 直接一行 6 列 ——
+          1440 宽下 3 列会让每张卡横向白白多出 ~120px，数字反而显得空旷。 */}
+      <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6">
         {statCards.map((c) => {
           const interactive = !!(c.to || c.onClick)
           const card = (
-            <Card
-              className={cn(
-                'h-full border bg-card shadow-[var(--shadow-card)] transition-[transform,box-shadow,border-color] duration-200',
-                // hover 效果只给真能点的卡。Token 卡没有去处，给它抬起+手型
-                // 等于骗一次点击——之前 to:'/logs' 也从没接到路由，
-                // 三张卡看着可点实际点了没反应
-                interactive &&
-                  'cursor-pointer hover:-translate-y-0.5 hover:border-primary/30 hover:bg-accent/40 hover:shadow-[var(--shadow-card-hover)]',
-              )}
+            <StatCard
+              label={c.label}
+              {...(c.icon ? { icon: c.icon } : {})}
+              {...(c.iconTone ? { iconTone: c.iconTone } : {})}
+              value={c.isCompact ? renderStatValue(c.value) : c.value}
+              {...(c.isCompact && c.fullValue ? { fullValue: c.fullValue } : {})}
+              {...(c.sub ? { sub: c.sub } : {})}
+              {...(c.hint ? { hint: c.hint } : {})}
+              {...(c.hintTitle ? { hintTitle: c.hintTitle } : {})}
+              {...(c.tone ? { tone: c.tone } : {})}
+              interactive={interactive}
               {...(c.onClick ? { onClick: c.onClick } : {})}
-            >
-              <CardContent className="flex h-full flex-col p-5">
-                {/* 标题与数值各占一行：标题行只放标题和图标，数值行左对齐顶格，
-                    5 张卡的数值基线才能横向对齐（标题长短不一时尤其明显） */}
-                <div className="flex items-start justify-between gap-2">
-                  <span className="min-w-0 flex-1 text-[13px] font-semibold leading-5 text-foreground/80">
-                    {c.label}
-                  </span>
-                  <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br', c.iconBg)}>
-                    <c.icon className="h-[18px] w-[18px]" />
-                  </div>
-                </div>
-                <div
-                  className={cn('mt-2.5 mb-2 text-[28px] font-bold leading-tight tabular-nums tracking-tight truncate', c.num)}
-                  title={c.fullValue || c.value}
-                >
-                  {c.isCompact ? (
-                    <TooltipProvider delayDuration={150}>
-                      <Tooltip>
-                        <TooltipTrigger asChild className="cursor-default">
-                          <span>{renderStatValue(c.value)}</span>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                          <p className="font-mono text-xs">{c.fullValue}</p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  ) : (
-                    renderStatValue(c.value)
-                  )}
-                </div>
-                {c.sub ? (
-                  <div className="mt-auto grid grid-cols-2 gap-x-2 gap-y-0.5 border-t pt-2 text-xs text-muted-foreground" style={{ minHeight: 44 }}>
-                    {c.sub.map((s) => (
-                      <span key={s.label} className="truncate" title={s.title}>
-                        {s.label} <b className="font-medium tabular-nums text-foreground">{s.value}</b>
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="mt-auto border-t pt-2 text-[11px] font-medium text-muted-foreground/80 truncate" style={{ minHeight: 44 }} title={c.hintTitle || c.hint}>{c.hint}</p>
-                )}
-              </CardContent>
-            </Card>
+            />
           )
           return c.to
             ? <Link key={c.label} to={c.to} className="block h-full">{card}</Link>
             : <div key={c.label} className="h-full">{card}</div>
         })}
       </div>
+      </section>
 
       {/* 前缀保真度：MASK 事件三个诊断字段（body_rewritten / first_diff_byte /
           suffix_reused）的聚合，用来回答「上游缓存命中率掉了，是我们改了请求
@@ -566,53 +714,35 @@ export default function Dashboard() {
           `prefix` 为 null 时按 mask_events 区分两种「没有数据」：区间内压根没
           请求 vs 有请求但都早于该统计上线（升级当天就是后者，不能说成「脱敏
           没生效」）。 */}
-      <Card className="border bg-card shadow-[var(--shadow-card)]">
-        <CardContent className="p-5">
+      <Card className="border bg-card shadow-card">
+        <CardContent className="p-4">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500/15 to-sky-500/5 text-sky-600 dark:text-sky-400">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
               <Gauge className="h-[18px] w-[18px]" />
             </div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5 text-[13px] font-semibold leading-5 text-foreground/80">
                 <span>{t('dash.prefixFidelity')}</span>
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <HelpCircle className="h-3.5 w-3.5 cursor-help text-muted-foreground/60 hover:text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[280px] text-xs leading-relaxed">
-                      {t('dash.prefixFidelityTooltip')}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <Hint text={t('dash.prefixFidelityTooltip')} />
               </div>
-              <div className="text-[11px] font-medium text-muted-foreground/80">{t('dash.prefixHint')}</div>
+              <div className="text-2xs font-medium text-muted-foreground">{t('dash.prefixHint')}</div>
             </div>
             {prefix && (
-              <span className="shrink-0 rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 text-[11px] font-medium text-sky-600 dark:text-sky-400">
+              <span className="shrink-0 rounded-md border border-border bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                 {tf('dash.prefixSamples', { n: prefix.masks.toLocaleString() })}
               </span>
             )}
           </div>
           <div className="mt-4 grid grid-cols-3 gap-3 border-t pt-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <div className="flex items-center gap-1 text-2xs font-medium text-muted-foreground">
                 <span className="truncate">{t('dash.prefixClean')}</span>
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <HelpCircle className="h-3 w-3 shrink-0 cursor-help text-muted-foreground/50 hover:text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[260px] text-xs leading-relaxed">
-                      {t('dash.prefixCleanTooltip')}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <Hint text={t('dash.prefixCleanTooltip')} />
               </div>
-              <div className="text-[20px] font-bold leading-tight tabular-nums text-sky-600 dark:text-sky-400">
+              <div className="text-[20px] font-semibold leading-tight tabular-nums text-foreground">
                 {prefix ? formatPercent(prefix.clean_rate, 1, { isNotFull: prefix.clean < prefix.masks }) : '—'}
               </div>
-              <div className="truncate text-[11px] text-muted-foreground/80">
+              <div className="truncate text-2xs text-muted-foreground">
                 {prefix
                   ? `${prefix.clean.toLocaleString()} / ${prefix.masks.toLocaleString()}`
                   : (stats?.mask_events ?? 0) > 0
@@ -621,27 +751,18 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="min-w-0">
-              <div className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <div className="flex items-center gap-1 text-2xs font-medium text-muted-foreground">
                 <span className="truncate">{t('dash.prefixReuse')}</span>
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <HelpCircle className="h-3 w-3 shrink-0 cursor-help text-muted-foreground/50 hover:text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[260px] text-xs leading-relaxed">
-                      {t('dash.prefixReuseTooltip')}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                <Hint text={t('dash.prefixReuseTooltip')} />
               </div>
-              <div className="text-[20px] font-bold leading-tight tabular-nums text-emerald-600 dark:text-emerald-400">
+              <div className="text-[20px] font-semibold leading-tight tabular-nums text-foreground">
                 {prefix?.reuse_rate != null
                   ? formatPercent(prefix.reuse_rate, 1, {
                       isNotFull: prefix.rewritten > 0 && prefix.suffix_reused < prefix.rewritten,
                     })
                   : '—'}
               </div>
-              <div className="truncate text-[11px] text-muted-foreground/80">
+              <div className="truncate text-2xs text-muted-foreground">
                 {prefix
                   ? prefix.rewritten > 0
                     ? `${prefix.suffix_reused.toLocaleString()} / ${prefix.rewritten.toLocaleString()}`
@@ -650,28 +771,26 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="min-w-0">
-              <div className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground">
+              <div className="flex items-center gap-1 text-2xs font-medium text-muted-foreground">
                 <span className="truncate">{t('dash.prefixDiff')}</span>
-                <TooltipProvider delayDuration={150}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <HelpCircle className="h-3 w-3 shrink-0 cursor-help text-muted-foreground/50 hover:text-muted-foreground" />
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[260px] text-xs leading-relaxed">
+                <Hint
+                  text={t('dash.prefixDiffTooltip')}
+                  content={
+                    <>
                       <div>{t('dash.prefixDiffTooltip')}</div>
                       {prefix?.avg_first_diff != null && (
-                        <div className="mt-1 border-t border-border/50 pt-1 text-[10px] text-muted-foreground">
+                        <div className="mt-1 border-t border-border pt-1 text-2xs text-muted-foreground">
                           {tf('dash.prefixDiffExact', { n: prefix.avg_first_diff.toLocaleString() })}
                         </div>
                       )}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
+                    </>
+                  }
+                />
               </div>
-              <div className="text-[20px] font-bold leading-tight tabular-nums">
+              <div className="text-[20px] font-semibold leading-tight tabular-nums text-foreground">
                 {prefix?.avg_first_diff != null ? formatBytes(prefix.avg_first_diff) : '—'}
               </div>
-              <div className="truncate text-[11px] text-muted-foreground/80">
+              <div className="truncate text-2xs text-muted-foreground">
                 {prefix
                   ? prefix.rewritten > 0
                     ? `${prefix.diff_samples.toLocaleString()} / ${prefix.rewritten.toLocaleString()}`
@@ -685,18 +804,18 @@ export default function Dashboard() {
 
 
 {/* 核心安全防护策略 */}
-<Card className="overflow-hidden border bg-card shadow-[var(--shadow-card)]">
-          <div className="flex items-center justify-between border-b p-5">
-            <h3 className="flex items-center gap-2 text-base font-bold">
-              <ShieldCheck className="h-5 w-5 text-emerald-500" />
+<Card className="overflow-hidden border bg-card shadow-card">
+          <div className="flex items-center justify-between border-b p-4">
+            <h3 className="flex items-center gap-2 text-[15px] font-semibold">
+              <ShieldCheck className="h-[18px] w-[18px] text-muted-foreground" />
               {t('dash.security')}
             </h3>
-            <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+            <span className="flex items-center gap-1.5 rounded-md border border-border bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
+              <span className="h-1.5 w-1.5 rounded-full bg-success" />
               {t('dash.live')}
             </span>
           </div>
-          <CardContent className="space-y-3.5 p-5">
+          <CardContent className="space-y-3.5 p-4">
             {([
               ['fail_closed', t('dash.failClosed'), t('dash.failClosedDesc')],
               ['response_scan', t('dash.respScan'), t('dash.respScanDesc')],
@@ -704,16 +823,7 @@ export default function Dashboard() {
               <label key={k} className="flex cursor-pointer select-none items-center justify-between border-t pt-3.5 first:border-t-0 first:pt-0 transition-colors hover:text-foreground">
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate text-sm font-semibold">{title}</span>
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span onClick={(e) => e.stopPropagation()}>
-                          <HelpCircle className="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground/60" />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent className="max-w-[260px] text-xs">{desc}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <Hint text={desc} />
                 </div>
                 <Switch
                   checked={Boolean((status as Record<string, unknown> | undefined)?.[k])}
@@ -730,16 +840,7 @@ export default function Dashboard() {
               <label key={k} className="flex cursor-pointer select-none items-center justify-between border-t pt-3.5 transition-colors hover:text-foreground">
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate text-sm font-semibold">{title}</span>
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span onClick={(e) => e.stopPropagation()}>
-                          <HelpCircle className="h-3.5 w-3.5 shrink-0 cursor-help text-muted-foreground/60" />
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent className="max-w-[260px] text-xs">{desc}</TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
+                  <Hint text={desc} />
                 </div>
                 <Switch
                   checked={Boolean((status as Record<string, unknown> | undefined)?.[k])}
@@ -752,13 +853,13 @@ export default function Dashboard() {
         </Card>
 
       {/* ===== 最近事件表格（与 Logs 页列对齐）===== */}
-      <Card className="overflow-hidden border bg-card shadow-[var(--shadow-card)]">
+      <Card className="overflow-hidden border bg-card shadow-card">
         <div className="flex items-center justify-between border-b bg-muted/20 p-5">
           <div className="flex items-center gap-3">
             <h3 className="text-base font-bold">{t('dash.recentLogs')}</h3>
-            <span className="rounded-full border bg-secondary px-2 py-0.5 font-mono text-[11px] text-muted-foreground">{t('dash.livePush')}</span>
+            <span className="rounded-full border bg-secondary px-2 py-0.5 font-mono text-2xs text-muted-foreground">{t('dash.livePush')}</span>
           </div>
-          <Link to="/logs" className="flex items-center gap-1 text-sm font-semibold text-primary hover:underline">
+          <Link to="/logs" className="flex items-center gap-1 text-sm font-semibold text-primary-ink hover:underline">
             {t('dash.viewAll')} <ArrowRight className="h-3.5 w-3.5" />
           </Link>
         </div>
@@ -797,16 +898,16 @@ export default function Dashboard() {
                   {/* 上游：优先配置名 upstream，client_app（进程探测）仅作缺失回退；扩展流量加小徽标 */}
                   <TableCell className="py-2.5 px-4 truncate text-xs text-muted-foreground" title={String(e.upstream || e.client_app || '')}>
                     <span className="flex items-center gap-1">
-                      {e.ingress === 'ext' && <Globe className="h-3 w-3 shrink-0 text-blue-600 dark:text-blue-400" />}
+                      {e.ingress === 'ext' && <Globe className="h-3 w-3 shrink-0 text-primary-ink" />}
                       <span className="min-w-0 truncate">{String(e.upstream || e.client_app || '—')}</span>
                     </span>
                   </TableCell>
                   {/* 模型：完整 host/path 放 title（悬停可见），列只展示模型名 */}
-                  <TableCell className="py-2.5 px-4 font-mono text-[11px]" title={`${e.host ?? ''}${e.path ?? ''}${e.model ? `\n${tf('logs.modelIn', { m: e.model })}` : ''}`}>
+                  <TableCell className="py-2.5 px-4 font-mono text-2xs" title={`${e.host ?? ''}${e.path ?? ''}${e.model ? `\n${tf('logs.modelIn', { m: e.model })}` : ''}`}>
                     <div className="flex items-center gap-1.5 truncate">
                       <span className="truncate">{e.model || (e.upstream ? '—' : e.host) || '—'}</span>
                       {e.stream_actual && (
-                        <span className="shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-[9px] text-muted-foreground">
+                        <span className="shrink-0 rounded bg-muted/60 px-1 py-0.5 font-mono text-2xs text-muted-foreground">
                           {e.stream_actual === 'stream' ? t('logs.streaming') : t('logs.whole')}
                         </span>
                       )}
@@ -816,13 +917,13 @@ export default function Dashboard() {
                   <TableCell className="py-2.5 px-4 text-xs">
                     {((e.count ?? 0) > 0 || (e.restored ?? 0) > 0 || (e.unresolved ?? 0) > 0 || (e.degraded ?? 0) > 0) ? (
                       <span className="flex items-center gap-1.5">
-                        {(e.count ?? 0) > 0 && <span className="text-blue-600 dark:text-blue-400">{t('logs.colMasked')} {e.count}</span>}
-                        {(e.restored ?? 0) > 0 && <span className="text-emerald-600 dark:text-emerald-400">{t('logs.colRestored')} {e.restored}</span>}
-                        {(e.unresolved ?? 0) > 0 && <span className="text-amber-600 dark:text-amber-400" title={t('logs.unresolvedHint')}>{t('logs.colUnresolved')} {e.unresolved}</span>}
+                        {(e.count ?? 0) > 0 && <span className="text-primary-ink">{t('logs.colMasked')} {e.count}</span>}
+                        {(e.restored ?? 0) > 0 && <span className="text-success-ink">{t('logs.colRestored')} {e.restored}</span>}
+                        {(e.unresolved ?? 0) > 0 && <span className="text-warning-ink" title={t('logs.unresolvedHint')}>{t('logs.colUnresolved')} {e.unresolved}</span>}
                         {(e.degraded ?? 0) > 0 && <span className="text-muted-foreground" title={t('logs.degradedHint')}>{t('logs.colDegraded')} {e.degraded}</span>}
                       </span>
                     ) : (
-                      <span className="text-muted-foreground/50">—</span>
+                      <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   {/* 状态：http_status 状态码或终态归因/status 语义（与 Logs 页同口径） */}
@@ -831,22 +932,22 @@ export default function Dashboard() {
                       <Badge
                         variant="outline"
                         className={cn(
-                          'px-1 py-0 text-[9px] font-mono',
+                          'px-1 py-0 text-2xs font-mono',
                           e.http_status >= 400
-                            ? 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400'
+                            ? 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                             : e.http_status >= 200 && e.http_status < 300
-                              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                              : 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                              ? 'border-success/30 bg-success/10 text-success-ink'
+                              : 'border-warning/30 bg-warning/10 text-warning-ink',
                         )}
                       >
                         {e.http_status}
                       </Badge>
                     ) : statusText(e) ? (
-                      <span className="truncate text-[9px] text-muted-foreground" title={statusText(e) ?? ''}>
+                      <span className="truncate text-2xs text-muted-foreground" title={statusText(e) ?? ''}>
                         {statusText(e)}
                       </span>
                     ) : (
-                      <span className="text-muted-foreground/50">—</span>
+                      <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   {/* 耗时：端到端优先；只有脱敏耗时时显式标注口径（与 Logs 页同口径） */}
@@ -854,19 +955,19 @@ export default function Dashboard() {
                     {(e.total_ms ?? e.upstream_ms) != null ? (
                       <span title={t('logs.durE2eHint')}>{fmtMs(e.total_ms ?? e.upstream_ms)}</span>
                     ) : e.mask_ms != null ? (
-                      <span className="text-muted-foreground/70" title={t('logs.durMaskHint')}>
+                      <span className="text-muted-foreground" title={t('logs.durMaskHint')}>
                         {tf('logs.durMask', { v: fmtMs(e.mask_ms) })}
                       </span>
                     ) : (
-                      <span className="text-muted-foreground/50">—</span>
+                      <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
                   {/* 费用：RESTORE 事件由后端按 model×usage 估算，与 Logs 页口径一致 */}
-                  <TableCell className="py-2.5 px-4 text-right tabular-nums text-[11px]">
+                  <TableCell className="py-2.5 px-4 text-right tabular-nums text-2xs">
                     {e.cost_usd != null && e.cost_usd > 0 ? (
-                      <span className="text-emerald-600 dark:text-emerald-400">${e.cost_usd.toFixed(4)}</span>
+                      <span className="text-success-ink">${e.cost_usd.toFixed(4)}</span>
                     ) : (
-                      <span className="text-muted-foreground/50">—</span>
+                      <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
                 </TableRow>
@@ -892,16 +993,16 @@ export default function Dashboard() {
           {(status?.upstream_ports ?? []).map((u) => (
             <Card
               key={u.port}
-              className="border bg-card shadow-[var(--shadow-card)] transition-all duration-200 hover:-translate-y-0.5 hover:shadow-[var(--shadow-card-hover)]"
+              className="border bg-card shadow-card transition-all duration-200 hover:-translate-y-0.5 hover:shadow-card-hover"
             >
               <CardContent className="p-4">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-[15px] font-semibold">{u.name || `:${u.port}`}</span>
                   <span
                     className={cn(
-                      'flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium',
+                      'flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-2xs font-medium',
                       u.listening
-                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                        ? 'border-success/30 bg-success/10 text-success-ink'
                         : 'border-border text-muted-foreground',
                     )}
                   >
@@ -909,8 +1010,8 @@ export default function Dashboard() {
                       className={cn(
                         'h-1.5 w-1.5 rounded-full',
                         u.listening
-                          ? 'animate-pulse bg-emerald-400 shadow-[0_0_6px_hsl(152_60%_45%/0.7)]'
-                          : 'bg-slate-500',
+                          ? 'animate-pulse bg-success'
+                          : 'bg-muted-foreground',
                       )}
                     />
                     {u.listening ? t('common.running') : t('common.stopped')}
@@ -930,7 +1031,7 @@ export default function Dashboard() {
             </Card>
           ))}
           {(status?.upstream_ports ?? []).length === 0 && (
-            <Card className="border bg-card">
+            <Card className="border bg-card shadow-card">
               <CardContent className="py-10 text-center text-sm text-muted-foreground">
                 {t('dash.noClients')}
               </CardContent>
@@ -941,7 +1042,7 @@ export default function Dashboard() {
 
       {/* 出口代理提示 */}
       {Boolean(status?.egress_proxy?.enabled) && (status?.egress_proxy_users ?? []).length > 0 && (
-        <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-2.5 text-xs text-amber-600 dark:text-amber-400">
+        <div className="flex items-center gap-2 rounded-xl border border-warning/20 bg-warning/5 px-4 py-2.5 text-xs text-warning-ink">
           <Globe className="h-3.5 w-3.5 shrink-0" />
           <span>{t('dash.egressOn')}{status!.egress_proxy_users.join(lang === 'en' ? ', ' : '、')}</span>
         </div>
@@ -949,9 +1050,9 @@ export default function Dashboard() {
       {/* egress 开了但没有任何客户端勾选：状态型提示常驻展示（不再走保存 toast，
           那样每存一次任意配置都会重复弹一遍，用户反馈被骚扰） */}
       {Boolean(status?.egress_proxy?.enabled) && (status?.egress_proxy_users ?? []).length === 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2.5 text-xs text-warning-ink">
           <div className="flex items-center gap-2">
-            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <AlertCircle className="h-4 w-4 shrink-0 text-warning-ink" />
             <span>{t('dash.egressNoUserNotice')}</span>
           </div>
           <Link to="/settings" className="shrink-0 font-medium underline hover:text-foreground">
@@ -960,9 +1061,9 @@ export default function Dashboard() {
         </div>
       )}
       {!status?.egress_proxy?.enabled && (status?.egress_proxy_users ?? []).length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-700 dark:text-amber-300">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-2.5 text-xs text-warning-ink">
           <div className="flex items-center gap-2">
-            <AlertCircle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <AlertCircle className="h-4 w-4 shrink-0 text-warning-ink" />
             <span>{tf('dash.egressNotConfiguredNotice', { list: status!.egress_proxy_users.join(lang === 'en' ? ', ' : '、') })}</span>
           </div>
           <Link to="/settings" className="shrink-0 font-medium underline hover:text-foreground">
@@ -990,7 +1091,7 @@ export default function Dashboard() {
               .filter((g) => g.ingress === 'proxy' || !!cfg?.ext_bridge_enabled)
               .map((g) => (
                 <div key={g.ingress} className="space-y-2">
-                  <div className="flex items-center gap-2 pt-1 text-[11px] font-semibold text-muted-foreground">
+                  <div className="flex items-center gap-2 pt-1 text-2xs font-semibold text-muted-foreground">
                     <span>
                       {g.ingress === 'ext'
                         ? tf('logs.ingress.groupExt', { n: g.total.toLocaleString() })
@@ -1022,13 +1123,13 @@ export default function Dashboard() {
                         title={t('dash.clickToFilterLogs')}
                       >
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{w.label}</span>
+                          <span className="shrink-0 rounded border px-1.5 py-0.5 text-2xs text-muted-foreground">{w.label}</span>
                           <span className="truncate font-mono text-xs" title={display}>{display}</span>
                           {cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                         </div>
                         <div className="flex items-center gap-2">
                           <span className="shrink-0 tabular-nums text-xs text-muted-foreground">×{w.count.toLocaleString()}</span>
-                          <ArrowRight className="h-3.5 w-3.5 text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100" />
+                          <ArrowRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                         </div>
                       </div>
                     )
@@ -1069,13 +1170,13 @@ export default function Dashboard() {
                   title={t('dash.clickToFilterLogs')}
                 >
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground">{it.label}</span>
+                    <span className="shrink-0 rounded border px-1.5 py-0.5 text-2xs text-muted-foreground">{it.label}</span>
                     <span className="truncate font-mono text-xs" title={display}>{display}</span>
                     {it.cred && <LockKeyhole className="h-3 w-3 shrink-0 text-muted-foreground" aria-label={t('stats.credHint')} />}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="shrink-0 tabular-nums text-xs text-muted-foreground">×{it.events}</span>
-                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100" />
+                    <ArrowRight className="h-3.5 w-3.5 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                   </div>
                 </div>
               )
