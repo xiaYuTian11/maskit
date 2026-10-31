@@ -754,6 +754,33 @@ async function handleMaskFile(payload, tabId, host) {
   return { ok: false, passthrough: true, error: r.error };
 }
 
+async function handleMaskImage(payload, tabId, host) {
+  const base64 = payload && typeof payload.base64 === 'string' ? payload.base64 : '';
+  const prompt = payload && typeof payload.prompt === 'string' ? payload.prompt : '';
+  const sid = (payload && typeof payload.sid === 'string' && payload.sid)
+    || (await findRecentSid(tabId, host));
+  if (!base64) return { ok: false, passthrough: true };
+
+  const cfg = await getConfig();
+  if (cfg.enabled === false) {
+    return { ok: false, passthrough: true, error: 'ext_disabled' };
+  }
+  if (!siteCovers(host, cfg.enabledSites)) {
+    return { ok: false, passthrough: true, error: 'site_disabled' };
+  }
+  const r = await safeCall('/api/ext/mask-image', { base64, prompt, host, sid });
+  if (r.ok) {
+    if (r.body && r.body.sid) {
+      await rememberSid(r.body.sid, tabId, host);
+    }
+    await pushRecent({ host, path: 'mask-image', action: 'mask', count: (r.body && r.body.hit_count) || 0, status: 'ok' });
+    return r.body;
+  }
+  if (r.blocking) return { ok: false, blocking: true, error: r.error };
+  await pushRecent({ host, path: 'mask-image', action: 'skip', count: 0, status: 'passthrough' });
+  return { ok: false, passthrough: true, error: r.error };
+}
+
 async function handleRestore(payload, host) {
   const text = payload && typeof payload.text === 'string' ? payload.text : '';
   const body = {
@@ -893,6 +920,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.action === 'mask_file') {
     handleMaskFile(msg.payload, tabId, host).then(sendResponse).catch((e) => sendResponse({ ok: false, passthrough: true, error: String(e) }));
+    return true;
+  }
+  if (msg.action === 'mask_image') {
+    handleMaskImage(msg.payload, tabId, host).then(sendResponse).catch((e) => sendResponse({ ok: false, passthrough: true, error: String(e) }));
     return true;
   }
   if (msg.action === 'warn') {

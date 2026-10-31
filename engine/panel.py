@@ -333,7 +333,7 @@ EXT_PROTOCOL_VERSION = 1
 # ext_token 是 config.json 里第一个**长期**密钥（不随重启轮换），只对下面三个
 # 精确白名单端点有效；API_TOKEN 对全部 /api/* 有效（二选一）。
 # **精确白名单不用前缀**：否则扩展 token 能打到 /api/config、/api/ext/rotate-token。
-_EXT_ENDPOINTS = frozenset({"/api/ext/ping", "/api/ext/mask", "/api/ext/restore", "/api/ext/mask-file", "/api/ext/warn"})
+_EXT_ENDPOINTS = frozenset({"/api/ext/ping", "/api/ext/mask", "/api/ext/restore", "/api/ext/mask-file", "/api/ext/mask-image", "/api/ext/warn"})
 
 # 「疑似对话请求但 body 形态不受支持」的上报去重表（见 /api/ext/warn）。
 # 整站漏脱敏时每一发请求都会上报，不去重会把事件页刷满、把真正要看的风险记录挤掉。
@@ -7621,6 +7621,18 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
             elif ext in ("pptx", "dps") and ((fn.startswith("ppt/") and fn.endswith(".xml")) or fn == "docprops/core.xml"):
                 should_mask = True
 
+            # 内嵌图片穿透脱敏 (Word/PPT/Excel 中的 media/image1.png 等)
+            is_embedded_image = any(fn.startswith(prefix) for prefix in ("word/media/", "ppt/media/", "xl/media/")) and                                 any(fn.endswith(ext_img) for ext_img in (".png", ".jpg", ".jpeg", ".webp"))
+            if is_embedded_image and _ext_cfg().get("ext_multimodal_vision", True):
+                try:
+                    import visual_redactor
+                    masked_img_bytes, img_hits = visual_redactor.mask_embedded_image_bytes(content, sid, tr)
+                    if img_hits > 0:
+                        content = masked_img_bytes
+                        total_hits += img_hits
+                except Exception:
+                    pass
+
             if should_mask:
                 try:
                     for event, (prefix, uri) in ET.iterparse(io.BytesIO(content), events=("start-ns",)):
@@ -7697,6 +7709,68 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
             f"仍返回脱敏结果（上游可能按 file_size 拒收）"
         )
     return out_val, total_hits
+
+
+@app.post("/api/ext/mask-image")
+def api_ext_mask_image():
+    """扩展图片多模态脱敏 (独立图片上传 / 截图评审 / 提取数据)。"""
+    if (request.content_length or 0) > _EXT_MAX_BODY or request.headers.get("Transfer-Encoding"):
+        return jsonify({"ok": False, "error": "payload_too_large", "blocking": True,
+                        "limit_bytes": _EXT_MAX_BODY,
+                        "hint": "图片超过单条上限 %d 字节，已在本机阻断、未上行。" % _EXT_MAX_BODY}), 413
+    data = request.get_json(force=True, silent=True) or {}
+    b64_content = data.get("base64")
+    prompt = str(data.get("prompt") or "").strip()
+    sid = str(data.get("sid") or "").strip()
+    if not isinstance(b64_content, str) or not b64_content:
+        return jsonify({"ok": False, "error": "bad_request", "blocking": True}), 400
+
+    if not sid or not sid.startswith("ext:"):
+        sid = "ext:" + secrets.token_hex(8)
+
+    t0 = time.perf_counter()
+    try:
+        raw_bytes = base64.b64decode(b64_content)
+        import transparent as tr
+        tr._maybe_reload(force=True)
+        with _EXT_LOCK:
+            _sweep_throttled(tr)
+            tr._touch(sid)
+            if sid not in tr.sessions:
+                tr._new_session(sid)
+
+        import visual_redactor
+        res = visual_redactor.process_image_multimodal(raw_bytes, prompt, sid, tr)
+
+        hit_count = res.get("hit_count", 0)
+        mode = res.get("mode", "PASSTHROUGH")
+
+        with _EXT_LOCK:
+            s = tr.sessions[sid]
+            items = tr._mask_event_items(sid)
+            s["inflight"] = True
+            _EXT_STATS["mask"] += 1
+
+        if _ext_cfg().get("ext_record_events", True) and hit_count > 0:
+            tr._emit("MASK", ingress="ext", sid=sid,
+                     count=hit_count,
+                     new_count=len(s.get("new_orig") or set()),
+                     items=items, host=str(data.get("host") or ""), path="/ext/mask-image",
+                     dialog=f"[视觉多模态脱敏: {mode}]",
+                     req_preview=f"Uploaded image: {mode} ({len(raw_bytes)} bytes)",
+                     mask_ms=round((time.perf_counter() - t0) * 1000, 1))
+
+        out_b64 = base64.b64encode(res.get("bytes", b"")).decode("ascii") if res.get("bytes") else ""
+        return jsonify({
+            "ok": True,
+            "mode": mode,
+            "base64": out_b64,
+            "content": res.get("content", ""),
+            "sid": sid,
+            "hit_count": hit_count
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": "internal_error", "detail": str(e)}), 500
 
 
 @app.post("/api/ext/mask-file")
