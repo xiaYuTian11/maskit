@@ -86,6 +86,7 @@ import { WordsImportDialog } from '@/components/settings/WordsImportDialog'
 
 import { BackgroundCard } from '@/components/settings/BackgroundCard'
 import { ExtBridgeCard } from '@/components/settings/ExtBridgeCard'
+import { VisualMaskingCard } from '@/components/settings/VisualMaskingCard'
 
 // 内置规则分组（将 19 项规则按场景归类，降低视觉负荷与误伤风险）
 const BUILTIN_RULE_GROUPS: { key: string; labelKey: string; rules: string[] }[] = [
@@ -2346,6 +2347,10 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               </div>
             </div>
           </div>
+
+          {/* 图片/文档/PDF 脱敏与 OCR 组件管理：引擎级全局能力，放主设置页
+              （此前误放在「浏览器扩展」卡里，不用扩展的用户找不到，2026-11-01） */}
+          <VisualMaskingCard cfg={cfg} toggle={toggle} saving={saving} />
 
           <Card className="border bg-card shadow-card">
             <CardHeader>

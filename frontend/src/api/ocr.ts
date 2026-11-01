@@ -81,7 +81,7 @@ export function uninstallOcrRuntime(): Promise<OcrRuntimeStatus> {
   return shieldFetch<OcrRuntimeStatus>('/api/ocr/runtime/uninstall', { method: 'POST' })
 }
 
-/** 已知原因码（i18n 键 `settings.extBridge.ocrReason_<code>` 必须一一存在）。 */
+/** 已知原因码（i18n 键 `settings.visual.ocrReason_<code>` 必须一一存在）。 */
 export const OCR_REASON_CODES = [
   'manifest_missing',
   'manifest_invalid',

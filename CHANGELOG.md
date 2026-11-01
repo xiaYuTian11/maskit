@@ -8,11 +8,15 @@
 
 ### 更新摘要 / Summary
 - 应用内更新下载不再轻易失败：下载限时大幅放宽，网速不快也能正常升级。
+- 图片与文档脱敏的开关移到主设置页，不再藏在浏览器扩展页里。
 - In-app update downloads no longer fail easily: the download time limit is now much more generous.
+- The image & document masking switch now lives in the main settings page instead of hiding in the browser-extension page.
 
 ### 修复
 - 修复应用内更新下载失败：下载限时过短，安装包稍大或网速不快就必失败（浏览器手动下载则正常）。
 - Fixed in-app update downloads failing: the download time limit was too short, so larger installers on slower connections always failed (manual browser downloads worked fine).
+- 图片/文档/PDF 脱敏开关与 OCR 组件管理从「浏览器扩展」卡片拆到主设置页「高级选项」的独立卡片：这是引擎级全局能力，不是扩展专属，不用扩展的用户此前找不到入口。
+- Moved the image/document/PDF masking switch and OCR runtime management out of the browser-extension card into its own card in the main settings page: this is an engine-wide capability, not extension-specific, and was previously unreachable for users who don't use the extension.
 
 ## [0.14.0] - 2026-11-01
 

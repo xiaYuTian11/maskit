@@ -9,6 +9,8 @@
  *   「高级设置 → 日志与隐私」。本卡片只留一行只读指引，避免一个开关出现在两处。
  * - 旋转令牌的确认弹窗必须写明后果：轮换后扩展失效 → **直通、未脱敏**，
  *   以及磁盘备份仍含旧令牌（SPEC R5）。
+ * - 图片/文档脱敏与 OCR 组件管理**不在本卡**：那是引擎级全局能力（代理/扩展/
+ *   Office/PDF 共用），已拆到 `VisualMaskingCard` 放主设置页（2026-11-01）。
  */
 import { useCallback, useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -28,17 +30,6 @@ import {
 import { useI18n } from '@/lib/i18n'
 import { toast } from '@/lib/toast'
 import { getExtPing, rotateExtToken } from '@/api/ext'
-import {
-  checkOcrRuntimeUpdate,
-  formatMiB,
-  getOcrRuntime,
-  installOcrRuntime,
-  OCR_REASON_CODES,
-  ocrProgressPercent,
-  rollbackOcrRuntime,
-  uninstallOcrRuntime,
-} from '@/api/ocr'
-import { ShieldApiError } from '@/lib/shield-fetch'
 import type { ShieldConfig } from '@/types/api'
 
 interface ExtBridgeCardProps {
@@ -54,23 +45,12 @@ function maskToken(token: string): string {
   return `${token.slice(0, 4)}${'•'.repeat(12)}${token.slice(-4)}`
 }
 
-const KNOWN_OCR_REASONS: ReadonlySet<string> = new Set(OCR_REASON_CODES)
-
-/** 从接口错误里取原因码（后端 `error` 字段）；不是已知码时返回空串。 */
-function ocrReasonOf(e: unknown): string {
-  const code = e instanceof ShieldApiError ? e.code || '' : ''
-  return KNOWN_OCR_REASONS.has(code) ? code : ''
-}
-
 export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
   const { t, tf } = useI18n()
   const queryClient = useQueryClient()
   const [revealed, setRevealed] = useState(false)
   const [confirmRotate, setConfirmRotate] = useState(false)
   const [rotating, setRotating] = useState(false)
-  // OCR 组件是"按需下载"的可选运行时：这里只做状态展示与三个动作，
-  // 下载/校验/自检全部在引擎侧完成（失败即回滚，不留半装可用）。
-  const [ocrBusy, setOcrBusy] = useState(false)
 
   const enabled = !!cfg?.ext_bridge_enabled
   const token = String(cfg?.ext_token ?? '')
@@ -83,69 +63,6 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
     retry: false,
     refetchInterval: 15000,
   })
-
-  const ocrRt = useQuery({
-    queryKey: ['ocrRuntime'],
-    queryFn: getOcrRuntime,
-    retry: false,
-    // 安装中 1s 一次（画进度条），平时 15s
-    refetchInterval: (q) => (q.state.data?.state === 'installing' ? 1000 : 15000),
-  })
-
-  const ocrState = ocrRt.data?.state || 'disabled'
-  const ocrVersion = ocrRt.data?.version || ''
-  const ocrReady = ocrState === 'enabled'
-  const ocrInstalling = ocrState === 'installing'
-  const ocrSystem = ocrRt.data?.source === 'system'
-  const ocrProgress = ocrRt.data?.progress
-  const ocrPercent = ocrProgressPercent(ocrProgress)
-  const ocrLastError = ocrRt.data?.last_error
-  const reasonText = useCallback((code: string) => (KNOWN_OCR_REASONS.has(code)
-    ? t(`settings.extBridge.ocrReason_${code}`)
-    : code), [t])
-
-  // 后台安装结束（installing → 其它）时给一次结果提示
-  const [wasInstalling, setWasInstalling] = useState(false)
-  useEffect(() => {
-    if (ocrInstalling) {
-      setWasInstalling(true)
-      return
-    }
-    if (!wasInstalling) return
-    setWasInstalling(false)
-    const reason = ocrLastError?.reason || ''
-    if (reason) toast(tf('settings.extBridge.ocrFail', { e: reasonText(reason) }), 'error')
-    else if (ocrReady) toast(t('settings.extBridge.ocrInstalled'))
-  }, [ocrInstalling, wasInstalling, ocrLastError, ocrReady, reasonText, t, tf])
-
-  const runOcrAction = useCallback(async (fn: () => Promise<unknown>, okKey: string) => {
-    setOcrBusy(true)
-    try {
-      await fn()
-      if (okKey) toast(t(okKey))
-      await ocrRt.refetch()
-    } catch (e) {
-      const code = ocrReasonOf(e)
-      toast(tf('settings.extBridge.ocrFail', { e: code ? reasonText(code) : String(e) }), 'error')
-    } finally {
-      setOcrBusy(false)
-    }
-  }, [ocrRt, reasonText, t, tf])
-
-  const doOcrCheck = useCallback(async () => {
-    setOcrBusy(true)
-    try {
-      const r = await checkOcrRuntimeUpdate()
-      toast(r.newer
-        ? tf('settings.extBridge.ocrUpdateFound', { v: r.version })
-        : t('settings.extBridge.ocrUpToDate'))
-    } catch (e) {
-      const code = ocrReasonOf(e)
-      toast(tf('settings.extBridge.ocrFail', { e: code ? reasonText(code) : String(e) }), 'error')
-    } finally {
-      setOcrBusy(false)
-    }
-  }, [reasonText, t, tf])
 
   // 关闭开关时收起明文，避免令牌一直挂在屏幕上
   useEffect(() => {
@@ -210,96 +127,6 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
             aria-label={t('settings.extBridge.enabled')}
             className="scale-75"
           />
-        </div>
-
-        {/* 图片 / 内嵌图 OCR 脱敏（默认关，理由见引擎侧 default_config 的注释） */}
-        <div className="flex items-center justify-between gap-3 border-b border-border px-1.5 py-2.5">
-          <div className="flex min-w-0 items-center gap-1.5 text-[13px]">
-            <span className="truncate font-medium">{t('settings.extBridge.multimodal')}</span>
-            <Hint text={t('settings.extBridge.multimodalDesc')} />
-          </div>
-          <Switch
-            checked={!!cfg?.multimodal_vision}
-            disabled={saving}
-            onCheckedChange={(v) => toggle('multimodal_vision', v)}
-            aria-label={t('settings.extBridge.multimodal')}
-            className="scale-75"
-          />
-        </div>
-
-        {/* OCR 组件（可选运行时）：没有组件时上面的开关即使打开也不会生效 */}
-        <div className="space-y-2 rounded-lg border bg-muted/20 p-2.5">
-          <div className="flex items-center justify-between gap-2 text-[13px]">
-            <span className="font-medium">{t('settings.extBridge.ocrRuntime')}</span>
-            <span className={ocrReady ? 'text-success-ink' : 'text-muted-foreground'}>
-              {ocrReady
-                ? (ocrSystem
-                  ? t('settings.extBridge.ocrStateSystem')
-                  : tf('settings.extBridge.ocrStateEnabled', { v: ocrVersion }))
-                : t(`settings.extBridge.ocrState_${ocrState}`)}
-            </span>
-          </div>
-          {ocrInstalling && (
-            <div className="space-y-1" aria-live="polite">
-              <div
-                className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-                role="progressbar"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={ocrPercent ?? undefined}
-              >
-                <div
-                  className={ocrPercent === null
-                    ? 'h-full w-1/3 animate-pulse rounded-full bg-primary'
-                    : 'h-full rounded-full bg-primary transition-[width] duration-500'}
-                  style={ocrPercent === null ? undefined : { width: `${ocrPercent}%` }}
-                />
-              </div>
-              <p className="text-2xs text-muted-foreground">
-                {t(`settings.extBridge.ocrPhase_${ocrProgress?.phase || 'manifest'}`)}
-                {ocrProgress?.phase === 'download' && ocrProgress.bytes > 0 && (
-                  <span className="ml-1 tabular-nums">
-                    {ocrProgress.total > 0
-                      ? `${formatMiB(ocrProgress.bytes)} / ${formatMiB(ocrProgress.total)} MB`
-                      : `${formatMiB(ocrProgress.bytes)} MB`}
-                  </span>
-                )}
-              </p>
-            </div>
-          )}
-          <p className="text-2xs leading-snug text-muted-foreground">
-            {ocrRt.data?.error
-              ? tf('settings.extBridge.ocrError', { e: reasonText(ocrRt.data.error) })
-              : !ocrInstalling && ocrLastError?.reason
-                ? tf('settings.extBridge.ocrLastFail', { e: reasonText(ocrLastError.reason) })
-                : t('settings.extBridge.ocrRuntimeHint')}
-          </p>
-          {ocrRt.data?.restart_required && (
-            <p className="flex items-start gap-1 text-2xs leading-snug text-warning-ink">
-              <AlertTriangle className="mt-px size-3 shrink-0" aria-hidden />
-              {t('settings.extBridge.ocrRestartRequired')}
-            </p>
-          )}
-          {!ocrSystem && (
-          <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" variant="outline" disabled={ocrBusy || ocrInstalling}
-              onClick={() => runOcrAction(installOcrRuntime, '')}>
-              {ocrReady ? t('settings.extBridge.ocrReinstall') : t('settings.extBridge.ocrInstall')}
-            </Button>
-            <Button size="sm" variant="outline" disabled={ocrBusy || ocrInstalling} onClick={doOcrCheck}>
-              {t('settings.extBridge.ocrCheck')}
-            </Button>
-            <Button size="sm" variant="outline" disabled={ocrBusy || ocrInstalling || !ocrReady}
-              onClick={() => runOcrAction(rollbackOcrRuntime, 'settings.extBridge.ocrRolledBack')}>
-              {t('settings.extBridge.ocrRollback')}
-            </Button>
-            <Button size="sm" variant="ghost"
-              disabled={ocrBusy || ocrInstalling || ocrState === 'disabled'}
-              onClick={() => runOcrAction(uninstallOcrRuntime, 'settings.extBridge.ocrUninstalled')}>
-              {t('settings.extBridge.ocrUninstall')}
-            </Button>
-          </div>
-          )}
         </div>
 
         {/* 令牌 */}
