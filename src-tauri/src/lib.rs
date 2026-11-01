@@ -1256,7 +1256,7 @@ fn updater_with_proxy(app: &AppHandle, for_download: bool) -> Result<tauri_plugi
 /// 服务器挂了）不能变成打断用户的错误弹窗，UI 按 `ok` 决定要不要提示。
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
-    let updater = updater_with_proxy(&app, false)?;;
+    let updater = updater_with_proxy(&app, false)?;
     match updater.check().await {
         Ok(Some(update)) => Ok(serde_json::json!({
             "ok": true,
@@ -1305,7 +1305,7 @@ fn restart_after_update(app: &AppHandle) -> ! {
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
-    let updater = updater_with_proxy(&app, true)?;;
+    let updater = updater_with_proxy(&app, true)?;
     let update = updater
         .check()
         .await
