@@ -431,18 +431,38 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
         import ssl as _ssl
         import tempfile
 
-        # 生成自签证书
-        key_file = tempfile.NamedTemporaryFile(suffix=".key", delete=False, mode="w")
-        cert_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False, mode="w")
+        # 生成自签证书。用 cryptography（mitmproxy 的必需依赖）而不是调用外部
+        # openssl：Windows 开发机/CI runner 不一定装 openssl，原测试因此环境性报错。
+        from datetime import datetime, timedelta, timezone
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
 
+        key_file = tempfile.NamedTemporaryFile(suffix=".key", delete=False)
+        cert_file = tempfile.NamedTemporaryFile(suffix=".crt", delete=False)
+        key_file.close()
+        cert_file.close()
         try:
-            import subprocess
-            subprocess.run([
-                "openssl", "req", "-x509", "-newkey", "rsa:2048",
-                "-keyout", key_file.name, "-out", cert_file.name,
-                "-days", "1", "-nodes", "-subj",
-                "/CN=self-signed-test.invalid",
-            ], capture_output=True, timeout=15)
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, "self-signed-test.invalid"),
+            ])
+            now = datetime.now(timezone.utc)
+            cert = (x509.CertificateBuilder()
+                    .subject_name(subject)
+                    .issuer_name(issuer)
+                    .public_key(key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(now - timedelta(minutes=1))
+                    .not_valid_after(now + timedelta(days=1))
+                    .sign(key, hashes.SHA256()))
+            with open(key_file.name, "wb") as f:
+                f.write(key.private_bytes(serialization.Encoding.PEM,
+                                          serialization.PrivateFormat.TraditionalOpenSSL,
+                                          serialization.NoEncryption()))
+            with open(cert_file.name, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
 
             # 用自签证书启动一个 TLS 上游
             ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
@@ -850,10 +870,16 @@ class TestSidecarFramingAndLimits(unittest.IsolatedAsyncioTestCase):
                 writer.write_eof()
             except (OSError, RuntimeError):
                 pass
+        chunks = []
         try:
-            data = await asyncio.wait_for(reader.read(read_bytes), timeout=5)
+            while True:
+                chunk = await asyncio.wait_for(reader.read(read_bytes), timeout=5)
+                if not chunk:
+                    break
+                chunks.append(chunk)
         except asyncio.TimeoutError:
-            data = b""
+            pass
+        data = b"".join(chunks)
         try:
             writer.close()
             await writer.wait_closed()

@@ -9,6 +9,8 @@
 """
 import json
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +36,24 @@ def _flow(body, status=200, ct="application/json", req=b'{"model":"gpt-4o","mess
 
 class AuditBudgetTests(unittest.TestCase):
     def setUp(self):
+        # 预算也要钉住：本文件锁的是「超 AUDIT_PARSE_MAX 就跳过结构化解析」这条契约，
+        # 而 AUDIT_PARSE_MAX/SCAN_MAX 是**可热重载的全局**（任何一次 _maybe_reload 都可能
+        # 把它改成配置里的值）。不钉住时，全套跑会偶发失败、单独跑却全绿
+        # （2026-10-31 实测：全量 5 跑中 2 跑红在这两条用例、单独跑 11/11 绿）。
+        # 数据目录也要隔离：别的用例留下的后台线程可能在跑 `mask()` → `_maybe_reload()`
+        # → 按 `<DATA_ROOT>/config.json` 把 AUDIT_ENABLED / AUDIT_PARSE_MAX 改掉。
+        # 全量跑里偶发红、单独跑必绿，根因就是这种跨用例的全局竞态（2026-10-31 定位）。
+        self._data_root = tr._DATA_ROOT
+        self._tmp_root = Path(tempfile.mkdtemp(prefix="maskit-audit-"))
+        self._reload = tr._maybe_reload
+        tr._DATA_ROOT = self._tmp_root
+        # 热重载直接掐断：隔离数据目录只防了「读到真配置」，防不了重载本身
+        # 把预算重置成环境变量值（钉住后仍可能被中途改写，见 Oversize 类注释）。
+        tr._maybe_reload = lambda force=False: None
+        self._audit_budget = (tr.AUDIT_ENABLED, tr.AUDIT_PARSE_MAX, tr.AUDIT_SCAN_MAX)
+        tr.AUDIT_ENABLED = True
+        tr.AUDIT_PARSE_MAX = tr._ENV_AUDIT_PARSE_MAX
+        tr.AUDIT_SCAN_MAX = tr._ENV_AUDIT_SCAN_MAX
         tr._AUDIT_FINDINGS_CACHE.clear()
         tr._AUDIT_CFG_FP[0] = None
         tr._AUDIT_WARNED.clear()
@@ -48,6 +68,13 @@ class AuditBudgetTests(unittest.TestCase):
 
     def tearDown(self):
         tr.enqueue_audit_event = self._enq
+        tr.AUDIT_ENABLED, tr.AUDIT_PARSE_MAX, tr.AUDIT_SCAN_MAX = self._audit_budget
+        tr._DATA_ROOT = self._data_root
+        tr._maybe_reload = self._reload
+        try:
+            self._tmp_root.rmdir()
+        except Exception:
+            pass
         tr._AUDIT_FINDINGS_CACHE.clear()
         tr._AUDIT_CFG_FP[0] = None
 
@@ -301,11 +328,52 @@ class AuditOversizeDecodeTests(unittest.TestCase):
 
     def setUp(self):
         self._enabled = tr.AUDIT_ENABLED
+        # 同上：预算被热重载改过时，这条用例会误报（详见 AuditBudgetTests.setUp）。
+        # 2026-11-02 补齐另一半：只钉值不够 —— 后台线程的 `_maybe_reload` 可以在
+        # 用例执行**中途**改写 AUDIT_PARSE_MAX（实测 parse_skipped 偶发丢失），
+        # 直接把热重载指成空函数才断得了根。数据目录也一并隔离（同 Budget 类）。
+        self._parse_max = tr.AUDIT_PARSE_MAX
+        self._data_root = tr._DATA_ROOT
+        self._tmp_root = Path(tempfile.mkdtemp(prefix="maskit-audit-od-"))
+        self._reload = tr._maybe_reload
+        tr._DATA_ROOT = self._tmp_root
+        tr._maybe_reload = lambda force=False: None
         tr.AUDIT_ENABLED = True
+        tr.AUDIT_PARSE_MAX = tr._ENV_AUDIT_PARSE_MAX
 
     def tearDown(self):
         tr.AUDIT_ENABLED = self._enabled
+        tr.AUDIT_PARSE_MAX = self._parse_max
+        tr._DATA_ROOT = self._data_root
+        tr._maybe_reload = self._reload
+        try:
+            self._tmp_root.rmdir()
+        except Exception:
+            pass
         tr._AUDIT_FINDINGS_CACHE.clear()
+
+    def test_time_budget_exit_before_parse_still_marks_skipped(self):
+        """预算在解析段**之前**耗尽：parse_skipped 仍必须置位。
+
+        满负载机器上 S1/S6/S9 扫描超过 250ms 预算时会从 before_scan/after_s1/
+        after_scan 提前退出——此前这三条出口不置位 parse_skipped，「解析被跳过」
+        的留痕在时间截断路径上丢失（全量门禁里偶发红、单独跑必绿的真因）。
+        """
+        body = json.dumps({"choices": [{"message": {"content": "z" * 64}}]}).encode()
+        flow = _flow(body)
+        stats = {"truncated": False, "parse_skipped": False, "cache_hit": False,
+                 "cache_miss": False, "scan_bytes": 0}
+        tr._audit_scan_signals(flow, 200, "application/json", "", "", "x",
+                               "", time.perf_counter() - 1.0, stats)
+        self.assertTrue(stats["truncated"], "时间预算截断必须留痕")
+        self.assertTrue(stats["parse_skipped"],
+                        "提前退出时本来会跑的结构化解析也要留解析跳过痕")
+        # 非解析型载体（无结构化解析可跳）不置位，口径不扩大
+        stats2 = {"truncated": False, "parse_skipped": False, "cache_hit": False,
+                  "cache_miss": False, "scan_bytes": 0}
+        tr._audit_scan_signals(flow, 200, "text/plain", "", "", "x",
+                               "", time.perf_counter() - 1.0, stats2)
+        self.assertFalse(stats2["parse_skipped"])
 
     def test_oversize_body_bounds_decode_but_keeps_full_hash(self):
         body = b'{"choices":[{"message":{"content":"' + b"x" * (tr.AUDIT_PARSE_MAX + 1024) + b'"}}]}'

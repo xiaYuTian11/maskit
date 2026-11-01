@@ -315,6 +315,18 @@ if _DISABLE_ORIGIN_CHECK_ENV:
 # 配置级 Origin 校验开关（默认开；与 UI 开关 origin_check 同步）。与
 # _DISABLE_ORIGIN_CHECK_ENV 是「或」关系：任一关闭即放行。
 _origin_check_enabled = True
+
+# ── OCR 组件默认清单地址（面板层注入，不是 ocr_runtime 库层的默认）─────
+# 出站红线（AGENTS/SECURITY）：新增对外请求必须默认可控并登记出站清单。这里
+# 注入的地址**只在用户干两件事时才会被访问**：设置页点「安装/检查更新」——
+# ocr_runtime 的 install/check_update 全部是显式动作触发，组件装完后的识别
+# 100% 本机。库层（ocr_runtime._manifest_url）保持纯 env 驱动不变：单测的
+# 「无清单必须拒绝」语义不因此被破坏，也不给测试进程埋一个会联网的默认值。
+# 环境变量 MASKIT_OCR_MANIFEST_URL 优先（镜像/内网自建清单场景）。
+OCR_MANIFEST_DEFAULT_URL = (
+    "https://github.com/xiaYuTian11/maskit/releases/download/ocr-runtime/latest-ocr.json")
+os.environ.setdefault("MASKIT_OCR_MANIFEST_URL", OCR_MANIFEST_DEFAULT_URL)
+
 # ── 浏览器扩展桥接（Browser Bridge v1）运行时状态 ──────────────────────────
 # 与 _origin_check_enabled 同款模式：load_config / save_config 写盘后由
 # _sync_runtime_config 原子同步，端点与 guard 不每次读盘。
@@ -357,6 +369,8 @@ _ext_cfg_state = {
     "ext_record_events": True,
     # 旧版 Office(.doc/.xls) 转换开关，**默认关闭**（理由见下方完整默认配置里的长注释）。
     "ext_convert_legacy_office": False,
+    # 图片/Office 内嵌图的多模态脱敏开关，**默认关闭**（理由见 default_config 里的长注释）。
+    "multimodal_vision": False,
 }
 
 
@@ -3804,6 +3818,34 @@ def default_config():
         # 关闭后 .doc / .xls 原样上行（文件完整、但不脱敏），扩展会明确提示用户另存为
         # .docx / .xlsx 再传。这是“诚实告知不支持”优于“静默产出残缺文件”的取舍。
         "ext_convert_legacy_office": False,
+        # 图片 / Office 内嵌图片的多模态脱敏（本机 OCR 判定 + 物理打码），**默认关闭**。
+        #
+        # 为什么默认关：它依赖一个**独立的**本机 OCR 服务（默认 127.0.0.1:8082，
+        # 见 engine/visual_redactor.py），而首装用户不会有这个服务。默认打开的结果是
+        # 「传张图就被阻断」，用户只会以为产品坏了。关着时行为与 v0.13.0 完全一致：
+        # 图片原样上行，不扫描（这道能力是新增的，不是回退）。
+        #
+        # 打开后的语义是硬的，且与「100% 本地」红线绑定：
+        #   · 只连环回 OCR（`MASKIT_OCR_ENDPOINT` 指到远端会被禁用，不是告警）；
+        #   · 扫不了就不放行：独立图片阻断、文档内嵌图换占位图、整份文档可被阻断；
+        #   · 矢量图(EMF/WMF)/损坏图换占位图并计数（不静默跳过）。
+        # 覆盖与不覆盖的载体清单在 SECURITY.md「图片载体」一节。
+        "multimodal_vision": False,
+        # 本机 OCR 服务地址（图片/文档/PDF 脱敏用）。**空 = 内置默认**
+        # `http://127.0.0.1:8082/v1/chat/completions`。
+        # 环境变量 `MASKIT_OCR_ENDPOINT` 优先于本项（容器/运维覆盖用）。
+        # 只能填本机地址：环回校验在 engine/visual_redactor.py::ocr_endpoint 里，
+        # 填远端会直接**禁用**该能力，而不是“告警但照发”（那段注释写了理由）。
+        "ocr_endpoint": "",
+        # 是否允许 OCR 端点指向**非环回**地址（默认关）。
+        #
+        # 这不是普通开关：发给 OCR 的是**未脱敏的原图**。打开它等于明确接受
+        # 「图像会送到那台主机」。默认关是唯一的保守默认值；放在 config.json 里、
+        # 需要用户显式写一行才能打开，而不是一个不小心就能点亮的 UI 开关。
+        # 部署在自建网关 / 本机独显服务时，把 endpoint 填成那台机器并打开本项。
+        "ocr_allow_remote": False,
+        # OCR 后端：auto（装了本地引擎就用本地）/ local / http（老部署或自建 OCR 服务）
+        "ocr_engine": "auto",
         "stream_response": True,
         # 流式接管黑名单：确认某上游接管后断连时把 host 填进来，保持整包路径。
         # 默认空：曾预置的 opencode.ai 是误判（真因是引擎在无完整 SSE 事件可发时
@@ -3890,6 +3932,22 @@ def _clean_domain(value):
     if not d or not DOMAIN_RE.fullmatch(d):
         return None
     return d
+
+
+def _normalize_ocr_engine(raw):
+    """OCR 后端选择：非法值回落 auto（不报错，与其它辅助配置同口径）。"""
+    v = str(raw or "").strip().lower()
+    return v if v in ("auto", "local", "http") else "auto"
+
+
+def _normalize_ocr_endpoint(raw):
+    """OCR 端点归一化：只去空白 + 截长度。
+
+    **环回校验刻意不放在这里**：它是安全判据，必须与运行时的使用点同源
+    （`engine/visual_redactor.py::ocr_endpoint`）。两处各写一份的结局是：
+    一处放紧了而另一处漏判，或者两处都“差不多”，而图片原件就这么出去了。
+    """
+    return str(raw or "").strip()[:500]
 
 
 def _normalize_retention(raw):
@@ -4529,6 +4587,12 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         "ext_block_when_engine_down": bool(raw.get("ext_block_when_engine_down", False)),
         "ext_record_events": bool(raw.get("ext_record_events", True)),
         "ext_convert_legacy_office": bool(raw.get("ext_convert_legacy_office", False)),
+        # 缺字段 = 老配置 = 关：新增能力不得因升级静默打开（与 lan_access 同口径）。
+        "multimodal_vision": bool(raw.get("multimodal_vision", False)),
+        # 只做长度/空白归一化；**环回校验不在这里**（见 _normalize_ocr_endpoint）
+        "ocr_endpoint": _normalize_ocr_endpoint(raw.get("ocr_endpoint")),
+        "ocr_allow_remote": bool(raw.get("ocr_allow_remote", False)),
+        "ocr_engine": _normalize_ocr_engine(raw.get("ocr_engine")),
         "ner_enabled": bool(raw.get("ner_enabled", False)),
         # 严格模式（§B3）：只在用户显式开启时生效；回滚/重置不得让它静默失效，
         # 也不得因为它缺字段而默认变严（缺字段 = 老配置 = best-effort）。
@@ -4797,7 +4861,17 @@ def _sync_runtime_config(cfg):
             "ext_block_when_engine_down": bool(cfg.get("ext_block_when_engine_down", False)),
             "ext_record_events": bool(cfg.get("ext_record_events", True)),
             "ext_convert_legacy_office": bool(cfg.get("ext_convert_legacy_office", False)),
+            "multimodal_vision": bool(cfg.get("multimodal_vision", False)),
         })
+        # 图片 OCR 脱敏的端点：注入给 visual_redactor（它自己不读 config，
+        # 理由见 configure() 的 docstring）。环境变量 MASKIT_OCR_ENDPOINT 仍优先。
+        try:
+            import visual_redactor
+            visual_redactor.configure(ocr_endpoint=cfg.get("ocr_endpoint"),
+                                      allow_remote=cfg.get("ocr_allow_remote", False),
+                                      engine=cfg.get("ocr_engine"))
+        except Exception:
+            pass
         try:
             set_record_plaintext_words(cfg.get("record_plaintext_words", True))
         except Exception:
@@ -7011,6 +7085,16 @@ _EXT_MAX_BODY = 32 * 1024 * 1024
 # 几千 run 的文档会线性堆到分钟级，而扩展侧 HTTP 超时更短——超预算后只停用语义
 # 识别，确定性规则照常生效（见 transparent._ner_doc_budget）。
 _EXT_FILE_NER_BUDGET_S = 8.0
+# 文档内嵌图 OCR 的总预算（秒）：内嵌图是**串行**扫的，单张上限 10s（visual_redactor
+# 的 `_OCR_TIMEOUT_S`）。没有总预算时，一份 30 张图的文档最坏会把上传请求按住 5 分钟，
+# 而扩展侧的 HTTP 超时更短——用户看到的是「文件传不上去」，日志里什么也没有。
+# 超预算直接按阻断处理（不是跳过）：跳过的含义是「这张图没扫过就上行」。
+_EXT_FILE_OCR_BUDGET_S = 40.0
+# PDF 的单份总预算：PDF 是**逐页**渲染 + OCR 的，40 页上限 × 约 1.5s/页 ≈ 60s。
+# 与 Office 分开是因为量级差一个数量级：用 20s 卡 PDF，超过 10 页就恒定阻断，
+# 而“10 页以上的合同/发票”恰恰是最需要脱敏的那类文件。
+# 超预算就阻断（不是只扫前几页）——“后面的页没扫过就上行”是这条链路的底线。
+_PDF_OCR_BUDGET_S = 120.0
 
 
 def _word_table_payload(cfg):
@@ -7138,6 +7222,13 @@ def api_ext_ping():
                     "ext_protocol": EXT_PROTOCOL_VERSION,
                     "block_when_down": bool(_ext_cfg().get("ext_block_when_engine_down")),
                     "record_events": bool(_ext_cfg().get("ext_record_events", True)),
+                    # 图片/文档 OCR 脱敏能力是否开启。扩展必须先问再上传：
+                    # 关着时如果仍把整张图的 base64 发给引擎，纯属白跑一趟
+                    # （本地往返 + 双倍 base64 内存），而结果恒为“未处理”。
+                    "multimodal": bool(_ext_cfg().get("multimodal_vision", False)),
+                    # **真正能不能脱敏**：开关开着但 OCR 组件没装/不可用时是 False。
+                    # 扩展只认这一个——否则"开关开着、组件没装"会让每张图都被 503 打断。
+                    "vision_ready": _vision_ready(),
                     "stats": dict(_EXT_STATS)})
 
 
@@ -7192,7 +7283,8 @@ def api_ext_warn():
         return jsonify({"ok": False, "error": "engine_error"})
 
 
-def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None):
+def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None,
+                    msg=None, block_source="egress", report_reason="pipeline_error"):
     """扩展链路阻断/告警事件（与代理链路的 `_emit("BLOCK", ...)` 同口径）。
 
     为什么单独一个函数：扩展链路没有 mitmproxy 的 `flow`，`_emit` 需要的
@@ -7201,6 +7293,9 @@ def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None):
 
     `decision` 必须如实区分（2026-10-26 用户第一准则）：`blocked` = 真的没上行，
     `flagged` = 只记录、请求照常上行。写成同一个值会让用户以为请求被拦了。
+
+    `msg` / `block_source` / `report_reason` 是后加的（图片多模态脱敏需要不同的
+    文案和归因码），默认值保持 egress 复检的原行为——调用方不传就一字不变。
     """
     try:
         import transparent as tr
@@ -7209,18 +7304,18 @@ def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None):
         # `decision` 只能叠在后面覆盖它 —— 两个位置都传关键字会撞成
         # `TypeError: got multiple values`，被下面的 `except` 吞掉，事件根本不落库
         # （实测：改成 flagged 后 test_block_is_logged 直接红，就是因为这个）。
-        _report = inspection.report_for_skip(reason="pipeline_error", blocked=_blocking)
+        _report = inspection.report_for_skip(reason=report_reason, blocked=_blocking)
         tr._emit(
             "BLOCK",
             ingress="ext",
             sid=sid,
             reason=reason,
-            block_source="egress",
+            block_source=block_source,
             count=len(needles or []),
             **(({"leaked": leaked}) if leaked else {}),
-            msg=("脱敏后仍能匹配到本次登记的原文，已在本机阻断（扩展链路）"
-                 if _blocking else
-                 "脱敏后仍能匹配到本次登记的原文（仅记录，请求照常上行，扩展链路）"),
+            msg=(msg or ("脱敏后仍能匹配到本次登记的原文，已在本机阻断（扩展链路）"
+                         if _blocking else
+                         "脱敏后仍能匹配到本次登记的原文（仅记录，请求照常上行，扩展链路）")),
             **{**_report, "decision": decision},
         )
     except Exception:
@@ -7340,15 +7435,19 @@ def api_ext_mask():
             # 媒体/内联二进制豁免计数：同口径取走（扩展链路 mask_body 走 _mask_tree，
             # 同样会命中图片/文件字段）。
             _media = tr._take_media_skips(sid)
+            # 图片像素打码张数：扩展的文本请求里也可能带 data URL 图片（_mask_tree 同一个钩子），
+            # 必须一并取走——否则它会留在会话里，串到下一次代理请求的计数上。
+            _vision, _vision_verified, _vision_lines = tr._take_vision_masks(sid)
         hit_count = len(s.get("last_hits") or set())
         # 统一检测口径（§B4）：扩展链路与代理路径**同源**，否则扩展用户永远只看到“0 命中”
-        _report = inspection.report_for_mask(changed=hit_count > 0, ner_skips=ner_skips,
+        _report = inspection.report_for_mask(changed=bool(hit_count) or _vision > 0,
+                                             ner_skips=ner_skips,
                                              signed_skipped=_signed,
                                              media_skipped=_media)
         # 仅当真实命中敏感词并发生打码时才产生 MASK 事件，彻底消除大量 0 命中的空白噪声日志。
         # 例外：本轮发生语义识别降级时即使 0 命中也要记 —— 降级意味着「本该识别出人名/
         # 机构/地址的文本没被识别」，而这恰好是最可能漏码的情形，不记就等于静默降级。
-        if s.get('verification') or _verification_ext_window_active() or (_ext_cfg().get("ext_record_events", True) and (hit_count > 0 or ner_skips)):
+        if s.get('verification') or _verification_ext_window_active() or (_ext_cfg().get("ext_record_events", True) and (hit_count > 0 or ner_skips or _vision)):
             # dialog / req_preview 落库前必须过凭据清洗（审计 B1）。
             # 这两个字段是**客户端原始请求体**，`items` 里凭据类只有 digest+preview，
             # 但同一行 payload 的 dialog 会把 API Key 原文一起写进 SQLite ——
@@ -7373,6 +7472,8 @@ def api_ext_mask():
                      **(({"signed_blocks_skipped": _signed} if _signed else {})),
                      # 媒体整块豁免计数（与代理链路同字段名）：扩展链路也要看得见
                      **(({"media_skipped": _media} if _media else {})),
+                     # 图片像素打码张数（与代理链路同字段名）
+                     **(({"vision_masked": _vision} if _vision else {})),
                      # warn 三态（B-4）：与代理链路同口径，取走即清
                      **(({"warned": _warned_n, "warned_labels": _warned_labels}
                         if _warned_n else {})),
@@ -7550,7 +7651,202 @@ def _pad_zip_to_size(zip_bytes: bytes, target_size: int) -> bytes:
     )
 
 
-def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
+# Office 压缩包里存放图片的目录。只做**前缀**判断，扩展名交给 visual_redactor：
+# 矢量图(EMF/WMF)也得走到遮盖逻辑，否则它们会被当成「没有图片」静默放过。
+_MEDIA_PREFIXES = ("word/media/", "ppt/media/", "xl/media/")
+
+
+class _ExtImageBlocked(Exception):
+    """文档内嵌图片没能完成本机扫描/遮盖。
+
+    为什么用异常而不是返回值：`mask_ooxml_bytes` 的返回值里没有「失败位」，
+    而加一个会让所有调用点（含 tests/test_benchmark_matrix.py）都要判；
+    这里失败就意味着**整份文档作废**，抛出最不容易被漏掉。
+    端点捕获后回 503 + `blocking:true`——扩展侧见到 blocking 才阻断，
+    回一个不带它的失败会被归进 (B) 默认桶（= 原文件照发）。
+    """
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = str(reason or "") or "engine_error"
+
+
+# 阻断原因的处置提示：用户看到的必须是「我该做什么」，不是错误码。
+_VISUAL_BLOCK_HINTS = {
+    "ocr_unavailable": "本机 OCR 服务未就绪（默认 127.0.0.1:8082）。启动它后重试，"
+                       "或在设置里关闭「图片内嵌文字脱敏」。",
+    "ocr_timeout": "OCR 服务响应超时。重试一次，或关闭「图片内嵌文字脱敏」。",
+    "ocr_not_loopback": "OCR 服务地址必须是本机环回地址（100% 本地脱敏红线）。若确定那台主机是你自建的、"
+                        "且接受原图送到那里，在 config.json 里把 `ocr_allow_remote` 设为 true。",
+    "ocr_truncated": "图片/文档里的文字超过单次 OCR 上限，已阻断；请拆分后重试。",
+    "geometry_unavailable": "能识别到文字但拿不到位置，无法局部打码（不假装打过）。",
+    "animated_image_unsupported": "动图只能扫到第一帧，其余帧可能带敏感信息，已阻断；请改传静态截图。",
+    "image_metadata_unwritable": "图片的附加信息（拍摄参数/描述等）无法在替换敏感值后写回，已阻断；可另存为新图片后重试。",
+    "pdf_hidden_content_unreadable": "PDF 的注释/表单/文档信息无法解析，已阻断；可用阅读器「另存为」后重试。",
+    "pillow_missing": "引擎缺少图片处理依赖（Pillow），请升级/重装客户端。",
+    "ocr_budget_exhausted": "文档内的图片/页过多，超出单次处理预算；请拆分后重试。",
+    "pdf_unreadable": "PDF 无法解析（可能已加密或已损坏），已阻断。若需要处理，请先解除密码保护。",
+    "pdf_encrypted": "PDF 有密码保护，无法在本机扫描；请先解除密码再上传。",
+    "pdf_too_many_pages": "PDF 页数超出单次处理上限；请拆分后重试。",
+    "pdf_pixel_budget": "PDF 页面尺寸/数量过大，超出内存预算；请拆分后重试。",
+    "pdf_render_failed": "PDF 页面渲染失败，已阻断（不放行未扫描的页）。",
+    "pdf_dependency_missing": "引擎缺少 PDF 处理依赖（pypdfium2/pypdf），请升级/重装客户端。",
+    "visual_redactor_unavailable": "引擎缺少多模态脱敏模块，请升级/重装客户端。",
+    "unsupported_image_format": "图片格式无法读取（矢量图/损坏文件），已按阻断处理。",
+    "image_decode_failed": "图片无法解码，已按阻断处理。",
+    "image_too_large": "单张图片超过本机处理上限（8MB 或 1600 万像素）；请压缩/裁剪后重试。",
+    "ocr_runtime_missing": "本机 OCR 组件未安装或不可用。请在设置页安装 OCR 组件后重试。",
+    "ocr_engine_error": "本机 OCR 组件运行出错，已阻断。重试一次；仍失败请在设置页重新安装 OCR 组件。",
+    "ocr_busy": "本机 OCR 排队过长（同时处理的图片太多），本次已阻断、未上行。请稍后重试。",
+    # ---- OCR 组件安装/状态（ocr_runtime.py） ----
+    "manifest_missing": "没有配置 OCR 组件的下载清单地址（MASKIT_OCR_MANIFEST_URL）。",
+    "manifest_invalid": "OCR 组件清单内容不合法（缺少地址/校验值，或版本号含非法字符）。",
+    "download_failed": "OCR 组件下载失败（网络不通或地址不可用）。检查网络或镜像地址后重试。",
+    "package_too_large": "OCR 组件包超过 256MB 上限，已拒绝。",
+    "checksum_mismatch": "OCR 组件校验失败（文件不完整或被篡改），已丢弃。请重试一次。",
+    "package_path_unsafe": "OCR 组件包包含不安全的路径，已拒绝安装。",
+    "package_symlink": "OCR 组件包包含符号链接，已拒绝安装。",
+    "package_layout_invalid": "OCR 组件包结构不正确（缺少 site-packages 目录），已拒绝安装。",
+    "selftest_failed": "OCR 组件已下载，但本机自检识别失败，已回滚。可能与系统不兼容。",
+    "install_in_progress": "OCR 组件正在安装，请等待完成。",
+    "component_missing": "OCR 组件文件已丢失，请重新安装。",
+    "component_damaged": "OCR 组件已损坏或无法加载，请重新安装或回滚到上一版。",
+    "no_previous_version": "没有可回滚的旧版本。",
+    "not_installed": "OCR 组件尚未安装。",
+    "platform_unsupported": "组件清单里没有适用于本机系统的安装包（系统/CPU/Python 版本不匹配）。",
+}
+
+
+def _multimodal_hint(reason):
+    return _VISUAL_BLOCK_HINTS.get(str(reason or ""),
+                                   "图片脱敏未能完成，已在本机阻断、未上行。")
+
+
+def _vision_ready():
+    """图片脱敏是否**可用**（开关 + 后端都就绪）。异常一律按不可用处理。"""
+    if not _ext_cfg().get("multimodal_vision", False):
+        return False
+    try:
+        import visual_redactor
+        return bool(visual_redactor.available()[0])
+    except Exception:
+        return False
+
+
+def _visual_dialog_suffix(visual_stats):
+    """事件里的内嵌图/页摘要（`[文件脱敏: a.docx] 内嵌图 3 张已扫描…`）。
+
+    为什么不加新字段：事件表字段是跨端共同维护的（面板/统计/导出都会读），
+    为一个新能力扩列风险大于收益；而 `dialog` 本来就是给人看的现场描述。
+    """
+    if not visual_stats:
+        return ""
+    parts = []
+    if visual_stats.get("scanned"):
+        parts.append("内嵌图 %d 张：打码 %d / 遮盖 %d" % (
+            visual_stats.get("scanned", 0),
+            visual_stats.get("masked", 0),
+            visual_stats.get("covered", 0)))
+    if visual_stats.get("entities"):
+        parts.append("实体 %d 个：自校验 %d / 退整行 %d" % (
+            visual_stats.get("entities", 0), visual_stats.get("verified", 0),
+            visual_stats.get("line_fallback", 0)))
+    if visual_stats.get("pages"):
+        parts.append("PDF 已逐页扫描")
+    return (" (" + "；".join(parts) + ")") if parts else ""
+
+
+def _is_media_entry(fn):
+    """`fn` 是压缩包内条目的**小写**名字（调用方已 lower）。"""
+    return any(fn.startswith(p) for p in _MEDIA_PREFIXES)
+
+
+def _mask_embedded_media(content, filename, sid, tr, deadline):
+    """内嵌媒体 → `{bytes,hits,status,ok,masked,covered}`。
+
+    把「导入失败 / 内部异常」也归成阻断原因，而不是 `except: pass`——
+    静默跳过等于扽着开关却什么都不做（旧实现就是这么写的）。
+    """
+    try:
+        import visual_redactor
+    except Exception:
+        return {"bytes": content, "hits": 0, "status": "visual_redactor_unavailable",
+                "ok": False, "masked": False, "covered": False}
+    try:
+        out, hits, status = visual_redactor.mask_embedded_image_bytes(
+            content, sid, tr, deadline=deadline, hint_name=filename)
+        return {
+            "bytes": out,
+            "hits": int(hits or 0),
+            "status": status,
+            "stats": {},
+            "ok": visual_redactor.is_ok_status(status),
+            "masked": status == visual_redactor.ST_MASKED,
+            "covered": status in (visual_redactor.ST_COVER_UNLOCALIZED,
+                                  visual_redactor.ST_COVER_UNSUPPORTED),
+        }
+    except Exception as e:
+        try:
+            _emit_log(f"[panel] 内嵌图脱敏异常: {type(e).__name__}")
+        except Exception:
+            pass
+        return {"bytes": content, "hits": 0, "status": "visual_redactor_error",
+                "ok": False, "masked": False, "covered": False}
+
+
+def mask_document_bytes(raw_bytes, filename, sid, tr, visual_stats=None):
+    """文件脱敏的统一入口：按**载体**分发到 PDF / Office 两套实现。
+
+    分发依据是「扩展名优先、魔数兜底」：扩展名可以被抹掉（上传时名字变成
+    `attachment.bin`），内容不会——PDF 恒以 `%PDF-` 开头。
+
+    两套实现的对外契约完全一致（这点很重要，扩展侧只有一个 `mask_file` 动作）：
+      - 返回 `(masked_bytes, total_hits)`；
+      - 没扫成就抛 `_ExtImageBlocked`，由端点转 503 + `blocking:true`。
+    """
+    ext = (filename.lower().rsplit(".", 1)[-1] if "." in filename else "").strip()
+    is_pdf = ext == "pdf" or (ext not in ("docx", "xlsx", "pptx", "wps", "et", "dps", "doc", "xls")
+                               and raw_bytes[:5] == b"%PDF-")
+    if not is_pdf:
+        return mask_ooxml_bytes(raw_bytes, filename, sid, tr, visual_stats=visual_stats)
+
+    if not _ext_cfg().get("multimodal_vision", False):
+        # 开关关着：PDF 原样上行（与图片同口径：用户自己关的能力，不是“默认不扫”）。
+        return raw_bytes, 0
+    try:
+        import pdf_redactor
+    except Exception:
+        raise _ExtImageBlocked("pdf_dependency_missing")
+    deadline = time.monotonic() + _PDF_OCR_BUDGET_S
+    try:
+        out, hits, status = pdf_redactor.mask_pdf_bytes(raw_bytes, sid, tr, deadline=deadline)
+    except Exception as e:
+        try:
+            _emit_log(f"[panel] PDF 脱敏异常: {type(e).__name__}")
+        except Exception:
+            pass
+        raise _ExtImageBlocked("pdf_render_failed")
+    if not pdf_redactor.is_ok_status(status):
+        raise _ExtImageBlocked(status)
+    extra = pdf_redactor.last_stats()
+    unscanned = int(extra.get("attachments_unscanned") or 0)
+    if unscanned:
+        # 二进制附件扫不了：按用户定案放行，但必须留下记录（不静默）。
+        try:
+            _emit_log("[panel] PDF 含 %d 个无法扫描的附件（非文本），已按配置放行" % unscanned)
+        except Exception:
+            pass
+    if visual_stats is not None:
+        visual_stats["pages"] = visual_stats.get("pages", 0) + 1
+        if unscanned:
+            visual_stats["attachments_unscanned"] = (
+                visual_stats.get("attachments_unscanned", 0) + unscanned)
+        if status == pdf_redactor.ST_MASKED:
+            visual_stats["masked"] = visual_stats.get("masked", 0) + 1
+    return out, int(hits or 0)
+
+
+def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr, visual_stats=None):
     """处理 Office 文档（.docx / .xlsx / .pptx / .doc / .xls）内部文本脱敏。
 
     采用 Python 原生 zipfile 与 xml.etree.ElementTree，零外部依赖，毫秒级解包替换并重新封包。
@@ -7559,6 +7855,14 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
     返回: (masked_bytes, total_hits)
     **只要命中过敏感值，返回的一定是打过码的字节**：体积无法与原始对齐时也不回退明文
     （回退会让 hit_count 归零，扩展侧会误判成「无敏感信息」而静默放行）。
+
+    `visual_stats` 是**出参**（dict，可省）：内嵌图扫了几张 / 打码几张 / 换占位图几张。
+    加它而不是改返回值，是因为这张函数的返回值被外部测试（`test_benchmark_matrix.py`）
+    与将来可能的新调用方按 2 元组解包，改签名会让“调用方能跑、语义悄悄变了”比报错更难查。
+
+    **异常**：当 `multimodal_vision` 开着、而某张内嵌图没能完成扫描/遮盖时，
+    抛 `_ExtImageBlocked` —— 整份文档必须阻断。这不是可选项：跳过那张图等于
+    「开关开着、图片却原样上行」，比不开这个开关更危险（用户以为被保护了）。
     """
     ext = (filename.lower().split(".")[-1] if "." in filename else "").strip()
     # 旧格式转换默认关闭：开了它产出的“转换结果”是有损重建（丢图片/丢表格/混入乱码），
@@ -7600,6 +7904,10 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
     out_buf = io.BytesIO()
     total_hits = 0
     in_buf.seek(0)
+    # 多模态内嵌图：开关关着时零开销（不 import、不调 OCR），
+    # 开着时按整份文档给一个总预算（见 _EXT_FILE_OCR_BUDGET_S 的注释）。
+    multimodal = bool(_ext_cfg().get("multimodal_vision", False))
+    ocr_deadline = (time.monotonic() + _EXT_FILE_OCR_BUDGET_S) if multimodal else None
 
     with (
         tr._ner_doc_budget(_EXT_FILE_NER_BUDGET_S),
@@ -7621,17 +7929,23 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
             elif ext in ("pptx", "dps") and ((fn.startswith("ppt/") and fn.endswith(".xml")) or fn == "docprops/core.xml"):
                 should_mask = True
 
-            # 内嵌图片穿透脱敏 (Word/PPT/Excel 中的 media/image1.png 等)
-            is_embedded_image = any(fn.startswith(prefix) for prefix in ("word/media/", "ppt/media/", "xl/media/")) and                                 any(fn.endswith(ext_img) for ext_img in (".png", ".jpg", ".jpeg", ".webp"))
-            if is_embedded_image and _ext_cfg().get("ext_multimodal_vision", True):
-                try:
-                    import visual_redactor
-                    masked_img_bytes, img_hits = visual_redactor.mask_embedded_image_bytes(content, sid, tr)
-                    if img_hits > 0:
-                        content = masked_img_bytes
-                        total_hits += img_hits
-                except Exception:
-                    pass
+            # 内嵌图片穿透脱敏（word/media/*、ppt/media/*、xl/media/*）
+            if multimodal and _is_media_entry(fn):
+                media = _mask_embedded_media(content, item.filename, sid, tr, ocr_deadline)
+                if not media["ok"]:
+                    # 没扫成就不能放行：整份文档阻断（原因给端点转 503 + blocking）。
+                    raise _ExtImageBlocked(media["status"])
+                content = media["bytes"]
+                total_hits += media["hits"]
+                if visual_stats is not None:
+                    visual_stats["scanned"] = visual_stats.get("scanned", 0) + 1
+                    if media["masked"]:
+                        visual_stats["masked"] = visual_stats.get("masked", 0) + 1
+                    if media["covered"]:
+                        visual_stats["covered"] = visual_stats.get("covered", 0) + 1
+                    for k in ("entities", "verified", "line_fallback"):
+                        if media.get("stats", {}).get(k):
+                            visual_stats[k] = visual_stats.get(k, 0) + media["stats"][k]
 
             if should_mask:
                 try:
@@ -7711,19 +8025,111 @@ def mask_ooxml_bytes(raw_bytes: bytes, filename: str, sid: str, tr):
     return out_val, total_hits
 
 
+# ---------------------------------------------------------------------------
+# OCR 组件（可选运行时，DESIGN §8）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ocr/runtime")
+def api_ocr_runtime_status():
+    """OCR 组件状态（四态：disabled / installing / enabled / error）。"""
+    try:
+        import ocr_runtime
+        return jsonify({"ok": True, **ocr_runtime.status()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": _safe_public_text(e, 160)}), 500
+
+
+@app.post("/api/ocr/runtime/check")
+def api_ocr_runtime_check():
+    """查清单：有没有新版本（只读，不下载）。"""
+    try:
+        import ocr_runtime
+        return jsonify({"ok": True, **ocr_runtime.check_update()})
+    except Exception as e:
+        reason = getattr(e, "reason", "manifest_error")
+        return jsonify({"ok": False, "error": reason,
+                        "hint": _multimodal_hint(reason)}), 400
+
+
+@app.post("/api/ocr/runtime/install")
+def api_ocr_runtime_install():
+    """开始下载安装 OCR 组件（后台执行，立即返回）。
+
+    返回 202 + 当前状态；前端轮询 `GET /api/ocr/runtime` 的 `progress` / `last_error`。
+    为什么不再同步：组件 60~90MB，慢网下会先撞上前端 15s 请求超时——用户看到
+    "失败"而后端仍在装，再点一次就是两个写者。已有安装在跑时回 409。
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        import ocr_runtime
+        started, st = ocr_runtime.start_install(
+            url=str(data.get("url") or "") or None,
+            sha256=str(data.get("sha256") or "") or None,
+            version=str(data.get("version") or "") or None)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "install_failed",
+                        "detail": _safe_public_text(e, 160)}), 500
+    if not started:
+        return jsonify({"ok": False, "error": "install_in_progress", **st}), 409
+    return jsonify({"ok": True, **st}), 202
+
+
+@app.post("/api/ocr/runtime/rollback")
+def api_ocr_runtime_rollback():
+    try:
+        import ocr_runtime
+        return jsonify({"ok": True, **ocr_runtime.rollback()})
+    except Exception as e:
+        reason = getattr(e, "reason", "rollback_failed")
+        code = 409 if reason == "install_in_progress" else 400
+        return jsonify({"ok": False, "error": reason}), code
+
+
+@app.post("/api/ocr/runtime/uninstall")
+def api_ocr_runtime_uninstall():
+    try:
+        import ocr_runtime
+        return jsonify({"ok": True, **ocr_runtime.uninstall()})
+    except Exception as e:
+        reason = getattr(e, "reason", "uninstall_failed")
+        code = 409 if reason == "install_in_progress" else 400
+        return jsonify({"ok": False, "error": reason}), code
+
+
 @app.post("/api/ext/mask-image")
 def api_ext_mask_image():
-    """扩展图片多模态脱敏 (独立图片上传 / 截图评审 / 提取数据)。"""
+    """扩展图片多模态脱敏（独立图片 / 截图评审 / 提取数据）。
+
+    与 `/api/ext/mask`、`/api/ext/mask-file` 刻意保持三条同口径的约定——缺一条，
+    用户看到的就是「已保护」而实际没保护：
+
+      1. 超限回 413 + `blocking` + `report_for_skip` 归因（只回裸错误码时，日志里
+         查不到「为什么没上行」）；
+      2. **扫描失败回 503 + `blocking`**：扩展侧 `handleMaskImage` 只有看到
+         `blocking` 才阻断，回一个不带它的失败会被归进 (B) 默认桶 = 原图照发，
+         而原图正是本端点存在的理由；
+      3. 能力开关（`multimodal_vision`）关着时回 `passthrough`（**不带**
+         blocking）+ `hit_count:0`：与 `ext_bridge_disabled` 同语义——用户自己关的
+         能力，不该变成「网页传不了图」。扩展侧据 `hit_count` 决定是否重建请求。
+    """
     if (request.content_length or 0) > _EXT_MAX_BODY or request.headers.get("Transfer-Encoding"):
         return jsonify({"ok": False, "error": "payload_too_large", "blocking": True,
                         "limit_bytes": _EXT_MAX_BODY,
-                        "hint": "图片超过单条上限 %d 字节，已在本机阻断、未上行。" % _EXT_MAX_BODY}), 413
+                        "hint": "图片超过单条上限 %d 字节，已在本机阻断、未上行。" % _EXT_MAX_BODY,
+                        **inspection.report_for_skip(reason="request_too_large", blocked=True)}), 413
     data = request.get_json(force=True, silent=True) or {}
     b64_content = data.get("base64")
-    prompt = str(data.get("prompt") or "").strip()
     sid = str(data.get("sid") or "").strip()
+    host = str(data.get("host") or "")[:120]
     if not isinstance(b64_content, str) or not b64_content:
         return jsonify({"ok": False, "error": "bad_request", "blocking": True}), 400
+    if not _ext_cfg().get("multimodal_vision", False):
+        # 开关关着：原样回传 + hit_count 0，扩展据此「不重建请求」。
+        # `base64` 回空串（不回原图）：回一份等于把几十 MB 的 base64 再从本地
+        # 传一遍，而调用方拿它只能做一件事——丢掉。扩展侧也已改为**先问开关再上传**
+        # （/api/ext/ping 的 `multimodal`），这里的空串是第二道保险。
+        return jsonify({"ok": True, "mode": "passthrough", "base64": "",
+                        "content": "", "hit_count": 0, "sid": sid})
 
     if not sid or not sid.startswith("ext:"):
         sid = "ext:" + secrets.token_hex(8)
@@ -7740,37 +8146,71 @@ def api_ext_mask_image():
                 tr._new_session(sid)
 
         import visual_redactor
-        res = visual_redactor.process_image_multimodal(raw_bytes, prompt, sid, tr)
+        # 重活（解码 + OCR + 重编码）在锁外跑（B-6）：OCR 是秒级的，持锁会让
+        # 所有页签的脱敏请求一起排队。
+        res = visual_redactor.process_image_multimodal(raw_bytes, sid, tr)
+        mode = str(res.get("mode") or visual_redactor.MODE_BLOCKED)
+        hit_count = int(res.get("hit_count") or 0)
+        vstats = dict(res.get("stats") or {})
 
-        hit_count = res.get("hit_count", 0)
-        mode = res.get("mode", "PASSTHROUGH")
+        if mode == visual_redactor.MODE_BLOCKED:
+            reason = str(res.get("reason") or "engine_error")
+            _emit_ext_block(reason, sid, block_source="ocr", report_reason=reason,
+                            msg="图片内容未能完成本机扫描，已阻断（扩展链路）")
+            return jsonify({"ok": False, "error": reason, "blocking": True,
+                            "hint": _multimodal_hint(reason)}), 503
 
         with _EXT_LOCK:
             s = tr.sessions[sid]
             items = tr._mask_event_items(sid)
             s["inflight"] = True
+            # 统计只计成功扫描的图片：被阻断的那一次没有脱敏任何东西，
+            # 把它算进去会让 Dashboard 的「已脱敏」多出一批不存在的量。
             _EXT_STATS["mask"] += 1
 
         if _ext_cfg().get("ext_record_events", True) and hit_count > 0:
             tr._emit("MASK", ingress="ext", sid=sid,
                      count=hit_count,
                      new_count=len(s.get("new_orig") or set()),
-                     items=items, host=str(data.get("host") or ""), path="/ext/mask-image",
-                     dialog=f"[视觉多模态脱敏: {mode}]",
-                     req_preview=f"Uploaded image: {mode} ({len(raw_bytes)} bytes)",
-                     mask_ms=round((time.perf_counter() - t0) * 1000, 1))
+                     items=items, host=host, path="/ext/mask-image",
+                     dialog="[视觉多模态脱敏: %s]" % mode + _visual_dialog_suffix(vstats),
+                     req_preview="Uploaded image: %s (%d bytes)" % (mode, len(raw_bytes)),
+                     mask_ms=round((time.perf_counter() - t0) * 1000, 1),
+                     # 自校验/退整行/后端：用户看到一张被涂的图时，要能查到"涂得准不准"。
+                     **({"vision_verified": vstats.get("verified", 0),
+                         "vision_lines_masked": vstats.get("line_fallback", 0),
+                         "vision_backend": vstats.get("backend", "")}
+                        if vstats else {}))
 
-        out_b64 = base64.b64encode(res.get("bytes", b"")).decode("ascii") if res.get("bytes") else ""
-        return jsonify({
-            "ok": True,
-            "mode": mode,
-            "base64": out_b64,
-            "content": res.get("content", ""),
-            "sid": sid,
-            "hit_count": hit_count
-        })
+        out_b64 = base64.b64encode(res.get("bytes") or b"").decode("ascii")
+        return jsonify({"ok": True, "mode": mode, "base64": out_b64,
+                        "content": "", "sid": sid, "hit_count": hit_count,
+                        "vision": vstats})
+    except ImportError as e:
+        # `visual_redactor` 或 Pillow 缺失（Docker 镜像 / 旧包）：必须阻断。
+        # 「模块没装」不能变成「原图上行」，那正是本端点存在的意义。
+        # 按 `.name` 区分：这里也包住了 `import transparent`，如果把它报成
+        # “缺多模态模块”，排查的人会去查一个根本不缺的东西。
+        missing = str(getattr(e, "name", "") or "")
+        if missing and missing not in ("visual_redactor", "PIL", "PIL.Image"):
+            try:
+                _emit_log(f"[panel] ext mask-image 导入失败: {missing}")
+            except Exception:
+                pass
+            return jsonify({"ok": False, "error": "engine_error", "blocking": True}), 503
+        reason = "visual_redactor_unavailable"
+        _emit_ext_block(reason, sid, block_source="ocr", report_reason=reason,
+                        msg="引擎缺少多模态脱敏模块，已阻断（扩展链路）")
+        return jsonify({"ok": False, "error": reason, "blocking": True,
+                        "hint": _multimodal_hint(reason)}), 503
     except Exception as e:
-        return jsonify({"ok": False, "error": "internal_error", "detail": str(e)}), 500
+        # 与 mask-file 同口径：只记异常类型名（message 可能带正文片段），
+        # 回 engine_error + blocking，绝不把 `str(e)` 交给客户端。
+        try:
+            _emit_log(f"[panel] ext mask-image 失败: {type(e).__name__}")
+        except Exception:
+            pass
+        return jsonify({"ok": False, "error": "engine_error", "blocking": True}), 503
 
 
 @app.post("/api/ext/mask-file")
@@ -7805,7 +8245,11 @@ def api_ext_mask_file():
                 tr._new_session(sid)
         # 文件脱敏是这条链路上最重的一步（解析 OOXML + 逐叶子脱敏），
         # 必须在锁外跑（B-6）：否则一个用户上传文档就把所有页签的请求堵住。
-        masked_bytes, hit_count = mask_ooxml_bytes(raw_bytes, filename, sid, tr)
+        # `visual_stats` 是出参：内嵌图扫了几张 / 打码几张 / 换占位图几张，
+        # 要落进事件——用户看不到这个数字就不可能知道文档里发生了什么。
+        visual_stats = {}
+        masked_bytes, hit_count = mask_document_bytes(raw_bytes, filename, sid, tr,
+                                                     visual_stats=visual_stats)
         # 文件链路的总预算在 mask_ooxml_bytes 内部已开（_EXT_FILE_NER_BUDGET_S），
         # 这里把它的降级结果取出来上报：预算超了必须看得见，否则用户以为整份文件都脱了。
         ner_skips = tr._ner_skips_of_this_round()
@@ -7822,7 +8266,7 @@ def api_ext_mask_file():
                      count=hit_count,
                      new_count=len(s.get("new_orig") or set()),
                      items=items, host=str(data.get("host") or ""), path="/ext/mask-file",
-                     dialog=f"[文件脱敏: {filename}]",
+                     dialog=f"[文件脱敏: {filename}]" + _visual_dialog_suffix(visual_stats),
                      req_preview=f"Uploaded document: {filename} ({len(raw_bytes)} bytes)",
                      mask_ms=round((time.perf_counter() - t0) * 1000, 1),
                      **({"ner_truncated": True, "ner_skip_reasons": ner_skips}
@@ -7830,7 +8274,15 @@ def api_ext_mask_file():
 
         masked_b64 = base64.b64encode(masked_bytes).decode("ascii")
         return jsonify({"ok": True, "base64": masked_b64, "sid": sid, "hit_count": hit_count,
-                        **({"ner_skipped": ner_skips} if ner_skips else {})})
+                        **({"ner_skipped": ner_skips} if ner_skips else {}),
+                        **({"visual": visual_stats} if visual_stats else {})})
+    except _ExtImageBlocked as e:
+        # 内嵌图没能扫描/遮盖：整份文件阻断。这里**不能**降级成"未脱敏照发"——
+        # 那个语义在扩展侧就是 (B) 默认桶，用户会以为文件被保护了。
+        _emit_ext_block(e.reason, sid, block_source="ocr", report_reason=e.reason,
+                        msg="文档内嵌图片未能完成本机扫描，已阻断（扩展链路）")
+        return jsonify({"ok": False, "error": e.reason, "blocking": True,
+                        "hint": _multimodal_hint(e.reason)}), 503
     except Exception as e:
         try:
             _emit_log(f"[panel] ext mask-file 失败: {type(e).__name__}")

@@ -43,6 +43,10 @@ GATES = [
     # 明显少于请求数」——单测证明不了这条链路（sidecar 单测用 mock 上游，路由单测
     # 不连 mitmproxy），而它正是 C1 声称的那份收益。
     {"group": "python", "name": "Smoke tests (takeover)", "cwd": ".", "argv": ["{python}", "tests/smoke_takeover.py"]},
+    # OCR 脱敏链路的量化门禁：文本 CER / 实体遮全率 / 框 IoU / 召回 / P95。
+    # 为什么单独一条：这些指标**只有整条链路跑起来**才测得出来（det → 定位 → 自校验），
+    # 单测只能锁住单点行为。需要 requirements-ocr.txt（CI 的 python job 会装）。
+    {"group": "python", "name": "OCR evaluation", "cwd": ".", "argv": ["{python}", "scripts/eval_ocr.py", "--ci"]},
     # ---- frontend（ci.yml: frontend job，工作目录 frontend/）----
     {"group": "frontend", "name": "Typecheck & build", "cwd": "frontend", "argv": ["{npm}", "run", "build"]},
     {"group": "frontend", "name": "Lint", "cwd": "frontend", "argv": ["{npm}", "run", "lint"]},

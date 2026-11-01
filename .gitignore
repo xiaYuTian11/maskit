@@ -143,3 +143,6 @@ docs/RESEARCH-*.md
 # Local ingress verification evidence (contains no marker or request body).
 onboarding-verification.json
 onboarding-verification.tmp
+
+# OCR 运行时组件构建产物（scripts/build-ocr-runtime.py）
+dist_ocr/

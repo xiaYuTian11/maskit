@@ -31,10 +31,18 @@ jobs:
           python-version: '3.13'
           cache: 'pip'
 
+      # OCR 用例与 eval_ocr 要画中文；ubuntu runner 默认没有 CJK 字体，PIL 的默认位图字体
+      # 画不出中文 → eval_ocr 会以「环境不完整」失败（故意的，门禁不允许靠跳过变绿）。
+      - name: Install CJK fonts
+        shell: bash
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # 可选 OCR 运行时（本地 det+rec）。装了才跑得出 eval_ocr 的量化指标。
+          pip install -r requirements-ocr.txt
 
       - name: Compile check
         run: python -m py_compile engine/*.py
@@ -48,6 +56,9 @@ jobs:
           python tests/smoke_egress.py
           python tests/smoke_transport.py
           python tests/smoke_takeover.py
+
+      - name: OCR evaluation
+        run: python scripts/eval_ocr.py --ci
 
   frontend:
     name: frontend

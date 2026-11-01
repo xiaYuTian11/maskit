@@ -91,6 +91,7 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 | C1 上游接管旁路（`upstreams[].takeover=true` 时） | **关**：全部上游默认关闭，sidecar 进程内不启动 | 本机新增一个 `127.0.0.1:<随机端口>` 监听，把**已脱敏**的请求转发到请求头 `X-Maskit-Upstream` 指明的同一个上游——「同一个」不是描述而是**校验**：目标必须命中配置里声明的上游白名单，否则回 403 `shield_upstream_target_not_allowed` 并断开，这个环回口因此不能被本机进程当任意中继用。TLS 证书严格校验、超 32 MiB 回 413、失败回 502 不放行。该 socket 只绑环回、无鉴权，本机进程能借它做的，与它自行访问这几个已配置上游等价，不新增跨机可达面 | 面板「客户端编辑」→ 取消勾选「接管上游连接」 |
 | 模型价格目录同步（`price_sync_url`，默认 `mask.ciyuanroute.com`，失败回退 openrouter.ai） | **关** | 仅 GET，不带任何用户数据 | 设置 → 高级 → 价格同步 |
 | 版本检查 / 更新下载（桌面版经 Tauri Updater；Web / Docker 版先由**浏览器**直连 GitHub API，失败再退到**服务端** `/api/update/check`） | **自动**：启动后约 8 秒静默查一次，之后每 6 小时复查；点「检查更新」可立即触发 | 当前版本号 | 无法关闭；仅探测版本号与元数据，不发送任何使用数据，下载仅在点击「安装」后发生 |
+| OCR 组件下载（`github.com/xiaYuTian11/maskit/releases/download/ocr-runtime/`，固定 Pre-release tag） | **关**：仅在设置页点「安装 / 检查更新」时访问 | 多平台清单 `latest-ocr.json` + 组件 zip（GET，不带任何用户数据） | 不点按钮就零出站；清单地址可用 `MASKIT_OCR_MANIFEST_URL` 指向内网镜像；组件启用前必过 sha256 校验 + 真识别自检 |
 
 > Web / Docker 版先由浏览器直连 `api.github.com`（该源已在面板 CSP `connect-src` 放行）；
 > 直连失败（浏览器到 GitHub 不通）时退到服务端 `/api/update/check`，源顺序为
@@ -182,6 +183,11 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 | `MASKIT_PANEL_TOKEN_FILE` | 无 | 从文件读取令牌（容器 secret 场景） | 文件权限须仅属主可读 |
 | `MASKIT_TRUST_PROXY` | `0` | 信任单跳 `X-Forwarded-Proto` / `X-Forwarded-Host` | **仅**在前置代理会覆盖（而非追加）这些头时开启 |
 | `MASKIT_DISABLE_ORIGIN_CHECK` | `0` | 关闭 `/api/*` 的 Origin 同源校验 | 跨源防御降级为仅令牌单层，启动会打警告 |
+| `MASKIT_OCR_ENGINE` | `auto` | OCR 后端偏好（auto/local/http）。`local` 强制本地引擎，`http` 走兼容路径 | 只影响后端选择，不降低任何安全判据 |
+| `MASKIT_OCR_MANIFEST_URL` | 面板注入官方清单地址（`releases/download/ocr-runtime/latest-ocr.json`） | “OCR 组件”下载清单地址（`version`/`url`/`sha256`），空字符串 = 不注入默认、拒绝联网安装 | 组件包必须带 sha256，并在启用前跑一次真识别自检；镜像/内网自建清单时覆盖此变量 |
+| `MASKIT_OCR_MODEL` | `xiaomi-ocr-0` | OCR 请求里的模型名（走兼容端点/自建网关时换成视觉模型 id） | 与端点/密钥同属一组部署事实；只从环境变量读 |
+| `MASKIT_OCR_API_KEY` | 无 | OCR 服务的 Bearer 密钥（自建网关 / 兼容端点需要时） | **只从环境变量读**：不进 config.json、不进 `/api/config`、不进事件库（与上游 API key 同级） |
+| `MASKIT_OCR_ENDPOINT` | `http://127.0.0.1:8082/v1/chat/completions` | 覆盖配置项 `ocr_endpoint`（图片/文档/PDF 脱敏用的本机 OCR 地址），优先级高于 config.json | **只接受环回地址**（`localhost` / `127.0.0.0/8` / `::1`）；填远端主机时该能力被整体禁用——这个请求的载荷是**图片原件**，允许外发等于开一条绕开脱敏管线的通道 |
 | `MASKIT_ACCESS_LOG` | `0` | 打开 werkzeug 逐请求访问日志 | 默认关闭：面板每 2.5s 轮询一次，开启后 `engine-stdout.log` 会快速增长 |
 | `MASKIT_DIAG_LOG` | 打包态开启；源码态/测试关闭 | 把 `[panel]` / `[engine]` / `[proxy]` 诊断行追加到数据目录 `engine.log`（超 2MB 轮转一份 `.1`）。存在的理由：引擎被壳层 `taskkill /F /T` 强杀，`engine-stdout.log` 的块缓冲来不及 flush，启动失败现场会整片消失 | SHIELD 事件行（含 `req_preview` / `original` 明文）**永不落盘**，只收诊断前缀；诊断包会带走这个文件，改口径时需同步隐私声明 |
 | `MASKIT_START_READY_TIMEOUT` | `60` | 代理冷启动就绪等待上限（秒） | 只影响启动判定 |
@@ -334,9 +340,70 @@ NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的固定�
 | 为何必须豁免 | 改写 base64 必然让上游解码失败（`Only base64 data is allowed` 400）；而 base64 里不承载可脱敏的自然语言。真机事故（2026-10-29）：Codex 上传含图表的 Excel，图表 PNG 的 base64 被自定义短词命中并替换，坏数据还被客户端存进历史，之后每轮重发都 400 |
 | **不**豁免 | `data:text/*`、`+xml`、`+json`（可能藏 PII）；以及业务区里的同名字段（`{"type":"redacted_thinking","data":…}` 必须照常扫描，`tests/test_protocol_contracts.py` 锁死） |
 | 可见性 | 每次豁免计数进 MASK 事件 `media_skipped`、`reason_codes` 原因码（`partial_scope`，不降完整度、不阻断），并进导出白名单；不静默跳过 |
-| **尚未覆盖** | 图片像素里的文字（图表标题/图例/截图文字）。任何链路都不做 OCR，因此这类内容不在脱敏范围内 |
+| **尚未覆盖** | 图片像素里的文字（图表标题/图例/截图文字）。默认不扫描；打开 `multimodal_vision` 后由下面「图片载体」一节覆盖 |
 
 代理链路（`transparent.py`）**不解析** Office 文件：Excel 以 base64 塞进 JSON 时，表格内容属于上述「未覆盖」范围，等于明文上行。需要文件内容脱敏时用浏览器扩展的 `/api/ext/mask-file`（支持 `.docx/.xlsx/.pptx`，只处理文本 run）。
+
+### 图片 / 文档 / PDF 载体与 OCR 脱敏（默认关闭，2026-10-31 新增）
+
+图片里的文字是一条完整的漏脱敏通道：文本叶子全都扫过，像素里的工号/手机号/表格却一扫即过。
+开关 `multimodal_vision`（默认**关**，设置页「浏览器扩展」卡片）打开后，**三条入口**都把像素先送
+**本机** OCR，命中的文字在图上物理打码后再上行。它只做「识别 + 打码」：不看 prompt、不猜意图、
+**不把图片转成文本**（换文本等于改动用户发给模型的内容，OCR 认错字还会变成第二类污染）。
+
+| 入口 | 覆盖 |
+|---|---|
+| 代理链路（`transparent.py`） | 请求体 JSON 里媒体位置上的**图片 data URL**（`image_url` / `input_image` / `file_data` / `b64_json`…，含 `{"image_url": {"url": …}}` 嵌套形态）——Cursor / Claude Code 等客户端的截图走的就是这条路 |
+| `POST /api/ext/mask-image` | 独立图片 / 页面截图（扩展 `mask_image` 动作，multipart 与单文件 Blob 直传两条路）|
+| `POST /api/ext/mask-file` | `.docx/.xlsx/.pptx` 的 `word/media` / `ppt/media` / `xl/media` 内嵌图片；**PDF**（逐页渲染 → OCR → 页内打码；干净页保持矢量原文，脏页换位图）|
+| **不覆盖** | 扩展里以 ArrayBuffer 直传的图片（只处理 Blob / FormData 两条常见上传路径）；GIF/SVG/EMF/WMF 等打不了码的格式（**阻断**，不放行）；代理链路里以 http(s) 链接或 `file_id` 引用的图片（本机拿不到字节）；手写体与极小字号/低对比度文字的 OCR 漏检；非文字视觉隐私（人脸、二维码、证件底纹）；开关关闭时的全部图片 |
+
+**失败语义（这里只有一种方向：阻断）**
+
+| 情形 | 行为 |
+|---|---|
+| OCR 没启动 / 超时 / 返回不可解析 / 输出被截断 | 阻断：代理链路 `503` `mask_pipeline_failed`（`msg` 带 `vision:<原因>`），扩展链路 `503` + `blocking:true`。原因码 `ocr_unavailable` / `ocr_timeout` / `ocr_bad_response` / `ocr_truncated` |
+| OCR 地址被改到非环回主机，且未显式打开 `ocr_allow_remote` | 同上，`ocr_not_loopback`——能力被**禁用**，不是「仅告警」 |
+| 引擎缺 Pillow / `visual_redactor` / `pdf_redactor` | 同上，`pillow_missing` / `visual_redactor_unavailable` / `pdf_dependency_missing` |
+| 单张图超过 8MB 或 16MP（含解压炸弹，解码前即拦），或文档内嵌图超单次预算（40s）、PDF 超页数/像素/预算（120s） | 同上，`image_too_large` / `ocr_budget_exhausted` / `pdf_too_many_pages` / `pdf_pixel_budget` |
+| 本机 OCR 组件未安装/损坏、推理期崩溃、排队超时（≤`min(4, CPU/2)` 个并发，排队上限 10s） | 同上，`ocr_runtime_missing` / `ocr_engine_error` / `ocr_busy`。组件崩溃只阻断当前请求，不影响引擎与文本脱敏 |
+| 认识文字但拿不到坐标 | 独立图片与文档内嵌图阻断（`geometry_unavailable`）；仅 PDF 页退化为**整页遮盖**并计数（整份文档阻断的代价更高） |
+| 矢量图（EMF/WMF/SVG）/ GIF / 损坏图片 | 文档内嵌图换成占位图（像素零保留、结构不坏）；独立图片与代理解析阻断。均计数，不静默跳过 |
+
+**本地 OCR 引擎（默认路径，零出网）**
+
+坐标来自本机 **det+rec OCR**（`engine/ocr_engine.py`，PP-OCR，onnxruntime，模型 13.1MB，常驻 ~100MB，CPU 单核）。它**不随主包分发**：主包只有开关 + 下载器，用户启用时下载「OCR 组件」（约 60~90MB），校验 `sha256` → 解压（zip-slip 防护）→ **真跑一次识别自检** → 才启用；任一步失败回到 `disabled` 并清掉半成品，可回滚上一版。清单地址由面板层注入官方默认（见出站清单），`MASKIT_OCR_MANIFEST_URL` 可指向镜像/内网；组件包由 `scripts/build-ocr-runtime.py` 构建、`.github/workflows/ocr-runtime-release.yml` 发布到固定 Pre-release tag `ocr-runtime`（恒不参与 `releases/latest`，不会干扰桌面更新器）。 生成（依赖闭包 + `*.libs` + 单文件模块，实测 93MB/991 文件）；容器/服务器则直接 `pip install -r requirements-ocr.txt`（镜像 +200MB，换零外网依赖）。
+为什么要这么做：把 207MB 依赖塞进主包，会让所有用户为"默认关"的功能付体积；而聊天式视觉模型给的坐标实测是**按行号编造**的（真值 y=50/200/350 → 返回 190/390/590），拿它打码只能二选一：框错（漏遮）或整图变灰（废图）。
+
+**打码粒度与"不误伤"**
+
+只涂**敏感子串本身**（实体级），不是整行：实测整行遮会把"手机："标签一起盖掉。定位靠「东亚宽度加权 + 0.5em pad + 裁图复认」，复认失败退整行框（计数 `vision_lines_masked`），再失败**阻断**（不再有整图遮盖这条默认退路）。实测在 1200×760 的客户列表截图上，遮住的面积占 **3.59%**，表头/姓名/部门仍完整可读。
+
+**自建网关例外（`ocr_allow_remote`，默认 `false`）**
+
+默认只允许环回端点，因为发给 OCR 的是**未脱敏原图**。若你的 OCR 跑在自建网关 / 本机独显服务的另一台机器上：把 `ocr_endpoint` 填成那台机器，并在 `config.json` 里显式写 `"ocr_allow_remote": true`。
+打开后请明确接受：**原图会离开本机**，送到该地址；产品不判断那台主机是否可信，只保证默认不外发。把这个地址登记到你的内部网络策略里，并在威胁模型里按「受信任内网主机」对待。
+关闭该开关时，非环回地址一律禁用（`ocr_not_loopback`），不会「告警后照发」。
+
+**OCR 提示词与重试（实测调优结果）**
+
+标记合规性不是“模型能力”，而是**提示词能否把它钉住**。同一批网关模型各 3 次实测：
+宽松提示词（只说“每行前缀 loc”）合规率 **50%**（deepseek 2/3、gemini 1/3，gemini 还会把后三个坐标写成 `<39><140><394>`，丢掉 `loc_` 前缀）；把「y/x 方向、四个数各是什么、不得省略标记、拿不准就整页框 `<loc_0><loc_0><loc_1000><loc_1000>`」写死后，两个模型都是 **3/3**。
+即便如此仍会偶发整篇不带标记，所以**只在“已确认有敏感内容但坐标不全”时重试一次**（判定为干净时不重试，省 7~10 秒）。单张图总预算 32s（含一次重试），仍不合规才阻断/遮盖。
+
+**坐标标记覆盖率闸门（2026-10-31 实测引入）**
+
+打码前提是"知道敏感文字在哪一行"。同一个提示词喂不同视觉模型，标记纪律差别很大（实测）：`deepseek-v4-flash` 5/5 行规整；`gemini-3.8-flash` 14 行只标了 3 行，还把第二个坐标写成 `<38>`（缺 `loc_` 前缀）。
+所以 OCR 输出必须通过**行覆盖率**检查：解析出的带坐标行数 < 文本行数 → 视为「没定位全」，独立图片阻断（`geometry_unavailable`）、文档内嵌图与 PDF 页整页遮盖。只遮解析到的那几行，等于让剩下的行带着手机号原样露出去。
+
+**实测参考（2026-10-31，900×380 合成图 / 1000×900 密集 14 行图）**：`deepseek-v4-flash` 约 6s / 8.3s（满页 4096 token 输出规整）；`gemini-3.8-flash` 约 6~14s 但标记不全；`auto` 与 `gemini-4-argon` 在该网关上分别 502 / 403。单图超时 20s、PDF 页预算 6144 token 即按这些实测值定的。
+
+**可观测性**：代理链路每轮打码的张数进 MASK 事件 `vision_masked`；扩展链路的内嵌图进 `dialog`
+的「内嵌图 N 张：打码 X / 遮盖 Y」，PDF 进「PDF 已逐页扫描」；所有阻断进 `BLOCK` 事件
+（`block_source=ocr`）。扫描过且干净的图片**不**计入 `media_skipped`（那不是豁免）。
+
+**依赖**：`pillow`（像素操作）、`pypdfium2`（PDF 渲染，Apache-2.0 / PDFium BSD）、
+`pypdf`（PDF 合并，BSD-3）——三者都是宽松许可；**不允许**引入 AGPL 渲染器。
 
 ### 脱敏取证与还原失败归因（2026-10-25 新增）
 

@@ -516,6 +516,22 @@ export interface ShieldConfig {
   ext_record_events?: boolean
   /** 扩展链路是否自动将老版 Office (.doc / .xls) 在内存转码为 .docx / .xlsx 脱敏发送（默认 true） */
   ext_convert_legacy_office?: boolean
+  /**
+   * 图片 / Office 内嵌图片 / PDF 的本机 OCR 脱敏（默认关）。
+   * 代理链路与扩展链路共用这一个开关；开启后扫不了的内容**不放行**：
+   * 代理链路与独立图片回 503 blocking，文档内嵌图换占位图或整份阻断。
+   */
+  multimodal_vision?: boolean
+  /**
+   * 本机 OCR 服务地址（空 = 内置 `http://127.0.0.1:8082/v1/chat/completions`）。
+   * 环境变量 `MASKIT_OCR_ENDPOINT` 优先；**只接受环回地址**（非环回会禁用该能力）。
+   */
+  ocr_endpoint?: string
+  /**
+   * 是否允许 OCR 端点指向**非环回**地址（默认 `false`）。
+   * 打开后：未脱敏的**原图**会被送到该主机。只应在自建网关/本机独显服务时开启。
+   */
+  ocr_allow_remote?: boolean
   target_domains?: string[]
   api_paths?: string[]
   wizard_done?: boolean

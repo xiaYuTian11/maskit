@@ -4,6 +4,54 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 新增「图片内嵌文字脱敏」：截图、文档里的图片、以及 PDF 页面先在本机识别并打码，再发给 AI。
+- 开关默认关闭，不开时行为与 0.13.0 完全一致；开了但本机识别服务不可用时，内容会被拦住而不是原样发出去。
+- 修复一处文字链路的邮箱漏检：半角冒号后紧跟邮箱地址时不再原样发出去。
+- Optional on-device OCR masking for images, pictures embedded in Office files, and PDF pages, before anything is sent.
+- Off by default; if it is on and the local OCR service is unavailable, content is blocked instead of being sent unmasked.
+- Fixed a text-path email miss: an address typed right after a half-width colon is no longer sent in the clear.
+
+### 新增
+- 新增图片多模态脱敏：代理链路的截图、扩展上传的图片、Office 内嵌图片、PDF 页面都先经本机 OCR 识别，命中的文字在图上物理打码后上行（默认关闭，只走识别与打码，不把图转成文本）。
+- Optional multimodal masking: screenshots (proxy path), uploads, Office-embedded images and PDF pages are scanned by a local OCR service and sensitive text is physically redacted (off by default; masking only, never image-to-text).
+- PDF 逐页扫描：干净页保留矢量原文，只有含敏感文字的页变成位图；页数/耗时超限时直接阻断并提示拆分。
+- PDF support: clean pages keep their vector text, only pages with sensitive text become bitmaps; oversized documents are blocked with a hint to split them.
+- OCR 支持指向自建网关的视觉模型（`ocr_endpoint` + `ocr_allow_remote` + `MASKIT_OCR_MODEL` / `MASKIT_OCR_API_KEY`），提示词与重试按实测调优（标记合规率 50% → 3/3）。
+- OCR can point at a self-hosted gateway vision model (`ocr_endpoint` / `ocr_allow_remote` / `MASKIT_OCR_MODEL` / `MASKIT_OCR_API_KEY`); prompt and retry tuned from measurements (tag compliance 50% → 3/3).
+- 设置页新增开关；引擎新增 `ocr_endpoint` / `MASKIT_OCR_ENDPOINT`（默认只允许本机地址，自建网关需显式打开 `ocr_allow_remote`）。
+- New settings switch; `ocr_endpoint` / `MASKIT_OCR_ENDPOINT` default to loopback only, self-hosted gateways require the explicit `ocr_allow_remote` opt-in.
+- OCR 改为**本机 det+rec 引擎**（零出网、真检测框），坐标不再依赖模型"报数"；打码改为**实体级精遮**并用「裁图复认」保证不漏字。
+- OCR now uses a local det+rec engine (no egress, real detection boxes) instead of model-reported coordinates; masking is entity-level and self-verified by re-recognition.
+- 新增「OCR 组件」按需下载（可选运行时）：主安装包不变，启用时自动下载/校验/自检/回滚。
+- New optional OCR runtime downloaded on demand: the main installer stays small, with automatic verify, self-test and rollback.
+- OCR 组件下载地址内置官方默认（固定预发布位，不干扰主程序更新），内网/镜像可用环境变量指向自己的清单；配套发布流水线已就位。
+- The OCR component now has a built-in official download location (a fixed pre-release, separate from app updates); air-gapped or mirrored setups can point it at their own manifest, and the release pipeline is in place.
+ - OCR 输出新增「坐标覆盖率」闸门：模型只标了部分行时按「没定位全」处理（阻断或整页遮盖），不拿漏掉的行赌运气。
+- New tag-coverage gate: if the OCR model only tags part of the lines, the page is treated as not fully localised and is blocked or fully covered.
+
+### 修复
+- 修复审计在时间预算截断时不留「解析已跳过”痕迹的问题，排障数据不再在这种路径上缺口。
+- Fixed audit time-budget truncation not recording the "parse skipped" marker; diagnostic data no longer has a gap on that path.
+- 复用表容量提升 4 倍：重度使用（一天几千次请求）下，早前对话的占位符不再因容量淘汰而偶尔还原不了。
+- Reuse-table capacity raised 4x: under heavy daily use, placeholders from earlier conversations no longer occasionally fail to restore due to capacity eviction.
+- 修复“接管模式”冒烟验收长期误报：接管其实一直生效（连接复用正常），只是子进程日志被缓冲，判据读不到启动行。
+- Fixed a long-standing false failure in the takeover smoke test: takeover was working (connection reuse intact), but the child process log line was stuck in stdio buffering.
+- 修复高并发图片识别的验收误判：排队等待属于设计内的保护行为，不再计为失败。
+- Fixed a concurrency-test false alarm: queue-wait backpressure is by design and no longer counts as a failure.
+- 修复邮箱漏检：「邮箱:」半角冒号后紧跟地址时（无空格）此前不脱敏，纯文字请求同样受影响；连接串密码仍由连接串规则保护，不受影响。
+- Fixed an email miss: an address typed directly after a half-width colon (no space) was previously not masked, affecting plain text requests too; connection-string passwords remain protected by the connection-string rule.
+- 图片打码框增加上下留白，盖住英文降部与高位数字的笔画残边。
+- Image redaction boxes now include vertical padding to cover descenders and tall digits.
+- 图片打码框增加随行宽缩放的左右留白：中文前缀较窄的字体（如微软雅黑）上，宽行的实体框起点会系统性右偏导致首位数字露边，现已修复。
+- Redaction boxes now add width-proportional horizontal padding: on fonts with narrower CJK glyphs (e.g. Microsoft YaHei), entity boxes on wide lines started systematically too far right and exposed the leading digits; fixed.
+- 修复超宽单行截图漏检，校正手机照片方向；图片元数据与 PDF 的作者、注释、表单、书签、文本附件里的敏感值现在会被替换，其余内容原样保留；暂不支持的动图会阻断。
+- Fixed missed detections on extra-wide screenshots and phone-photo orientation; sensitive values in image metadata and in PDF authors, comments, forms, bookmarks and text attachments are now replaced while everything else is kept; unsupported animations are blocked.
+- 修复引擎热重载将最小日志模式重置为详细模式的问题，避免意外保存普通个人信息原文。
+- Fixed engine reloads reverting minimal logging to detailed mode, preventing unintended retention of ordinary personal data.
+
 ## [0.13.0] - 2026-10-30
 
 ### 更新摘要 / Summary

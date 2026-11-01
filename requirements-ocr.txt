@@ -1,0 +1,9 @@
+# 可选 OCR 运行时（本地 det+rec）—— 图片 / Office 内嵌图 / PDF 的脱敏依赖它。
+#
+# **刻意不放进 requirements.txt**：这套依赖实测 207MB（opencv 112 + onnxruntime 46
+# + numpy 31 + 模型 13），而绝大多数用户的绝大多数请求根本不含图片。桌面端由
+# "OCR 组件"下载器按需安装（DESIGN §8），服务器/Docker 则预装本文件。
+#
+# 不装时：开关不可启用、图片与 PDF 原样放行（与 v0.13.0 行为一致），其它功能不受影响。
+rapidocr-onnxruntime>=1.2,<2
+onnxruntime>=1.20,<2

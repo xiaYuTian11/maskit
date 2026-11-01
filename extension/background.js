@@ -81,6 +81,11 @@ const DAILY_KEY = 'maskit:daily';
 const DOWN_WINDOW_MS = 60000;
 const PING_TTL_MS = 60000;
 const CALL_TIMEOUT_MS = 15000;
+// 文件类打码的 SW→引擎超时。这两条端点里的重活是 OCR：Office 内嵌图总预算 20s、
+// PDF 逐页扫总预算 60s。用 15s 卡的话引擎还在扫、这里先 abort → `engine_timeout`
+// 归进 (B) 直通 → **原图/原文件上行**。这类失败看上去像“引擎慢”，实际是漏脱敏。
+// 分层：Office OCR 40s / PDF OCR 120s（引擎） < 本値 150s < 页↔SW 的 180s。
+const HEAVY_CALL_TIMEOUT_MS = 150000;
 
 /**
  * 403「配置性拒绝」的退避策略（token 失效 / 面板关开关）。
@@ -117,7 +122,7 @@ const SESSION_QUOTA_HINT = 1024 * 1024;
 // ── 内存缓存 ────────────────────────────────────────────────────────────────
 // 丢了也没关系（可从 panel 重新问），所以放内存；**sid 签发表绝不放这里**：
 // MV3 SW 空闲 ~30s 就被终止，内存 Map 必丢，推理模型思考几十秒不吐 chunk 是常态。
-let cache = { alive: null, version: '', protocol: null, blockWhenDown: false, recordEvents: true, stats: null, at: 0 };
+let cache = { alive: null, version: '', protocol: null, blockWhenDown: false, recordEvents: true, multimodal: false, visionReady: false, stats: null, at: 0 };
 // cache 是否已经被一次**成功的 ping** 填充过。用来区分「用户的显式选择」与
 // 「我们还没拿到过任何值」：前者要执行，后者才允许保守放行（见 restoreBlockWhenDownOnce）。
 let cacheFromPing = false;
@@ -464,6 +469,23 @@ async function isBlockOnDown() {
   return cache.blockWhenDown === true;
 }
 
+/**
+ * 图片/文档 OCR 脱敏能力当前是否开（缓存 60s）。
+ *
+ * 未知时回落 **false**：关着时把整张图的 base64 发给引擎、再拿回一份“未处理”，
+ * 纯属白跑一趟（本地往返 + 双倍内存）。方向与 `isBlockOnDown` 相反是有意的：
+ * 那个未知时要「敢拦」，这个未知时要「不干活」——最坏只是少一次本地往返，
+ * 而“到底扫不扫”的判据始终在引擎侧（它关着时本来也不会脱敏）。
+ */
+async function isVisionOn() {
+  if (Date.now() - cache.at > PING_TTL_MS) {
+    await refreshPing().catch(() => {});
+  }
+  // 只认 `visionReady`（开关 + OCR 组件都就绪）：开关开着但组件没装时，
+  // 发上去只会换来 503 把用户的图片上传打断——不如按"能力未就绪"直接不碰。
+  return cache.visionReady === true;
+}
+
 async function refreshPing() {
   let r;
   try {
@@ -485,6 +507,8 @@ async function refreshPing() {
       protocol: typeof data.ext_protocol === 'number' ? data.ext_protocol : null,
       blockWhenDown: data.block_when_down === true,
       recordEvents: data.record_events !== false,
+      multimodal: data.multimodal === true,
+      visionReady: data.vision_ready === true,
       stats: data.stats || null, at: Date.now(),
     };
     cacheFromPing = true;
@@ -540,7 +564,7 @@ async function refreshPing() {
  * 统一调用入口：熔断 + (A)/(B) 归类。
  * 返回 {ok, body} | {ok:false, blocking:true} | {ok:false, passthrough:true}
  */
-async function safeCall(path, body) {
+async function safeCall(path, body, timeoutMs = CALL_TIMEOUT_MS) {
   // 本次调用是否已经处在「配置性拒绝」退避期内。必须在任何分支改动 authHoldUntil
   // 之前取：它决定这次失败是"刚进入退避"（下一次调用立刻探测）还是"探测又失败"
   // （继续按 AUTH_PROBE_MS 间隔，绝不能重置成当下——那等于取消防洪，每 chunk 一行）。
@@ -567,7 +591,7 @@ async function safeCall(path, body) {
   }
   let r;
   try {
-    r = await callPanel(path, body);
+    r = await callPanel(path, body, 'POST', timeoutMs);
   } catch (e) {
     // ⚠️ 必须区分「引擎慢」与「引擎不在」。
     //
@@ -741,7 +765,7 @@ async function handleMaskFile(payload, tabId, host) {
   if (!siteCovers(host, cfg.enabledSites)) {
     return { ok: false, passthrough: true, error: 'site_disabled' };
   }
-  const r = await safeCall('/api/ext/mask-file', { filename, base64, host, sid });
+  const r = await safeCall('/api/ext/mask-file', { filename, base64, host, sid }, HEAVY_CALL_TIMEOUT_MS);
   if (r.ok) {
     if (r.body && r.body.sid) {
       await rememberSid(r.body.sid, tabId, host);
@@ -756,7 +780,6 @@ async function handleMaskFile(payload, tabId, host) {
 
 async function handleMaskImage(payload, tabId, host) {
   const base64 = payload && typeof payload.base64 === 'string' ? payload.base64 : '';
-  const prompt = payload && typeof payload.prompt === 'string' ? payload.prompt : '';
   const sid = (payload && typeof payload.sid === 'string' && payload.sid)
     || (await findRecentSid(tabId, host));
   if (!base64) return { ok: false, passthrough: true };
@@ -768,7 +791,14 @@ async function handleMaskImage(payload, tabId, host) {
   if (!siteCovers(host, cfg.enabledSites)) {
     return { ok: false, passthrough: true, error: 'site_disabled' };
   }
-  const r = await safeCall('/api/ext/mask-image', { base64, prompt, host, sid });
+  if (!(await isVisionOn())) {
+    // 能力关着：连图都不必传（省一次本地往返 + 一份 base64）。
+    // 页面仍会按原逻辑原样上传，并由 attachment note 诚实提示“未脱敏”。
+    await pushRecent({ host, path: 'mask-image', action: 'skip', count: 0, status: 'passthrough:vision_off' });
+    return { ok: false, passthrough: true, error: 'vision_off' };
+  }
+  // 不传 prompt：引擎只做“识别 + 打码”，不靠用户那句话猜意图（2026-10-31 定案）。
+  const r = await safeCall('/api/ext/mask-image', { base64, host, sid }, HEAVY_CALL_TIMEOUT_MS);
   if (r.ok) {
     if (r.body && r.body.sid) {
       await rememberSid(r.body.sid, tabId, host);
@@ -813,7 +843,7 @@ async function handlePing() {
   try {
     return await refreshPing();
   } catch (e) {
-    return { alive: false, version: '', blockWhenDown: false, recordEvents: true, stats: null };
+    return { alive: false, version: '', blockWhenDown: false, recordEvents: true, multimodal: false, visionReady: false, stats: null };
   }
 }
 

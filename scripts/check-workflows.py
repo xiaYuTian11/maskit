@@ -175,7 +175,11 @@ def _find_bash():
     """返回一个真能用的 bash；Windows 上要绕开 WSL 垫片。"""
     override = os.environ.get("MASKIT_BASH")
     if override:
-        return override
+        # 覆盖值指向不存在的文件时告警并回退（实测：路径拼错 → FileNotFoundError
+        # 直接把整个 version 门禁带崩，报错还指向 _winapi，很难归因到 MASKIT_BASH）
+        if os.path.isfile(override):
+            return override
+        print(f"check-workflows: 警告 MASKIT_BASH={override} 不存在，忽略并回退自动探测")
     found = shutil.which("bash")
     if found and os.name == "nt" and "system32" in found.lower():
         return None

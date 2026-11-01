@@ -128,6 +128,8 @@ def run_pass(takeover, upstream_port):
     (work / "config.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
 
     env = {**os.environ, "LLM_SHIELD_DATA_DIR": str(work), "PYTHONUTF8": "1",
+           "PYTHONUNBUFFERED": "1",  # stdout 接管道后子进程是块缓冲，不加这行
+           # [C1] sidecar started 会憋在缓冲区里直到进程退出，判据永远拿不到
            "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
     mitm_cmd = shutil.which("mitmdump") or str(pathlib.Path(sys.executable).parent / "mitmdump")
     proc = subprocess.Popen(
@@ -220,6 +222,9 @@ def main():
         STATE["bodies"] = []
         upstream_port = UPSTREAM_PORT_BASE + (1 if takeover else 0)
         srv = ThreadingHTTPServer(("127.0.0.1", upstream_port), FakeUpstream)
+        # 客户端 connection:close 断开时，ThreadingHTTPServer 默认向 stderr 打整段
+        # ConnectionResetError traceback —— 与判据无关，只会污染门禁输出。
+        srv.handle_error = lambda *a: None
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         try:
             print("--- 第 %d 遍：takeover=%s ---"

@@ -12,3 +12,15 @@ httpx>=0.28,<1.0
 # 它目前只由 httpx→httpcore 传递提供，而 sidecar 是**直接 import 它**的一方：
 # 传递依赖收紧时，源码态一切正常、打包/新环境才 ImportError。同 Brotli/zstandard 的口径。
 h11>=0.16,<0.17
+# 图片多模态脱敏（engine/visual_redactor.py）的运行时依赖：打码是**像素级**操作，
+# 没有 Pillow 就无法解码/重编码，整条链路只能阻断。它必须是**运行期**依赖——
+# 只写进 requirements-dev 会让 Docker 镜像（Dockerfile 只装本文件）与干净机器
+# 在运行时才报 pillow_missing，而那正是「图片上传全部被阻断」的现场。
+# 下限 11：Pillow 10.4 没有 Python 3.14 的预编译轮子（源码构建需要系统 zlib）。
+pillow>=11,<14
+# PDF 载体脱敏（engine/pdf_redactor.py）：pypdfium2 负责整页渲染（Apache-2.0 / PDFium BSD），
+# pypdf 负责按页合并（BSD-3）。两者都用**宽松许可**：PDF 这块不能引入 AGPL 渲染器，
+# 否则整个发行物都受传染。钉住版本的理由：渲染缩放与页对象复制的行为随版本变，
+# 而这类变化只会在“某些 PDF 上打码框错位”时才露头。
+pypdfium2>=4.30,<6
+pypdf>=5,<7

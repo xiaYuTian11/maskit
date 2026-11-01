@@ -38,6 +38,11 @@
   // 页面能用，用户也知道它没被保护。这比「硬失败」和「静默放行」都好。
   const MAX_OOXML_BYTES = 23 * 1024 * 1024;
 
+  // 单张图片的原始字节上限：与 OOXML 用同一个数（同一道 32MB 信封闸门反推出来）。
+  // 超限的图片落到 `raw` 分支原样透传，并由 attachment note 如实报「未脱敏」——
+  // 理由与上面相同：不硬失败、不静默放行。
+  const MAX_IMAGE_BYTES = MAX_OOXML_BYTES;
+
   // ─── postMessage 桥（nonce 校验） ───
   const pending = new Map();
   const bridge = {
@@ -75,6 +80,12 @@
   // 多标签页并发、或 NER 冷启动时，单次 mask 超过 3s 很正常。这里给 6s，并在失败时
   // 重试一次。重试成功的第一个 sid 会在引擎侧成为孤儿会话，由会话 TTL 自然回收。
   const MASK_TIMEOUT_MS = 6000;
+  // 文件/图片类打码的页↔SW 超时。**必须大于** SW→引擎那一道（background.js 的
+  // `HEAVY_CALL_TIMEOUT_MS = 150s`），否则引擎还在跑 OCR、页面这边已经超时收手：
+  // `bridge.call` 超时 resolve(null)，调用方按“没换成”处理 → **原图/原文件上行**。
+  // 这是一条静默漏脱敏路径：引擎那边本来会明确回 503 阻断，但前端先走了。
+  // 层数：Office OCR 40s / PDF OCR 120s（引擎） < 150s（SW） < 180s（本超时）。
+  const HEAVY_CALL_TIMEOUT_MS = 180000;
   const maskOnce = (text) => bridge.call('mask', { text }, MASK_TIMEOUT_MS);
   const callMask = async (text) => {
     // ⚠️ `blocking`（引擎 413 超限 / 503 管线失败 / 400 参数错）是**确定性拒绝**，
@@ -292,6 +303,11 @@
   // 都会把 docx/xlsx/pptx 全部误判成文本附件（真机实测，见下方判定函数注释）。
   const OOXML_FILE_EXTS = new Set(['docx', 'xlsx', 'pptx', 'wps', 'et', 'dps', 'doc', 'xls']);
 
+  // 交给引擎「文档脱敏」入口的全部载体：OOXML 一套 + PDF。
+  // PDF 走的是引擎里的另一条实现（逐页渲染 + 本机 OCR + 打码后重建），
+  // 但对外是**同一个** `mask_file` 动作与同一套阻塞语义——扩展侧不需要分派。
+  const DOC_FILE_EXTS = new Set([...OOXML_FILE_EXTS, 'pdf']);
+
   // 旧版 Office（OLE 复合二进制，.doc / .xls）：内容不是 ZIP，无法像 OOXML 那样解包改文本。
   // 引擎对它们的「转换」是**有损重建**（丢图片/表格/样式，二进制碎片还会混入正文），因此
   // 默认已关闭；关闭时这几个扩展名原样上行 = **完全不受保护**。单独列出只为给用户一条
@@ -343,9 +359,9 @@
     return type.startsWith('text/') || TEXT_APP_MIMES.has(type);
   };
 
-  /** 附件是否是图片（仅用于「未脱敏文件里有图片」的诚实提示）。 */
+  /** 附件是否是图片（既用于分类打码，也用于「未脱敏文件里有图片」的诚实提示）。 */
   const isImageItem = (item) => {
-    const v = item && item.value;
+    const v = (item && (item.file || item.value)) || null;
     return !!(v && typeof v.type === 'string' && v.type.startsWith('image/'));
   };
 
@@ -392,6 +408,7 @@
     'application/msword': 'doc',
     'application/vnd.ms-excel': 'xls',
     'application/vnd.ms-powerpoint': 'pptx',
+    'application/pdf': 'pdf',
   };
 
   function resolveFileExt(v, urlHint) {
@@ -420,13 +437,23 @@
     const size = typeof v.size === 'number' ? v.size : 0;
     if (size <= 0 || size > MAX_OOXML_BYTES) return false;  // 上限见 MAX_OOXML_BYTES 注释
     const ext = resolveFileExt(v, urlHint);
-    return OOXML_FILE_EXTS.has(ext);
+    return DOC_FILE_EXTS.has(ext);
   };
 
   /** 快速检查二进制前4字节是否为 ZIP 魔数 PK\x03\x04 */
   function isZipMagic(bytes) {
     if (!bytes || bytes.length < 4) return false;
     return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+  }
+
+  /** 快速检查前5字节是否为 PDF 魔数 `%PDF-`。
+   *  为什么要它：扩展名/MIME 经常被站点抹掉（上传名变成 `attachment.bin`），
+   *  而 PDF 不是 ZIP，只靠 isZipMagic 会让 PDF 落入 raw 分支原样上行——
+   *  等于换个名字就绕过脱敏。 */
+  function isPdfMagic(bytes) {
+    if (!bytes || bytes.length < 5) return false;
+    return bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44
+      && bytes[3] === 0x46 && bytes[4] === 0x2d;
   }
 
   function arrayBufferToBase64(buffer) {
@@ -479,6 +506,12 @@
         // Office 二进制**必须排在文本判定之前**：文本分支会把二进制按 UTF-8 读坏
         // （见 `isMaskableTextAttachment` 注释）。顺序反了 = Office 打码永不生效。
         items.push({ kind: 'ooxmlFile', key: k, file: v });
+      } else if (isImageItem({ file: v }) && v.size > 0 && v.size <= MAX_IMAGE_BYTES) {
+        // 图片走 mask_image（本机 OCR 判定 + 物理打码），而不是原样透传：
+        // 截图里同样有手机号、工号、表格数据，这条路以前只会弹一句「图片未脱敏」。
+        // 放在文本判定之前是为了让 `image/svg+xml` 这类带 xml 字样的类型不被文本
+        // 分支抢走（它会被当纯文本读写一遍，既无意义又拿不到打码）。
+        items.push({ kind: 'imageFile', key: k, file: v });
       } else if (isMaskableTextAttachment(v)) {
         let content = null;
         try {
@@ -493,15 +526,17 @@
           items.push({ kind: 'raw', key: k, value: v });
         }
       } else if (v && typeof v === 'object' && typeof v.slice === 'function' && v.size > 0 && v.size <= MAX_OOXML_BYTES) {
-        // ZIP 魔数兜底：即使文件名被抹除或 MIME 类型为二进制流，只要前4字节为 PK\x03\x04 即按 OOXML 处理
-        let isZip = false;
+        // 魔数兜底：文件名被抹除或 MIME 为二进制流时，按内容判定载体：
+        //   PK\x03\x04 → OOXML；%PDF- → PDF。两者都交给引擎的文档入口。
+        let isDocMagic = false;
         try {
-          const headBuf = await v.slice(0, 4).arrayBuffer();
-          isZip = isZipMagic(new Uint8Array(headBuf));
+          const headBuf = await v.slice(0, 5).arrayBuffer();
+          const head = new Uint8Array(headBuf);
+          isDocMagic = isZipMagic(head) || isPdfMagic(head);
         } catch (e) {
-          isZip = false;
+          isDocMagic = false;
         }
-        if (isZip) {
+        if (isDocMagic) {
           items.push({ kind: 'ooxmlFile', key: k, file: v });
         } else {
           items.push({ kind: 'raw', key: k, value: v });
@@ -512,7 +547,8 @@
     }
 
     const hasOOXML = items.some((item) => item.kind === 'ooxmlFile');
-    if (!texts.length && !hasOOXML) {
+    const hasImage = items.some((item) => item.kind === 'imageFile');
+    if (!texts.length && !hasOOXML && !hasImage) {
       const raws = items.filter((item) => item.kind === 'raw');
       if (raws.length) {
         bridge.notify('note', {
@@ -580,7 +616,7 @@
           const buf = await orig.arrayBuffer();
           const b64 = arrayBufferToBase64(buf);
           const fName = (orig && typeof orig.name === 'string' && orig.name) || 'attachment';
-          const r = await bridge.call('mask_file', { filename: fName, base64: b64, sid });
+          const r = await bridge.call('mask_file', { filename: fName, base64: b64, sid }, HEAVY_CALL_TIMEOUT_MS);
           if (r && r.blocking) return { blocking: true };  // (A) 必须立即阻断，严禁把未脱敏原文件漏传出网
           if (r && r.ok && r.base64) {
             sid = sid || r.sid;
@@ -590,6 +626,7 @@
             if (fExt === 'xlsx') defaultMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
             else if (fExt === 'docx') defaultMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
             else if (fExt === 'pptx') defaultMime = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+            else if (fExt === 'pdf') defaultMime = 'application/pdf';
 
             let replacement;
             if (typeof File !== 'undefined' && orig instanceof File) {
@@ -612,6 +649,38 @@
         }
         if (!replaced) {
           out.append(item.key, orig, (orig && orig.name) || 'attachment.xlsx');
+        }
+      } else if (item.kind === 'imageFile') {
+        const orig = item.file;
+        let replaced = false;
+        try {
+          const r = await maskImageBlob(orig, sid);
+          if (r && r.blocking) return { blocking: true };  // (A)：OCR 不可用/扫不了，严禁原图出网
+          if (r && r.bytes) {
+            sid = sid || r.sid;
+            const fName = (orig && typeof orig.name === 'string' && orig.name) || 'image.png';
+            const mime = (orig && orig.type) || 'image/png';
+            let replacement;
+            if (typeof File !== 'undefined' && orig instanceof File) {
+              replacement = new File([r.bytes], fName, {
+                type: mime,
+                lastModified: orig.lastModified || Date.now(),
+              });
+            } else {
+              replacement = new Blob([r.bytes], { type: mime });
+            }
+            out.append(item.key, replacement, fName);
+            // 只有真用打码字节重建过文件才计已脱敏（引擎在“判定干净”与
+            // “能力开关关着”时都会原样回传，那两种不能报成已保护）。
+            item.masked = true;
+            replaced = true;
+          }
+        } catch (e) {
+          console.warn('[Maskit Bridge] image mask error:', e);
+          replaced = false;
+        }
+        if (!replaced) {
+          out.append(item.key, orig, (orig && orig.name) || 'image');
         }
       } else {
         out.append(item.key, item.value, item.value && item.value.name);
@@ -659,8 +728,35 @@
   }
 
   /**
+   * 单张图片 → 引擎做本机 OCR 判定 + 物理打码。
+   *
+   * 返回三态，调用方必须区分（与 `mask_file` 同一套口径）：
+   *   · `{blocking:true}`：引擎明确阻断（OCR 未就绪 / 扫不了 / 输出被截断），
+   *     整个请求不发出；
+   *   · `{bytes}`：真改写过了，用这份字节重建文件；
+   *   · `null`：不碰请求（能力开关关着 / 判定无敏感信息 / 引擎不可达）。
+   *
+   * 不传 `prompt`：扩展侧拿不到用户输入框里的原话，引擎因此按默认的“保留图片”
+   * 意图处理（只会回图片字节或 passthrough，不会回 TEXT_ONLY——那是面板/网页端
+   * 才能做的“用文本替掉图片”交互，在 multipart 里硬换会把请求结构弄坏）。
+   */
+  async function maskImageBlob(blob, sid) {
+    if (!blob || typeof blob.arrayBuffer !== 'function') return null;
+    const buf = await blob.arrayBuffer();
+    const r = await bridge.call('mask_image', { base64: arrayBufferToBase64(buf), sid }, HEAVY_CALL_TIMEOUT_MS);
+    if (r && r.blocking) return { blocking: true };
+    // `hit_count > 0` 才算真改写：引擎在「判定干净」和「开关关着」时都会原样回传，
+    // 把这两种报成“已脱敏”就是把未保护包装成已保护。
+    if (r && r.ok && Number(r.hit_count) > 0 && typeof r.base64 === 'string' && r.base64) {
+      return { bytes: base64ToUint8Array(r.base64), sid: r.sid || sid, mode: r.mode || '' };
+    }
+    return null;
+  }
+
+  /**
    * 单文件（Blob / File）直传打码：覆盖对象存储直传（S3 / OSS / OAI）与单文件 POST/PUT。
-   * 支持 Office 文档（.docx / .xlsx / .pptx）与常见文本附件（.txt / .csv / .json 等）。
+   * 支持 Office 文档（.docx / .xlsx / .pptx）、常见文本附件（.txt / .csv / .json 等）
+   * 与图片（走本机 OCR + 物理打码）。
    */
   async function maskSingleFile(blob, urlHint) {
     if (!blob || typeof Blob === 'undefined' || !(blob instanceof Blob)) return null;
@@ -669,23 +765,48 @@
     let isOOXML = OOXML_FILE_EXTS.has(ext);
     let isText = isMaskableTextAttachment(blob);
 
-    // ZIP 魔数兜底：当没有明确扩展名或 MIME 类型为通用的 application/octet-stream 时，
-    // 检查前4字节是否为 PK\x03\x04 (ZIP)。若符合且大小在合法范围内，则强制按 OOXML 处理。
+    // 魔数兜底：当没有明确扩展名或 MIME 类型为通用的 application/octet-stream 时，
+    // 按前几个字节判定载体（PK\x03\x04 → OOXML；%PDF- → PDF）。
     if (!isOOXML && !isText && blob.size > 4 && blob.size <= MAX_OOXML_BYTES) {
       try {
-        const headBuf = await blob.slice(0, 4).arrayBuffer();
-        if (isZipMagic(new Uint8Array(headBuf))) {
+        const headBuf = await blob.slice(0, 5).arrayBuffer();
+        const head = new Uint8Array(headBuf);
+        if (isZipMagic(head) || isPdfMagic(head)) {
           isOOXML = true;
           // 真实格式未知：**不猜 xlsx**。ext 留空后 filename 退化为 'attachment.bin'，
-          // 由引擎按 ZIP 内部结构（xl/ / word/ / ppt/）嗅探真实格式。
-          // 猜成 xlsx 会让 docx/pptx 被按 xlsx 解析、一个条目都匹配不上 → hits=0 → 静默不脱敏。
+          // 由引擎按魔数/内部结构嗅探真实格式。猜成 xlsx 会让 docx/pptx 被按 xlsx
+          // 解析、一个条目都匹配不上 → hits=0 → 静默不脱敏。
           ext = '';
         }
       } catch (e) { /* ignore */ }
     }
 
     if (!isOOXML && !isText) {
-      if (blob.type && blob.type.startsWith('image/')) {
+      if (isImageItem({ file: blob })) {
+        if (blob.size > 0 && blob.size <= MAX_IMAGE_BYTES) {
+          try {
+            const r = await maskImageBlob(blob, null);
+            if (r && r.blocking) return { blocking: true };   // (A)：别让原图出网
+            if (r && r.bytes) {
+              const fName = (typeof blob.name === 'string' && blob.name) || 'image.png';
+              let replacement;
+              if (typeof File !== 'undefined' && blob instanceof File) {
+                replacement = new File([r.bytes], fName, {
+                  type: blob.type,
+                  lastModified: blob.lastModified || Date.now(),
+                });
+              } else {
+                replacement = new Blob([r.bytes], { type: blob.type });
+              }
+              bridge.notify('note', { kind: 'attachment', image: false, count: 0, maskedCount: 1 });
+              return { body: replacement, sid: r.sid, masked: true };
+            }
+          } catch (e) {
+            console.warn('[Maskit Bridge] image mask error:', e);
+          }
+        }
+        // 没换成（能力关着 / 判定干净 / 超限 / 引擎不可达）：原样透传，但必须诚实提醒
+        // “这张图没被保护”——静默放过是这条路以前最糟的地方。
         bridge.notify('note', { kind: 'attachment', image: true, count: 1, maskedCount: 0 });
       }
       return null;
@@ -703,15 +824,17 @@
       try {
         const buf = await blob.arrayBuffer();
         const bytes = new Uint8Array(buf);
-        if (!isZipMagic(bytes)) return null;
+        // 非文档魔数 → 不碰这个请求（原样上行），与“零触碰”原则一致。
+        if (!isZipMagic(bytes) && !isPdfMagic(bytes)) return null;
 
         let defaultMime = 'application/octet-stream';
         if (ext === 'xlsx') defaultMime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         else if (ext === 'docx') defaultMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
         else if (ext === 'pptx') defaultMime = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+        else if (ext === 'pdf') defaultMime = 'application/pdf';
 
         const b64 = arrayBufferToBase64(buf);
-        const r = await bridge.call('mask_file', { filename, base64: b64 });
+        const r = await bridge.call('mask_file', { filename, base64: b64 }, HEAVY_CALL_TIMEOUT_MS);
         if (r && r.blocking) return { blocking: true };
         if (r && r.ok && r.base64) {
           // 引擎在「无敏感信息」或「体积无法对齐而放弃脱敏」时会**原样回传**字节。
@@ -926,23 +1049,21 @@
         return m.sid ? wrapResponse(res, m.sid) : res;
       }
     } else if (initBodyIsArrayBuffer(init)) {
-      let isZip = false;
+      // 魔数先于分流：PDF 不是 ZIP，只认 ZIP 会让 PDF 直传落到文本分支。
       const bytes = init.body instanceof ArrayBuffer ? new Uint8Array(init.body) : new Uint8Array(init.body.buffer, init.body.byteOffset, init.body.byteLength);
-      if (bytes.length > 4 && isZipMagic(bytes)) {
-        isZip = true;
-      }
-      if (isZip && isFileUrlMaskable) {
-        // ── ArrayBuffer 格式的 Office 文档直传 ──
+      const isDoc = bytes.length > 4 && (isZipMagic(bytes) || isPdfMagic(bytes));
+      if (isDoc && isFileUrlMaskable) {
+        // ── ArrayBuffer 格式的 Office / PDF 直传 ──
         // 桥调用单独兜底（解析/桥异常 → r=null，即 (B) 原样放行），但 **blocking 判定必须
         // 留在 try 之外**：它是 throw，若写在 try 内会被同一个 catch 静默吞掉，引擎明确
         // 要求的阻断就落回下面的明文直发（同函数其它 blocking 点都在 catch 外）。
         let r = null;
         try {
           const b64 = arrayBufferToBase64(bytes.buffer);
-          // 传无扩展名的通用名，让引擎按 ZIP 内部结构（xl/ / word/ / ppt/）嗅探真实格式。
+          // 传无扩展名的通用名，让引擎按魔数/内部结构（%PDF- / xl/ / word/ / ppt/）嗅探真实格式。
           // 写死 'attachment.xlsx' 会让嗅探分支永不执行：docx/pptx 被按 xlsx 解析，
           // 一个条目都匹配不上 → hits=0 → 扩展判成「无敏感信息」而静默不脱敏。
-          r = await bridge.call('mask_file', { filename: 'attachment', base64: b64 });
+          r = await bridge.call('mask_file', { filename: 'attachment', base64: b64 }, HEAVY_CALL_TIMEOUT_MS);
         } catch (e) { r = null; /* 桥不可用 → (B) 原样放行 */ }
         if (r && r.blocking) throw new TypeError('Failed to fetch');   // (A) 必须阻断
         if (r && r.ok && r.base64) {
@@ -1176,15 +1297,15 @@
             sendBody = m.body;
           }
         } else if (isArrayBuf && (isUrlMaskable || isFileUrlMaskable)) {
-          let isZip = false;
+          let isDoc = false;
           const bytes = body instanceof ArrayBuffer ? new Uint8Array(body) : new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
-          if (bytes.length > 4 && isZipMagic(bytes)) {
-            isZip = true;
+          if (bytes.length > 4 && (isZipMagic(bytes) || isPdfMagic(bytes))) {
+            isDoc = true;
           }
-          if (isZip && isFileUrlMaskable) {
+          if (isDoc && isFileUrlMaskable) {
             try {
               const b64 = arrayBufferToBase64(bytes.buffer);
-              const r = await bridge.call('mask_file', { filename: 'attachment', base64: b64 });
+              const r = await bridge.call('mask_file', { filename: 'attachment', base64: b64 }, HEAVY_CALL_TIMEOUT_MS);
               if (ctx.aborted) return;
               if (r && r.blocking) {
                 failXHR(xhr);

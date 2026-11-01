@@ -192,6 +192,39 @@ class LogModeProjectionTests(unittest.TestCase):
         self.assertEqual(float(event_store._read_signals().get("trace_until") or 0.0), 0.0)
 
 
+class EngineReloadPublishesLogModeTests(unittest.TestCase):
+    """引擎热重载必须把 config 里的 log_mode 发布给 event_store。
+
+    2026-11-01 实测：`_read_settings` 漏返回该键，`_maybe_reload` 每次都把模式重置成
+    detailed —— 用户选了「最小记录」，引擎进程写的事件仍带 items[].original 原文。
+    上面的投影用例都直接调 set_log_mode，绕开了这条路径，所以当时全绿。
+    """
+
+    def setUp(self):
+        import transparent as tr
+        self.tr = tr
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        for target, name, value in ((tr, "_DATA_ROOT", self.root),
+                                    (event_store, "LOG_MODE", event_store.LOG_MODE_DETAILED)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _reload_with(self, cfg):
+        (self.root / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
+        self.tr._maybe_reload(force=True)
+        return event_store.LOG_MODE
+
+    def test_summary_survives_engine_reload(self):
+        self.assertEqual(self._reload_with({"log_mode": "summary"}), "summary")
+
+    def test_detailed_and_legacy_missing_key(self):
+        self.assertEqual(self._reload_with({"log_mode": "detailed"}), "detailed")
+        self.assertEqual(self._reload_with({}), "detailed", "缺键的老配置保持 detailed")
+
+
 class _ReverseCursorBase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

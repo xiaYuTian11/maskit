@@ -875,10 +875,15 @@ RULES = [
     (re.compile(ID_BOUND_L + r"(?:(?:\+?86|0086|[\(（]\+?86[\)）])[\s-]?)?1[3-9]\d(?:([-\s])\d{4}\1\d{4}|\d{8})" + ID_BOUND_R), "PHONE", 0),
     # 邮箱：本地部分首字符须为字母/数字/下划线/中文（排除 +- 等符号，防止 Git diff 的 +
     # 符号或列表 - 符号被当成用户名一部分吞噬）。
-    # 本地部分前不能是 :（连接串 user:pass@host 形态防误伤），亦不能紧跟在其他词法字符后。
+    # 本地部分前不能紧跟其他词法字符；不再带 : 负向断言：它本意是防
+    # user:pass@host 连接串误伤，但副作用是「邮箱:zhang@example.com」（半角冒号紧贴
+    # 地址）整段漏检，纯文本请求同样明文上行（2026-10-30 实测）。连接串误伤由
+    # CONNSTR 先行替换密码组 + exempt_conn 重叠豁免双保险；末尾另加 (?!@)：
+    # `密码@主机名@邮箱` 里第一个命中是被 @ 紧跟的“域名”，实为连接串主机名，
+    # 拒掉它才能让 finditer 继续命中后面真正的邮箱（否则豁免跳过后区间已被吞）。
     # 下划线必须留在首字符类里：它同时在负向断言集合内，两边都排除会让 `某个邮箱字面量`
     # 整段不匹配（首字符不是 `_`、从 `s` 起又被断言挡住）→ 明文漏检（2026-09 复审）。
-    (re.compile(r"(?<!:)(?<![A-Za-z0-9._\u4e00-\u9fff])[a-zA-Z0-9_\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9._%+-]{0,63}@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z\u4e00-\u9fff]{2,}(?![A-Za-z0-9._%+-])"), "EMAIL", 0),
+    (re.compile(r"(?<![A-Za-z0-9._\u4e00-\u9fff])[a-zA-Z0-9_\u4e00-\u9fff][\u4e00-\u9fffA-Za-z0-9._%+-]{0,63}@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z\u4e00-\u9fff]{2,}(?![A-Za-z0-9._%+-])(?!@)"), "EMAIL", 0),
     # 座机：3位区号(010/02x)或4位区号(03xx-09xx) + 分隔符/括号 + 7-8位本地号 + 可选分机号。
     (re.compile(
         ID_BOUND_L +
@@ -1347,6 +1352,20 @@ def _audit_mark(stats, stage):
     stats.setdefault("truncated_at", stage)
 
 
+def _audit_mark_pre_parse(stats, stage, ct, body_text):
+    """预算在到达解析段**之前**耗尽时的提前出口（统一记账）。
+
+    `parse_skipped` 必须在这里一并置位（仅当本 body 本来会走结构化解析）：
+    S2/S4 的解析段在后，提前返回等于解析被跳过；不置位的话，「超闸/超预算
+    跳过解析」的留痕口径在时间截断路径上丢失——满负载机器上 S1/S6/S9 扫描
+    超过 250ms 预算就会走到这里，实测表现为门禁里 `parse_skipped` 偶发丢失
+    （单独跑必绿、全量跑偶红，与机器负载相关，难归因）。
+    """
+    _audit_mark(stats, stage)
+    if body_text and ("json" in ct or "event-stream" in ct):
+        stats["parse_skipped"] = True
+
+
 def _audit_scan_signals(flow, status_code, ct, scan_text, scan_req_text, body_text,
                         hdrs_text, deadline, stats, body_oversize=False):
     """跑 S1/S6/S9/S2/S4/S7 扫描（A-1：每段之间检查时间预算，超限即截断留痕）。
@@ -1357,7 +1376,7 @@ def _audit_scan_signals(flow, status_code, ct, scan_text, scan_req_text, body_te
     findings = []
 
     if time.perf_counter() >= deadline:
-        _audit_mark(stats, "before_scan")
+        _audit_mark_pre_parse(stats, "before_scan", ct, body_text)
         return findings
 
     # S1 error_leak（被动+主动）
@@ -1368,7 +1387,7 @@ def _audit_scan_signals(flow, status_code, ct, scan_text, scan_req_text, body_te
         findings.extend(_audit.scan_error_leak(status_code, scan_text, hdrs_text))
 
     if time.perf_counter() >= deadline:
-        _audit_mark(stats, "after_s1")
+        _audit_mark_pre_parse(stats, "after_s1", ct, body_text)
         return findings
 
     # S6 response_poison（被动+主动，200/4xx 都扫）
@@ -1382,7 +1401,7 @@ def _audit_scan_signals(flow, status_code, ct, scan_text, scan_req_text, body_te
         findings.extend(_audit.scan_dangerous_action(scan_text, scan_req_text))
 
     if time.perf_counter() >= deadline:
-        _audit_mark(stats, "after_scan")
+        _audit_mark_pre_parse(stats, "after_scan", ct, body_text)
         return findings
 
     # S2 identity_swap + S4 sse_anomaly：需解析 body
@@ -1494,6 +1513,10 @@ CMD_BLOCK_NOTICE = "echo '[Maskit] 已阻止高危删除命令，本条为占位
 CMD_HOLD_MAX = 64
 # AI 实体识别开关（默认关闭，需用户显式开启，避免概率模型干扰确定性规则）
 NER_ENABLED = False
+# 图片 OCR 脱敏（多模态，默认关闭，需用户显式开启 + 本机 OCR 服务就绪）。
+# 开与关的差别只在“媒体 data URL 要不要脱敏”这一处（_mask_tree 的叶子）；
+# 关着时整条路径零开销，行为与 v0.13.0 完全一致（图片整块豁免）。
+VISION_OCR_ENABLED = False
 # 严格模式（§B3，默认关闭）：开启后要求「本次语义检测必须完整成功」，命中降级类原因
 # 码即在**出网前**阻断（503）。老配置保持 best-effort 行为；开启后不会自动取消，
 # 只能由用户显式关掉开关（不允许回滚把它静默降级）。
@@ -2469,14 +2492,23 @@ _SYNC_LOCK = threading.Lock()
 
 # 跨请求占位符复用表（仅内存，TTL = session_ttl，带条数上限）。
 # 解决两个真实问题：
-# 1) 多轮对话里同一实体每轮拿到不同占位符，模型会当成不同的人；
-# 2) 上一轮响应里没还原干净的占位符留在客户端历史里，下一轮请求带上来时无从还原，
-#    会话被污染且永远不会自愈。复用表让历史占位符仍能查到原文（见 _lookup / _seed_known）。
+#   1) 多轮对话里同一实体每轮拿到不同占位符，模型会当成不同的人；
+#   2) 上一轮响应里没还原干净的占位符留在客户端历史里，下一轮请求带上来时无从还原，
+#      会话被污染且永远不会自愈。复用表让历史占位符仍能查到原文（见 _lookup / _seed_known）。
 # 代价：原文在内存中的保留窗口从"单请求"延长到 session_ttl，且同一原文在 TTL 内
 # 对上游呈现同一占位符（可被关联）。TTL 到期即失效，不落盘。
 _RECENT_FWD = {}   # orig -> [token, label, ts]
 _RECENT_REV = {}   # token -> [orig, label, ts]
-_RECENT_MAX = 2000
+# 容量（2026-11-02 由 2000 提升）：重度用户实测「一天几千次请求」，每次携带几十个
+# 实体——2000 条几小时就洗一遍，早前对话的映射被挤出后：① 模型在思考块里回显旧
+# token 时还原不了（页面上就是「偶尔还原不了」的直接形态）；② 同一原文重签新
+# token，同一实体在上下文里出现两个身份，模型当成两个人。
+# 提升到 8000 的代价核算：每条约 700B（fwd+rev+后缀索引），峰值 ~5.6MB 内存；
+# `_prune_recent` 全表扫 2000 条实测 154µs、8000 条约 0.6ms，且已被 1s 节流窗口
+# 限频；后缀空间 19^6≈4700 万，8000 条活跃时新 token 撞车率 ~1.7e-4（撞车也有
+# `_SUFFIX_AMBIGUOUS` 拒答兑底，不会错值）。安全边界不变：仍受 TTL 与 LRU 双重
+# 淘汰，凭据类仍不落盘不预热。
+_RECENT_MAX = 8000
 
 # ===================== 已知值正向打码（known）=====================
 #
@@ -2691,6 +2723,9 @@ _DEFORMABLE_RX = re.compile(
     "\U000107a5"                            # 𐞥（NFKC → q，孤立一例）
     "\U0001f100-\U0001f1ff"                # 带圈/括注字母数字（🅐 ⓿ 等）
     "\U0001fb00-\U0001fbff"                # 遗留计算符号（🬀 段）
+    # Unicode 16 新增描边 ASCII 字母数字（NFKC → A-Z/0-9）；写显式范围，兼容
+    # Unicode 数据库尚未升级到 16 的 Python 3.13，避免 3.14 上出现预检漏扫。
+    "\U0001ccd6-\U0001ccf9"
     "]"
 )
 # 归一化开关：默认开。`0` = 回到「只在原文上扫」（历史行为）。
@@ -5032,7 +5067,8 @@ def _sync_custom_word_mappings_inner():
     #    活跃 token），不能只避让自定义词自己的后缀：否则新词一旦撞上某个活跃 token 的
     #    后缀（标签相同时 = 完整 token 相同），下面 `_RECENT_REV[tok] = ...` 会把那个
     #    token 静默改指向新词——换会话 / 会话过期后 restore 会把 A 的原文填到 B 的位置上。
-    #    后缀空间 19^6≈4700 万、活跃至多 2000 条，实测约 4.3e-5/词，撞上即静默错值。
+    #    后缀空间 19^6≈4700 万、活跃至多 8000 条（_RECENT_MAX，2026-11-02 由 2000 提升），
+#    实测约 1.7e-4/词，撞上即静默错值。
     with _STATE_LOCK:
         prev_fwd = dict(_CUSTOM_WORD_FWD)                              # word -> token
         prev_labels = {tok: rec[1] for tok, rec in _CUSTOM_WORD_REV.items()}
@@ -7412,31 +7448,8 @@ def _count_unresolved(sid, n=1):
 
 # 未还原占位符的样本留存上限。只留形态（token 本身是占位符，不含任何原文），
 # 落库安全；上限压到 5 是为了不让长响应把 payload 撑大。
+# （实现统一走 `_record_sample_into`，定义在下方 `_record_foreign_sample` 附近。）
 _UNRESOLVED_SAMPLES_MAX = 5
-
-
-def _record_unresolved_sample(s, tok):
-    """留存几个「查不到原文」的占位符样本，供事件详情弹窗定位。
-
-    为什么必须留：`unresolved` 原先只有一个计数，用户看到「未还原 7」却无从知道
-    是哪些 token、什么形态。而这两种情况的处置完全不同，光看计数分不出来：
-
-    - 形态正常（`{{EMAIL_abcdfg}}`）→ 引擎表里真的没有它：引擎重启后
-      **凭据类永远不会被 `_warmup_recent_from_db` 预热**（库里只有 digest+preview，
-      红线 4），或是复用表 TTL 过期 / 会话被 sweep 掉；
-    - 形态被改写（`{{ email_abcdfg }}`、小写标签、剥掉花括号）→ 模型在动输出格式，
-      是「哪天彻底还原不回来」的前兆。
-
-    只做诊断，不参与任何还原决策，异常一律吞掉。
-    """
-    try:
-        lst = s.get("unresolved_samples")
-        if not isinstance(lst, list):
-            lst = s["unresolved_samples"] = []
-        if len(lst) < _UNRESOLVED_SAMPLES_MAX and tok not in lst:
-            lst.append(tok)
-    except Exception:
-        pass
 
 
 # 「回显但未还原」的后缀集合上限。
@@ -8126,6 +8139,103 @@ def _take_media_skips(sid):
     return int(s.pop("media_skipped", 0) or 0)
 
 
+# ---------------------------------------------------------------------------
+# 图片 OCR 脱敏（多模态）：媒体 data URL 的像素级脱敏
+# ---------------------------------------------------------------------------
+
+# 单请求总预算（秒）。为什么是 10s：一张截图的本地 OCR 约 0.5~1.5s，10s 足够盖住
+# 一次请求里 5~8 张图；超出就阻断，因为“剩下的图没扫过就上行”比失败更糟。
+_VISION_BUDGET_S = 25.0
+# 预算放 thread-local 而不是会话：会话是**跨请求**的长生命周期对象，写进去会让
+# 下一个请求继承一个快过期的 deadline（表现为“什么都没干就超预算”）。
+_VISION_TLS = threading.local()
+_VISION_SHIM = None
+
+
+class _VisionBlocked(Exception):
+    """图片未能完成本机扫描（OCR 未就绪 / 超时 / 输出截断 / 太大 / 格式不支持）。
+
+    抛出即走既有的 fail-closed 通道：代理链路回 503 `mask_pipeline_failed`
+    （`msg` 带上具体原因），扩展链路回 503 + `blocking`。
+    绝不允许“扫不了就把原图放行”——那是本功能唯一不能让步的一条。
+    """
+
+    def __init__(self, reason):
+        self.reason = str(reason or "vision_error")
+        super().__init__("vision:" + self.reason)
+
+
+class _VisionMaskerShim:
+    """`visual_redactor` 只需要一个 `mask_body(text, sid)`，不必拿到整个模块对象。"""
+
+    @staticmethod
+    def mask_body(text, sid):
+        return mask_body(text, sid)
+
+
+def _vision_mask_media(value, sid):
+    """媒体 data URL 里的图片 → 本机 OCR + 物理打码。
+
+    返回 `(新值, 状态)`，状态只有三种：
+      - `"masked"`：已打码，调用方用新值替换叶子并回写请求体；
+      - `"clean"`：扫过了但没敏感信息，调用方**保持原值**（且不应计“豁免”）；
+      - `"not_applicable"`：不是本能力管的载体（音视频/Office/PDF/percent-encoded），
+        调用方继续走原有豁免逻辑。
+
+    **扫描失败抛 `_VisionBlocked`**（fail-closed）——绝不返回“保持原值”，
+    否则调用方会把没扫过的图当成已处理。
+    """
+    global _VISION_SHIM
+    try:
+        import visual_redactor as vr
+    except Exception:
+        raise _VisionBlocked("visual_redactor_unavailable")
+    if _VISION_SHIM is None:
+        _VISION_SHIM = _VisionMaskerShim()
+    deadline = getattr(_VISION_TLS, "deadline", None)
+    if deadline is None:
+        deadline = time.monotonic() + _VISION_BUDGET_S
+    vstats = {}
+    try:
+        out, hits, status = vr.mask_data_url(value, sid, _VISION_SHIM, deadline=deadline,
+                                             stats_out=vstats)
+    except _VisionBlocked:
+        raise
+    except Exception:
+        raise _VisionBlocked("vision_error")
+    if status == vr.ST_MASKED:
+        _note_vision_mask(sid, hits, vstats.get("verified", 0), vstats.get("line_fallback", 0))
+        return out, "masked"
+    if status == vr.ST_CLEAN:
+        return value, "clean"
+    if status == vr.ST_NOT_APPLICABLE:
+        return value, "not_applicable"
+    raise _VisionBlocked(status)
+
+
+def _note_vision_mask(sid, hits=1, verified=0, line_fallback=0):
+    """记一次「图片像素已被打码」（本轮计数）。
+
+    它既不是豁免（图确实被扫了）也不是占位符命中，所以单独计，并在 MASK 事件里
+    以 `vision_masked` 暴露——否则用户在统计里看到 hits=0，会以为这张图没被处理。
+    """
+    s = _session_get(sid)
+    if isinstance(s, dict):
+        s["vision_masked"] = int(s.get("vision_masked") or 0) + max(1, int(hits or 1))
+        s["vision_verified"] = int(s.get("vision_verified") or 0) + max(0, int(verified or 0))
+        s["vision_lines_masked"] = int(s.get("vision_lines_masked") or 0) + max(0, int(line_fallback or 0))
+
+
+def _take_vision_masks(sid):
+    """取走本轮图片打码计数（含自校验/退整行），返回 `(masked, verified, lines)`。"""
+    s = _session_get(sid) if sid else None
+    if not isinstance(s, dict):
+        return 0, 0, 0
+    return (int(s.pop("vision_masked", 0) or 0),
+            int(s.pop("vision_verified", 0) or 0),
+            int(s.pop("vision_lines_masked", 0) or 0))
+
+
 def _note_definition_skip(sid):
     """记一次「定义区字符串未扫描」（本轮计数）。
 
@@ -8293,12 +8403,30 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None, rol
     control = getattr(_MASK_WORK_CONTEXT, "control", None)
     if control is not None:
         _check_mask_work(*control)
+    if depth == 0 and VISION_OCR_ENABLED:
+        # 每次请求的图片预算从这里开始算（thread-local）：顶层调用恰好一次/请求，
+        # 而递归子层不能重置它（否则一张图就把预算刷新一次，等于无预算）。
+        _VISION_TLS.deadline = time.monotonic() + _VISION_BUDGET_S
     if depth > _MASK_MAX_DEPTH:
         raise ValueError("json_depth_exceeded: 请求嵌套超过脱敏递归上限，拒绝透传")
     _scope = _scope_of_path(path)
     in_business = _scope == "business"
     in_definition = _scope == "definition"
     if isinstance(obj, str):
+        # 图片 OCR 脱敏（默认关）：必须排在 `_leaf_exempt` **之前**。
+        # 因为嵌套形态 `{"image_url": {"url": "data:image/..."}}` 的叶子键是 `url`，
+        # 会被“协议位置”豁免直接放行，根本走不到下面的媒体豁免分支——
+        # 而 OpenAI / Anthropic 发的图片恰好全是这种嵌套形态，排错位置等于没做。
+        if VISION_OCR_ENABLED and _is_binary_data_url(obj) and (
+                key in _MASK_MEDIA_VALUE_KEYS or parent in _MASK_MEDIA_PARENTS):
+            _vision_value, _vision_status = _vision_mask_media(obj, sid)
+            if _vision_status == "masked":
+                if flag is not None:
+                    flag[0] = True      # 树变了，必须让调用方回写请求体
+                return _vision_value
+            if _vision_status == "clean":
+                return obj              # 扫过了、干净：零触碰，也不计豁免
+            # not_applicable → 落到下面的既有豁免逻辑（计数 + 原样返回）
         # 定义区里只有自然语言该扫（`_DEFINITION_TEXT_KEYS`），其余原样上行：
         # 工具名 / namespace / pattern / enum / required / properties 键名 / grammar
         # 改写任何一处都只会让上游拒请求，保护价值为零。
@@ -8313,6 +8441,8 @@ def _mask_tree(obj, sid, key=None, parent=None, path=(), depth=0, flag=None, rol
             return obj
         # 媒体/内联二进制豁免（2026-10-29）：必须在 `_mask_hit` 之前，否则整段
         # base64 会被规则与自定义词扫到、改坏后上游解码失败（详见函数 docstring）。
+        # 图片（二进制 data URL）已在上面被 OCR 脱敏分支拦截过，这里只剩媒体的
+        # http(s) 地址与音视频/PDF 这类非本能力载体。
         _media_kind = _media_value_exempt(key, obj)
         if _media_kind:
             _note_media_skip(sid, _media_kind)
@@ -11095,6 +11225,7 @@ async def _request_impl(flow: http.HTTPFlow):
         pass
     _s_signed = _take_signed_skips(sid)
     _media_skipped = _take_media_skips(sid)
+    _vision_masked, _vision_verified, _vision_lines = _take_vision_masks(sid)
     # 严格模式闸门（§B3）必须在**请求出网前**生效：此时脱敏已完成（命中/占位符已定），
     # 只差回写与放行。判据用 inspection 的类别表：exempt（签名块按契约不扫）与 info
     # （取消/直通）不阻断，只有「检测没跑完」类降级才阻断。
@@ -11181,6 +11312,12 @@ async def _request_impl(flow: http.HTTPFlow):
         **({"signed_blocks_skipped": _s_signed} if _s_signed else {}),
         # 媒体/内联二进制整块豁免计数（本轮）：同上，静默豁免不可接受。
         **({"media_skipped": _media_skipped} if _media_skipped else {}),
+        # 图片像素已被打码的张数（本轮）：它不是占位符命中，但同样是“真的改过内容”，
+        # 不暴露的话用户在统计里看到 hits=0，会以为这张图没被处理。
+        **({"vision_masked": _vision_masked} if _vision_masked else {}),
+        # 自校验通过数应等于打码数；不等 = 定位退回了整行（用户能在日志里看到）
+        **({"vision_verified": _vision_verified} if _vision_masked else {}),
+        **({"vision_lines_masked": _vision_lines} if _vision_lines else {}),
         # 统一检测口径（§B1）：处置结论 + 完整度 + 原因码，与扩展桥接同源。
         **inspection.report_for_mask(changed=bool(hit_count), ner_skips=ner_skips,
                                      signed_skipped=_s_signed,
@@ -13403,6 +13540,11 @@ def _read_settings():
         "fail_closed": bool(cfg.get("fail_closed", True)),
         # 敏感词统计是否记录明文（默认开——打码 preview 排出来的榜没有信息量）
         "record_plaintext_words": bool(cfg.get("record_plaintext_words", True)),
+        # 日志写入模式（summary/detailed）。曾漏返回该键：_maybe_reload 里
+        # `set_log_mode(None)` 每次热重载都把模式重置成 detailed，用户选了「最小记录」
+        # 引擎写的事件仍带 items[].original 原文（2026-11-01 实测，v0.8.0 起即如此）。
+        # 缺键的老配置与面板 `_normalize_log_mode(present=False)` 同口径：保持 detailed。
+        "log_mode": cfg.get("log_mode") if "log_mode" in cfg else "detailed",
         "response_scan": bool(cfg.get("response_scan", True)),
         "stream_response": bool(cfg.get("stream_response", True)),
         # 缺该键 = 老配置（该特性之前的版本）→ 上层回落默认黑名单；
@@ -13435,6 +13577,16 @@ def _read_settings():
             if audit_cfg.get("time_budget_ms") is not None else _ENV_AUDIT_TIME_BUDGET,
             AUDIT_TIME_BUDGET_S, 0.01, 5.0),
         "ner_enabled": bool(cfg.get("ner_enabled", False)),
+        # 图片 OCR 脱敏（多模态）：代理链路与扩展链路共用**一个**开关。
+        # `ext_multimodal_vision` 是 2026-10-31 改名前的键，保留读取以免老配置失效。
+        "multimodal_vision": bool(cfg.get("multimodal_vision",
+                                         cfg.get("ext_multimodal_vision", False))),
+        # 本机 OCR 端点（空 = 内置默认）。环境变量 MASKIT_OCR_ENDPOINT 优先，
+        # 环回校验在 visual_redactor.ocr_endpoint 里（唯一的判据）
+        "ocr_endpoint": str(cfg.get("ocr_endpoint") or "").strip(),
+        # 是否允许非环回 OCR 端点（默认关；发给 OCR 的是未脱敏原图）
+        "ocr_allow_remote": bool(cfg.get("ocr_allow_remote", False)),
+        "ocr_engine": str(cfg.get("ocr_engine") or "auto").strip().lower(),
         # 单请求语义识别预算上限（秒）。默认 10s（见 `_NER_REQ_BUDGET_MAX_DEFAULT_S`
         # 的注释）；环境变量 MASKIT_NER_REQ_BUDGET_S 存在时硬覆盖，配置不生效。
         # 必须在这里读取、在 `_maybe_reload` 里发布：只写成模块常量的话，面板改了
@@ -13543,6 +13695,18 @@ def _maybe_reload(force=False):
     COMMAND_BLOCK = s.get("command_block") or _parse_command_block(None)
     global NER_ENABLED
     NER_ENABLED = bool(s.get("ner_enabled", False))
+    global VISION_OCR_ENABLED
+    VISION_OCR_ENABLED = bool(s.get("multimodal_vision", False))
+    # 端点下发给 visual_redactor（它自己不读盘）。只在能力开着时注入：
+    # 关着时连这个模块都不必加载，免得给每个请求多背一次 import。
+    if VISION_OCR_ENABLED:
+        try:
+            import visual_redactor
+            visual_redactor.configure(ocr_endpoint=s.get("ocr_endpoint"),
+                                      allow_remote=s.get("ocr_allow_remote", False),
+                                      engine=s.get("ocr_engine"))
+        except Exception:
+            pass
     global NER_REQUIRE_COMPLETE
     NER_REQUIRE_COMPLETE = bool(s.get("ner_require_complete", False))
     # P0-a：预算上限随配置热重载（内部已处理优先级与环境变量硬覆盖）

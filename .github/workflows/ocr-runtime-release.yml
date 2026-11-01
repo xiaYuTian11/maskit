@@ -1,0 +1,157 @@
+name: OCR Runtime Release
+
+# 「OCR 组件」发布流水线（可选运行时，见 scripts/build-ocr-runtime.py 与 SECURITY.md）。
+#
+# 产物：固定 tag `ocr-runtime` 下的 Pre-release，包含
+#   - MaskitOCR-<ver>-<platform>.zip × 4 平台（win-x64 / linux-x64 / linux-arm64 / macos-arm64，均 py313）
+#   - latest-ocr.json（多平台清单：客户端 MASKIT_OCR_MANIFEST_URL 指向它）
+#
+# 【为什么固定 tag + 恒为 Pre-release（不可改的安全属性）】
+# 桌面更新器端点是 releases/latest/download/latest.json。GitHub 的 `releases/latest`
+# 只指向最新的**正式** Release——若本流水线产出正式 Release，它会抢占 latest，
+# 里面没有 latest.json，全体已装客户端的更新检查立刻 404。因此：
+#   1. 产出的 Release 恒标 --prerelease（下方命令硬编码，无正式版分支）；
+#   2. 不生成/上传任何名为 latest.json 的资产（清单文件名是 latest-ocr.json，正交）。
+# 与 scripts/check-workflows.py 的预发布口径（tag 含 `-` 即预发布）同向保守：
+# ocr-runtime 不携带语义版本，它只是「组件当前版」的固定下载位。
+#
+# 触发：手动（workflow_dispatch，填版本号）或推 `ocr-v*` tag（版本号取自 tag）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OCR 组件版本号（如 1.0.0）'
+        required: true
+  push:
+    tags:
+      - 'ocr-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ocr-runtime-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.key }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与桌面端构建矩阵一致（release.yml 的四平台）；引擎全平台 py313，
+        # 组件包必须同口径，否则客户端 platform_key() 匹配不上 → platform_unsupported。
+        include:
+          - { key: win-x64, os: windows-latest }
+          - { key: linux-x64, os: ubuntu-22.04 }
+          - { key: linux-arm64, os: ubuntu-24.04-arm }
+          - { key: macos-arm64, os: macos-latest }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+
+      - name: Install OCR dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-ocr.txt
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#ocr-v}"
+          fi
+          # 版本号进文件名与清单，只放行 x.y.z 形态（含 -beta.n 后缀），防注入
+          if ! echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "非法版本号: $VER"; exit 1
+          fi
+          echo "OCR_VERSION=$VER" >> "$GITHUB_ENV"
+
+      - name: Build runtime package
+        shell: bash
+        run: |
+          python scripts/build-ocr-runtime.py \
+            --version "$OCR_VERSION" \
+            --url-prefix "https://github.com/xiaYuTian11/maskit/releases/download/ocr-runtime"
+
+      - name: Show platform key
+        shell: bash
+        run: ls dist_ocr/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ocr-runtime-${{ matrix.key }}
+          path: dist_ocr/
+          retention-days: 7
+
+  publish:
+    name: publish (pre-release, fixed tag)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist_ocr_all
+          pattern: ocr-runtime-*
+          merge-multiple: true
+
+      - name: Merge platform manifests
+        shell: bash
+        run: |
+          python scripts/build-ocr-runtime.py --merge dist_ocr_all/*.json --out-manifest latest-ocr.json
+          cat latest-ocr.json
+
+      - name: Verify merged manifest
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#ocr-v}"
+          fi
+          echo "OCR_VERSION=$VER" >> "$GITHUB_ENV"
+          python - "$VER" <<'EOF'
+          import json, sys
+          want_ver = sys.argv[1]
+          man = json.load(open("latest-ocr.json", encoding="utf-8"))
+          assert man["version"] == want_ver, "清单版本 %s != 期望 %s" % (man["version"], want_ver)
+          keys = set(man["packages"])
+          need = {"win-x64-py313", "linux-x64-py313", "linux-arm64-py313", "macos-arm64-py313"}
+          assert need <= keys, "缺平台: %s" % (need - keys)
+          for k, pkg in man["packages"].items():
+              assert pkg["url"].startswith("https://github.com/xiaYuTian11/maskit/releases/download/ocr-runtime/"), k
+              assert len(pkg["sha256"]) == 64, k
+          print("manifest OK: %s (%d platforms)" % (want_ver, len(keys)))
+          EOF
+          # 产物完整性：每个平台一个 zip，与清单一一对应
+          N_ZIP=$(ls dist_ocr_all/*.zip | wc -l)
+          [ "$N_ZIP" = "4" ] || { echo "zip 数量异常: $N_ZIP"; exit 1; }
+
+      - name: Publish fixed-tag pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="$OCR_VERSION"
+          # 固定 tag 重发：删旧 Release 与 tag（客户端只认文件内容 + sha256，不认 tag 历史）
+          gh release delete ocr-runtime --yes --cleanup-tag 2>/dev/null || true
+          # 恒为 Pre-release：绝不能抢占 releases/latest（那是桌面更新器的端点）
+          gh release create ocr-runtime \
+            dist_ocr_all/*.zip latest-ocr.json \
+            --title "OCR Runtime $VER" \
+            --notes "OCR 组件 v$VER（多平台运行时包 + latest-ocr.json 清单）。Pre-release：此 Release 永远不参与 releases/latest，桌面更新不受影响。" \
+            --prerelease

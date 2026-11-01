@@ -1,7 +1,9 @@
 # 开发/打包用依赖（运行时镜像不装）
 -r requirements.txt
 pyinstaller>=6.10,<7
-pillow>=10.4,<11   # scripts/gen-icons.py
+# pillow 已由 requirements.txt 提供（图片多模态脱敏的**运行期**依赖）。
+# 这里不再重复钉版本：两处各钉一次，迟早一处升级、一处没跟，
+# 而症状是「打包机能出图标、运行时报 pillow_missing」这种最难查的漂移。
 pyyaml>=6,<7       # scripts/check-workflows.py
 # 本地 NER 引擎（engine/ner_engine.py）依赖：PyInstaller 打进 sidecar 需要它们
 # 在构建机可导入，本地跑 NER 单测同理。CPU 版即可（模型在本机推理，零外传）。

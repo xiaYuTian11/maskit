@@ -169,6 +169,20 @@ class EngineSpecCoverageTests(unittest.TestCase):
         self.assertRegex(src, r"hiddenimports[\s\S]{0,800}?'selfcheck'",
                          "hiddenimports 里没有 'selfcheck'（0.6.0 新增模块漏登记过）")
 
+    def test_visual_redactor_is_explicitly_listed(self):
+        """`visual_redactor` 必须显式在 hiddenimports 里（图片多模态脱敏）。
+
+        与 `selfcheck` 同一个风险面：panel 在函数内懒加载、且调用点包在 try 里，
+        打包态缺了它不会崩，只会表现成「开关开了但图片一律阻断
+        （`visual_redactor_unavailable`）」—— 用户看到的是一场功能失灵，
+        而本地门禁与源码态完全正常。
+        """
+        src = self._spec_source()
+        head, _, rest = src.partition("hiddenimports =")
+        block = rest.split("\n# PyInstaller expects")[0]
+        self.assertIn("'visual_redactor'", block,
+                      "hiddenimports 里没有 'visual_redactor'（图片脱敏打包后会整条失效）")
+
 
 if __name__ == "__main__":
     unittest.main()

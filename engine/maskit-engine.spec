@@ -51,6 +51,18 @@ hiddenimports = (
         # 而不是报错（分析器的运气不能当保证）。tests/test_engine_packaging.py 锁这条。
         'selfcheck',
         'body_buffer',
+        # 图片多模态脱敏：panel 在函数内懒加载 `import visual_redactor`，
+        # 缺它时表现是「开关开了但图片一律阻断」（pillow_missing/unavailable），
+        # 而不是崩——和 selfcheck 同一类“分析器运气”问题，所以显式列出。
+        # Pillow 本身由这个模块的顶层 import 带进包（excludes 里没有 PIL）。
+        'visual_redactor',
+        # PDF 载体脱敏：同上（懒加载 + 缺它时表现是 pdf_dependency_missing）。
+        'pdf_redactor',
+        # 本地 OCR 引擎与实体定位：panel/visual_redactor 懒加载，显式枚举防分析器漏
+        'ocr_engine',
+        'locator',
+        # 可选 OCR 组件的下载/校验/自检/回滚（panel 的 /api/ocr/runtime/*）
+        'ocr_runtime',
         # C1 上游传输接管：transparent.py 在模块级 import upstream_retry，又在
         # `_c1_ensure_started()` 里懒加载 upstream_sidecar。两者原先都不在 spec 里
         # （全靠分析器捞），datas 也缺——打包态一旦捞不到，症状是「takeover 开了却
@@ -130,6 +142,19 @@ datas = (
        , (str(ENGINE_DIR / 'audit_signals.py'), '.')
        , (str(ENGINE_DIR / 'audit_engine.py'), '.')
        , (str(ENGINE_DIR / 'ner_engine.py'), '.')
+       # 图片 OCR 脱敏：`transparent.py` 在 `_mask_tree` 的叶子处理里懒加载它，
+       # 而 transparent 是被 mitmdump 当**脚本**加载的（靠 PYTHONPATH 指向
+       # `_BUNDLE_ROOT` 找同级明文文件），打进 PYZ 它够不着。
+       # `tests/test_engine_packaging.py::test_transparent_import_closure_is_shipped_as_source`
+       # 钉住这条：漏了就是「打包态图片不脱敏，而源码态完全正常」。
+       , (str(ENGINE_DIR / 'visual_redactor.py'), '.')
+       # 图片脱敏的定位与本地 OCR 引擎：同样是 transparent 的导入闭包成员
+       # （visual_redactor 顶层 import locator，函数内懒加载 ocr_engine），
+       # mitmdump 以脚本方式加载时只能从同级明文文件解析到它们。
+       , (str(ENGINE_DIR / 'locator.py'), '.')
+       , (str(ENGINE_DIR / 'ocr_engine.py'), '.')
+       # 可选 OCR 组件的下载/校验/自检（ocr_engine 懒加载它注入 sys.path）
+       , (str(ENGINE_DIR / 'ocr_runtime.py'), '.')
        , (str(ENGINE_DIR / 'config.example.json'), '.')]
     # 本地 NER 模型（可选）：只在构建机确实有模型时才随包分发。
     # 该目录被 .gitignore 排除（98MB 二进制不入库），CI/干净克隆上根本不存在——

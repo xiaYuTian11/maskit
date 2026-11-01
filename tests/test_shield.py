@@ -161,6 +161,26 @@ class ShieldEngineTests(unittest.TestCase):
         masked2 = tr.mask("邮箱 li.si@company.com.cn", sid2)
         self.assertNotIn("li.si@company.com.cn", masked2)
 
+    def test_email_after_halfwidth_colon_is_masked(self):
+        """EMAIL 半角冒号回归（2026-10-30 实测漏检）：
+        曾用 `(?<!:)` 防连接串误伤，副作用是「邮箱:zhang@x.com」（冒号紧贴地址、
+        无空格）整段不匹配 —— 纯文本请求同样明文上行。连接串误伤已由 CONNSTR
+        先行替换 + exempt_conn 重叠豁免双保险，不再需要 EMAIL 侧挡冒号。
+        """
+        cases = [
+            "邮箱:zhang.san@example.com",
+            "email:user42@corp.com.cn",
+            "Email:user_1@sub.domain.org",
+            "联系邮箱:zhangsan@test.com",
+        ]
+        for idx, text in enumerate(cases):
+            sid = f"email-colon-{idx}"
+            tr._new_session(sid)
+            masked = tr.mask(text, sid)
+            self.assertIn("{{EMAIL_", masked, f"[{idx}] 冒号后紧贴的邮箱必须脱敏：{masked}")
+            self.assertEqual(tr.restore(masked, sid, final=True), text,
+                             f"[{idx}] 还原必须一致")
+
     def test_email_rule_does_not_match_short_local(self):
         """本地部分最小 2 字符：x@y.z 伪邮箱不误伤。"""
         sid = "email-short"
@@ -2493,6 +2513,22 @@ class ShieldEngineTests(unittest.TestCase):
 class PanelConfigTests(unittest.TestCase):
     def test_panel_event_store_uses_panel_data_root(self):
         self.assertEqual(panel.DB_PATH, panel.DATA_ROOT / "shield-events.sqlite3")
+
+    def test_ocr_manifest_default_url_shape(self):
+        """OCR 组件默认清单地址必须是官方固定 Pre-release tag 下的 https 直链。
+
+        形态钉死（而不是只断言非空）的原因：这个地址进的是"下载并执行代码"的链路，
+        拼错主机/路径用户只能看到下载失败；同时它**绝不能**指向 `releases/latest`
+        （那是桌面更新器端点，语义完全不同）。
+        """
+        url = panel.OCR_MANIFEST_DEFAULT_URL
+        self.assertTrue(url.startswith(
+            "https://github.com/xiaYuTian11/maskit/releases/download/ocr-runtime/"), url)
+        self.assertTrue(url.endswith("/latest-ocr.json"), url)
+        # 注入语义：panel 导入后 env 必非空（用户自设或默认）；ocr_runtime 库层
+        # 只认 env，面板层负责给默认值 —— 两层职责钉在这里，防未来被搬回库层
+        # （那会破坏 ocr_runtime 单测的密封性）。
+        self.assertTrue(os.environ.get("MASKIT_OCR_MANIFEST_URL"))
 
     def test_normalize_config_filters_unsafe_values(self):
         cfg = panel.normalize_config({

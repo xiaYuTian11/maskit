@@ -38,8 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /data && chown maskit:maskit /data
 
 # 安装 Python 核心依赖
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-ocr.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-ocr.txt
 
 # 拷贝核心引擎文件（.dockerignore 已排除本机事件库 / token / 配置备份）
 COPY engine/ ./
