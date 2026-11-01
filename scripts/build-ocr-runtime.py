@@ -38,6 +38,16 @@ import json
 import platform
 import shutil
 import sys
+
+# Windows 控制台默认 cp1252（charmap）：脚本里的中文提示/报错（如「没有可合并的片段」
+# 和末尾的构建说明）在 CI 的 Windows runner 上直接 UnicodeEncodeError 把构建搞挂
+# （2026-11-01 实测 win-x64 job，zip 已打好、死在最后一行 print）。统一改 UTF-8，
+# 编不了的字符降级为替换符 —— 构建日志不能因为打印挂掉。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import sysconfig
 import zipfile
 from pathlib import Path
