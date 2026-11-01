@@ -135,10 +135,24 @@ export async function shieldFetch<T>(
     if (errCode === 'origin_rejected' && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('shield:origin_rejected'))
     }
-    // 403：引擎重启后 token 过期，自动重读一次再试（时序竞态兜底）
-    if (resp.status === 403 && !options.noToken && isTauri()) {
+    // 401/403：引擎重启后 token 过期，自动重读并重试一次（时序竞态兜底）。
+    //
+    // 2026-11-02 修：原先只判 403，但 `invalid_token` 在不同路径下可能是 401
+    // （某些反代/中间层会把 403 改写），且**更关键的是**重试前那次 `getShieldToken()`
+    // 在引擎刚重启时可能返回空串（Rust 侧旧实现要求端口先就绪），`if (fresh)`
+    // 判空就静默放弃了 —— 实测表现就是升级后 UI 全程 401、一片空白。
+    // 现在：空串也再试一次（最多等一小会儿），且 401 与 403 同口径处理。
+    const tokenStale = resp.status === 401 || resp.status === 403
+    if (tokenStale && !options.noToken && isTauri()) {
       try {
-        const fresh = await getShieldToken()
+        let fresh = await getShieldToken()
+        if (!fresh) {
+          // 引擎刚起来、token 文件还没落盘：等一小会儿再读一次。
+          // 不做无限重试——这里只是把「一次空读」变成「两次带间隔的读」，
+          // 避免把偶发时序问题放大成请求挂死。
+          await new Promise((r) => setTimeout(r, 400))
+          fresh = await getShieldToken()
+        }
         if (fresh) {
           useAuthStore.getState().setToken(fresh)
           headers['X-Shield-Token'] = fresh
@@ -152,8 +166,9 @@ export async function shieldFetch<T>(
           const retryBody = await retry.text().catch(() => '')
           throw new ShieldApiError(retry.status, retryBody, undefined, errCode)
         }
-      } catch {
-        // 重读失败走原错误
+      } catch (e) {
+        // 重读失败走原错误（但不要把 ShieldApiError 吞成通用错误）
+        if (e instanceof ShieldApiError) throw e
       }
     }
     throw new ShieldApiError(resp.status, body, undefined, errCode)

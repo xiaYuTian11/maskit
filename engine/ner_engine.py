@@ -171,6 +171,39 @@ _INIT_LOCK = threading.Lock()
 # 含汉字判定（编译一次）：整叶早返回与窗口级跳过共用，别在热路径上重复写字符比较。
 _CJK_RX = re.compile("[\u4e00-\u9fff]")
 
+# 占位符形态（与 transparent._PLACEHOLDER_RX 同口径）。
+#
+# 为什么要在这里再写一份（2026-11-02）：`ner_engine` **不能 import transparent**
+# （transparent 在导入闭包里 import 本模块，反向引用就是循环导入），所以这两份
+# 正则必须手工保持同口径。下方 `test_placeholder_rx_parity` 用例锁住它 ——
+# 两边漂移会让早退判据失效（轻则白白多推理，重则把含明文的叶子当成"已遮完"跳过）。
+#
+# 后缀与 transparent 一致：6 位 hex（旧）或 6 位纯辅音（新）。
+_PLACEHOLDER_ANY_RX = re.compile(
+    r"\{\{[A-Z0-9]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}")
+
+
+def _is_fully_placeholderized(text: str) -> bool:
+    """文本是否**已全部**由占位符 + 标点/空白组成（没有可能待识别的明文）。
+
+    这是**零风险早退**（2026-11-02 性能优化），不是近似：
+      · 判据是「把所有占位符删掉后，剩下的字符里**没有任何汉字**」。
+      · 一个汉字都不剩 → 本引擎（中文 BERT，只认 NAME/ORG/ADDR）不可能产出实体；
+        推理必然返回空，跳过与不跳过**结果逐字节相同**。
+      · 只要还剩**一个**汉字就返回 False，走正常推理 —— 宁可多算，不可漏扫。
+
+    命中场景（真机里大量存在）：客户端把上一轮已脱敏的历史原样发回时，
+    消息内容里敏感实体已经是 `{{NAME_xxx}}`，剩下的只有标签/标点/英文。
+    这些叶子每轮都跑一次 50~250ms 的推理，纯属浪费。
+    """
+    if not text:
+        return True
+    try:
+        rest = _PLACEHOLDER_ANY_RX.sub("", text)
+    except Exception:
+        return False        # 正则异常时保守：照常推理
+    return _CJK_RX.search(rest) is None
+
 # ── 代码标识符过滤（2026-10-16 真机事件库实测后加） ───────────────────────
 #
 # 现象：`JSON.parse`（label=NAME, length=10）、`FSPAGE_9105`、`TRyJbxxDshVO\``
@@ -756,13 +789,45 @@ ADDR_SUFFIXES = (
 )
 
 
+def _missing_deps():
+    """检查推理依赖是否可导入，返回缺失的模块名列表（空 = 齐备）。
+
+    为什么必须单独查（2026-11-02 真机）：`is_ner_available()` 只看**模型文件**，
+    于是「模型文件齐备但 `tokenizers`/`onnxruntime` 没装」时它返回 True，
+    而每轮推理都静默失败（日志只有一行 `初始化失败：No module named 'tokenizers'`）。
+    设置页那边因为 `available=True`，**不给任何提示**——用户看到开关是开的、
+    以为在跑，实际一个实体都没识别。这是「开了没效果且无从归因」的典型。
+
+    用 `importlib.util.find_spec` 而不是 `import`：本函数会在**状态轮询**里被调，
+    导入 onnxruntime 是百毫秒级重活（不能挂在 2.5s 一次的轮询上）。
+    find_spec 只查模块定位信息，不执行模块代码。
+    """
+    missing = []
+    for mod in ("onnxruntime", "tokenizers"):
+        try:
+            import importlib.util
+            if importlib.util.find_spec(mod) is None:
+                missing.append(mod)
+        except Exception:
+            missing.append(mod)
+    return missing
+
+
 def is_ner_available() -> bool:
-    """检查 NER 模型文件是否就绪（只看文件；依赖是否可导入由 status() 反映）。"""
-    return (
+    """检查 NER 是否**真能跑**：模型文件齐备 **且** 推理依赖可导入。
+
+    历史（2026-11-02 修）：原实现只看三个模型文件，不看依赖。后果是
+    「文件在、依赖没装」时对外报 available=True，而实际每轮推理都失败——
+    设置页因此不报任何原因，用户看到开关开着却毫无效果。
+    `status()['reason']` 的文案也据此分叉（见 panel._ner_status_payload）。
+    """
+    if not (
         (_MODEL_DIR / "model_quantized.onnx").exists()
         and (_MODEL_DIR / "tokenizer.json").exists()
         and (_MODEL_DIR / "config.json").exists()
-    )
+    ):
+        return False
+    return not _missing_deps()
 
 
 def status() -> Dict:
@@ -775,8 +840,13 @@ def status() -> Dict:
     # `governor_status()` 一致（不要一个持锁、一个不持）。
     with _SKIP_LOCK:
         skips = dict(_SKIP_STATS)
+    # 依赖缺失要在状态里单独报出（`available` 为 False 时用户需要知道
+    # 「到底是缺模型还是缺依赖」——两者的处置完全不同：一个去装组件，
+    # 一个重装客户端/装依赖）。
+    missing_deps = _missing_deps()
     return {
         "available": is_ner_available(),
+        "missing_deps": missing_deps,
         "initialized": bool(_INITIALIZED),
         "failed": bool(_INIT_FAILED),
         "last_error": _LAST_ERROR,
@@ -1073,7 +1143,12 @@ def _extract_entities_raw(text: str) -> List[Dict]:
     # 纯英文/代码/无汉字文本直接跳过：本引擎基于中文 BERT（OntoNotes 5.0），
     # 仅负责人名 (NAME)、机构 (ORG)、详细地址 (ADDR) 三类中文实体。
     # 纯英文或代码中无中文实体，反而会被 BERT subword 切碎产生误报（如将英文参数误报为人名）。
-    if _CJK_RX.search(text) is None:
+    #
+    # 这里用 `_is_fully_placeholderized` 而不是裸 `_CJK_RX.search`：后者会把
+    # 「`{{NAME_xxx}}` + 标点 + 英文」这类**已完全遮好**的历史叶子当成待扫文本，
+    # 每轮白跑一次推理（真机大量存在）。前者把占位符先删掉再判汉字 ——
+    # 语义严格等价（删掉的本来就是不需要识别的占位符），但少了一次 50~250ms 的推理。
+    if _is_fully_placeholderized(text):
         return []
 
     if _cancelled():

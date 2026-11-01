@@ -4,6 +4,30 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.14.1] - 2026-11-02
+
+### 更新摘要 / Summary
+- 修复日志页大量「凭据泄漏」误报：讲解配置示例时不再误报警告。
+- 中文姓名识别不再只看开头一段：长文档里的人物姓名现在都能识别到。
+- 修复几处影响使用的问题：引擎重启后界面空白、OCR 组件装不上、改配置时反复重连。
+- Fixed a wave of false "credential leak" warnings on the log page: configuration examples are no longer flagged.
+- Chinese name detection no longer stops partway through: names anywhere in a long document are now detected.
+- Fixed several usability issues: blank UI after an engine restart, OCR component install failing, and repeated reconnects while editing settings.
+
+### 修复
+- 修复大量「凭据泄漏」误报：讲解配置示例（如 `password=changeme`）不再被当成真凭据告警，真凭据仍会告警。
+- Fixed a wave of false "credential leak" warnings: configuration examples such as `password=changeme` are no longer flagged, while real credentials still are.
+- 中文姓名识别不再只看前 32KB：长正文里的人物姓名现在都能识别到（旧实现超过 32KB 就整段跳过）。
+- Chinese name detection no longer stops at the first 32 KB: names anywhere in a long document are now detected (previously anything past that point was skipped).
+- 语义识别开启但缺少运行依赖时，设置页会明确告知缺哪个依赖，而不是静默无效果。
+- When semantic detection is enabled but a runtime dependency is missing, the settings page now names the missing dependency instead of silently doing nothing.
+- OCR 组件的下载地址会正确传递给后台服务，不再出现“点安装却提示未配置地址”。
+- The OCR component download address is now correctly passed to the background service, so "install" no longer fails with a missing-address error.
+- 引擎重启后界面不再出现大面积的“令牌无效”空白（此前会一直用旧令牌重试）。
+- After an engine restart the UI no longer goes blank with token errors (it previously kept retrying with the stale token).
+- 改动客户端配置时不再触发连环重启：短时间内的多次改动会合并成一次。
+- Editing client settings no longer triggers a chain of restarts: multiple quick edits are merged into one.
+
 ## [0.14.0] - 2026-11-01
 
 ### 更新摘要 / Summary

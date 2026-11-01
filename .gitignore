@@ -30,6 +30,14 @@ dist/
 dist_releases/
 dist_engine/
 build_engine/
+# 打包变体目录（2026-11-02）：PyInstaller 试打包时会产出 `build_engine_clean/`、
+# `dist_engine_313/` 这类**带后缀的副本**（换 Python 版本/干净环境验证用）。
+# 只写死 `build_engine/` 会让这些变体成为未跟踪文件，`git add -A` 时
+# 一次性把几百 MB 构建产物带进仓库（实测 dist_engine 365MB）。用通配符兜住。
+dist_engine*/
+build_engine*/
+dist_ocr*/
+build_ocr*/
 dist_extension/
 dist_skill/
 build_temp/

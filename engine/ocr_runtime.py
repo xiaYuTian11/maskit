@@ -142,6 +142,77 @@ def resolve_runtime_path():
     return str(path) if path.is_dir() else None
 
 
+# 子进程探测的缓存（避免每次 `status()` 都 fork 一次）。
+# 键是「组件路径 + 解释器」，值 (ts, result)。装/卸/回滚时清空。
+_PROBE_CACHE = {}
+_PROBE_TTL_S = 30.0
+
+
+def engine_probe(force=False):
+    """在**子进程**里探一次 OCR 引擎能不能用，返回 `{"ok": bool, "why": str}`。
+
+    为什么必须开子进程（2026-11-02 真机事故）：
+    面板与引擎（mitmdump）是**两个进程**。`ocr_engine.available()` 读的是
+    **当前进程**的 `sys.path` 与已加载模块，所以：
+      · 面板能看到依赖、引擎看不到（或反之）时，同一份代码给出两个答案；
+      · 开发机全局装了 rapidocr 时，面板报 `enabled/system`，而用户的安装包
+     （没装依赖、也没装组件）实际是 `ocr_runtime_missing`。
+    用户界面上那句「已启用」就成了谎报——图片仍被整张阻断。
+
+    子进程 = 引擎的真实运行环境（同样的解释器、同样的 sys.path 拼装方式），
+    所以它的结论才是可信的。成本：一次 import（~0.5s，实测 OCR 运行时导入慢），
+    因此加 TTL 缓存，只在装/卸/回滚时主动失效。
+
+    永不抛异常：探测失败只表示「说不准」，上层据此保守处理（不当成可用）。
+    """
+    key = resolve_runtime_path() or ""
+    now = time.monotonic()
+    if not force:
+        hit = _PROBE_CACHE.get(key)
+        if hit and now - hit[0] < _PROBE_TTL_S:
+            return hit[1]
+    result = {"ok": False, "why": "probe_failed"}
+    try:
+        import subprocess
+        import sys as _sys
+        script = (
+            "import sys, json\n"
+            "p = sys.argv[1]\n"
+            "if p and p not in sys.path: sys.path.insert(0, p)\n"
+            "try:\n"
+            "    import ocr_engine\n"
+            "    ok, why = ocr_engine.available()\n"
+            "    print(json.dumps({'ok': bool(ok), 'why': str(why or '')}))\n"
+            "except Exception as e:\n"
+            "    print(json.dumps({'ok': False, 'why': type(e).__name__ + ': ' + str(e)[:120]}))\n"
+        )
+        # 引擎目录：`ocr_engine.py` 与本模块同目录（源码态即 engine/，打包态在 bundle 根）
+        eng_dir = str(Path(__file__).resolve().parent)
+        proc = subprocess.run(
+            [_sys.executable, "-c", script, key],
+            cwd=eng_dir, capture_output=True, text=True, timeout=20,
+            env={**os.environ, "PYTHONPATH": eng_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                 "PYTHONUTF8": "1"},
+        )
+        import json as _json
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                result = _json.loads(line)
+                break
+        else:
+            result = {"ok": False,
+                      "why": (proc.stderr or "no output")[-200:]}
+    except Exception as e:
+        result = {"ok": False, "why": "%s: %s" % (type(e).__name__, str(e)[:120])}
+    _PROBE_CACHE[key] = (now, result)
+    return result
+
+
+def _probe_cache_clear():
+    _PROBE_CACHE.clear()
+
+
 def _ensure_on_syspath():
     path = resolve_runtime_path()
     if path and path not in sys.path:
@@ -173,8 +244,30 @@ def status():
         if ok:
             # 服务器/Docker 里 `pip install` 预装时没有组件目录，但引擎可用：
             # 这是合法的"已启用"，不能显示成"未安装"让用户再下载一遍。
+            #
+            # ⚠️ `source` 必须如实反映**这个可用是哪里来的**（2026-11-02 修）：
+            #    · `component`：组件目录里的 site-packages 已挂进 sys.path（真装上了）；
+            #    · `system`：不是组件——是当前解释器全局装上了依赖。
+            # 这个区分不是装饰：面板与引擎跑在不同进程，**面板进程能用**不代表
+            # 引擎进程能用（反过来也一样）。发版后实测过一种坏情况：开发机全局装了
+            # rapidocr，面板 `status()` 报 `enabled/system`，而用户安装包里引擎
+            # 报 `ocr_runtime_missing` —— 同一个 UI 状态背后是两套事实。
+            # 所以下面额外把「引擎进程能不能用」探一次（子进程探测，见
+            # `engine_probe()`），两个都可用才算 `enabled`。
             info["state"] = STATE_ENABLED
             info["source"] = "component" if path else "system"
+            if not path:
+                # 无组件目录 + 本进程可用：可能是全局预装（Docker），也可能是
+                # 面板恰好能看到依赖而引擎看不到。用子进程探一次再下结论。
+                probe = engine_probe()
+                info["engine_probe"] = probe
+                if probe.get("ok") is False:
+                    # 引擎真的用不了：不要报 enabled，否则用户以为功能可用、
+                    # 实际每张图都被阻断。
+                    info["state"] = STATE_DISABLED
+                    info["source"] = "panel_only"
+                    info["error"] = "engine_process_unavailable"
+                    info["engine_reason"] = str(probe.get("why") or "")[:200]
         elif path or pointer:
             info["state"] = STATE_ERROR
             info["error"] = "component_damaged" if path else "component_missing"
@@ -364,7 +457,11 @@ def _reload_engine():
 
     首次安装（进程里从没加载过 rapidocr）时，下一次使用就会从新目录导入，立即生效。
     已加载过旧版时只能重建同一个模块的实例，版本切换要重启（见 restart_required）。
+
+    同时失效子进程探测缓存（`engine_probe`）：装/卸/回滚后「引擎能不能用」的
+    结论变了，留着旧结论会让 UI 显示上一版的状态。
     """
+    _probe_cache_clear()
     try:
         import ocr_engine
         ocr_engine.reset_for_tests()

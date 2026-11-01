@@ -120,20 +120,22 @@ class LongSessionCompletenessTests(unittest.TestCase):
             tr._known_reset_for_tests()
             sid = "long-zh"
             tr._new_session(sid)
-            # 确认前提：这段文本确实超过扫描上限（否则本用例就没在测东西）
             body = self._long_chinese_body()
             self.assertGreater(len(body), zh_names.MAX_SCAN_CHARS)
 
             with mock.patch.object(ner_engine, "is_ner_available", lambda: False):
                 tr.mask_body(body, sid)
-            # 走真实的「本轮跳过原因」通道（与 MASK 事件同一来源）
+            # 2026-11-02：启发层已改为**全文扫描**（候选位 + 证据词预筛，1.3MB 实测
+            # ~8ms），不再截断 → 长会话不再产生 `zh_names_truncated`。
+            # 本用例的核心契约是「截断若发生，不得降级」，而截断本身已经不存在，
+            # 所以断言改为：**不得出现该原因码**（出现就意味着截断又回来了）。
             skips = tr._ner_skips_of_this_round()
-            self.assertIn("zh_names_truncated", skips,
-                          "长会话必须记录截断（不静默）")
-            # 只断言「截断本身」不降级：长文本还会触发 NER 预算/超时等**真**降级，
-            # 那些照旧算 partial（本用例不越界替它们开脱）。
-            trunc_only = {k: v for k, v in skips.items() if k == "zh_names_truncated"}
-            self.assertEqual(inspection.completeness_of(trunc_only), inspection.COMPLETE,
+            self.assertNotIn("zh_names_truncated", skips,
+                             "启发层已全文扫描，不应再产生截断标记")
+            # 而一旦它真的出现（未来回退），仍必须是「可见但不降级」：
+            # 这条断言独立成立，不依赖上面的前提。
+            self.assertEqual(inspection.completeness_of({"zh_names_truncated": 1}),
+                             inspection.COMPLETE,
                              "启发层截断不得把长会话打成检测不完整")
         finally:
             for k, v in saved.items():
@@ -144,14 +146,35 @@ class LongSessionCompletenessTests(unittest.TestCase):
 
 
 class ScanCostTests(unittest.TestCase):
-    """扫描成本上限：无论文本多长，单次调用必须有界。"""
+    """扫描成本上限：无论文本多长，单次调用都必须**有界**。
 
-    def test_bounded_by_max_scan_chars(self):
-        # 姓氏密集是最坏形态（每个位置都是候选）
-        text = "王李张刘陈杨黄赵吴周" * 200_000  # 2M 字符
+    2026-11-02 变更：启发层从「逐字符循环 + 32KB 硬截断」改为「证据词预筛 +
+    姓氏候选位扫描」，成本从 O(全文) 降到 O(证据词数 × 窗口)。所以：
+      · 不再截断（长文本里的人名也能扫到）；
+      · `truncated` 恒为 False（参数保留只为兼容调用方）；
+      · 但**有界性仍必须成立** —— 本类最后一条用例锁的就是它（2M 姓氏密集文本
+        不得退化成秒级）。
+    """
+
+    def test_long_text_is_fully_scanned_not_truncated(self):
+        """姓氏密集的 2M 字符文本：必须**全文扫**且**不报截断**。
+
+        旧实现在 32KB 处停手并报 truncated；新实现扫完全文（仍须有界，见下条）。
+        """
+        text = "王李张刘陈杨黄赵吴周" * 200_000  # 2M 字符，姓氏最密集形态
         spans, truncated = zh_names.find_names(text, return_truncated=True)
-        self.assertTrue(truncated, "超长文本必须报告截断（不静默）")
+        self.assertFalse(truncated, "启发层已不再截断，不应报 truncated")
         self.assertIsInstance(spans, list)
+
+    def test_scan_cost_stays_bounded_on_dense_text(self):
+        """有界性回归锁：2M 姓氏密集文本不得退化成秒级（旧逐字符实现要 7 秒）。"""
+        import time
+        text = "王李张刘陈杨黄赵吴周" * 200_000
+        t0 = time.perf_counter()
+        zh_names.find_names(text)
+        cost = time.perf_counter() - t0
+        self.assertLess(cost, 3.0,
+                        "启发层扫描退化为线性逐字符（2M 字符耗时 %.2fs）" % cost)
 
     def test_no_truncation_flag_for_short_text(self):
         sample = "客户" + "{{NAME_" + "xkjnzw" + "}}" + "反馈登录失败。"
@@ -177,11 +200,22 @@ class ScanCostTests(unittest.TestCase):
         self.assertFalse(truncated, "无汉字的超长文本不得报截断")
 
     def test_truncation_flag_with_chinese(self):
-        """超长**有汉字**的文本必须报截断（否则「不静默」的承诺失效）。"""
+        """超长**有汉字**的文本：现在必须**全文扫到人名**（旧实现在 32KB 处停手）。
+
+        这条用例从「必须报截断」改为「必须扫到尾部人名」—— 因为 32KB 截断本身
+        就是漏检（真机长会话里 `客户某某某` 常出现在正文深处）。
+        """
         zh = "这是正文。\n" * 8000
         self.assertGreater(len(zh), zh_names.MAX_SCAN_CHARS)
-        _spans, truncated = zh_names.find_names(zh, return_truncated=True)
-        self.assertTrue(truncated)
+        surname = "\u738b"       # 运行时拼接，不在源码写姓名
+        given = "\u5927\u9524"
+        tail = "联系人：" + surname + given + "请回电。"
+        text = zh + tail
+        spans, truncated = zh_names.find_names(text, return_truncated=True)
+        self.assertFalse(truncated, "已不再截断")
+        self.assertTrue(spans, "超过 32KB 之后的人名也必须扫到（旧实现返回空）")
+        hit = [text[s:e] for s, e, _ in spans]
+        self.assertIn(surname + given, hit)
 
 
 if __name__ == "__main__":
