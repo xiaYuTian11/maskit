@@ -4,29 +4,15 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
-## [Unreleased]
-
-### 更新摘要 / Summary
-- 应用内更新下载不再轻易失败：下载限时大幅放宽，网速不快也能正常升级。
-- 图片与文档脱敏的开关移到主设置页，不再藏在浏览器扩展页里。
-- In-app update downloads no longer fail easily: the download time limit is now much more generous.
-- The image & document masking switch now lives in the main settings page instead of hiding in the browser-extension page.
-
-### 修复
-- 修复应用内更新下载失败：下载限时过短，安装包稍大或网速不快就必失败（浏览器手动下载则正常）。
-- Fixed in-app update downloads failing: the download time limit was too short, so larger installers on slower connections always failed (manual browser downloads worked fine).
-- 图片/文档/PDF 脱敏开关与 OCR 组件管理从「浏览器扩展」卡片拆到主设置页「高级选项」的独立卡片：这是引擎级全局能力，不是扩展专属，不用扩展的用户此前找不到入口。
-- Moved the image/document/PDF masking switch and OCR runtime management out of the browser-extension card into its own card in the main settings page: this is an engine-wide capability, not extension-specific, and was previously unreachable for users who don't use the extension.
-
 ## [0.14.0] - 2026-11-01
 
 ### 更新摘要 / Summary
 - 新增「图片内嵌文字脱敏」：截图、文档里的图片、以及 PDF 页面先在本机识别并打码，再发给 AI。
-- 开关默认关闭，不开时行为与 0.13.0 完全一致；开了但本机识别服务不可用时，内容会被拦住而不是原样发出去。
-- 修复一处文字链路的邮箱漏检：半角冒号后紧跟邮箱地址时不再原样发出去。
+- 开关默认关闭，不开时行为与 0.13.0 完全一致；开关在主设置页「高级选项」里。
+- 修复应用内更新下载失败、半角冒号后邮箱漏检两处问题。
 - Optional on-device OCR masking for images, pictures embedded in Office files, and PDF pages, before anything is sent.
-- Off by default; if it is on and the local OCR service is unavailable, content is blocked instead of being sent unmasked.
-- Fixed a text-path email miss: an address typed right after a half-width colon is no longer sent in the clear.
+- Off by default; the switch lives under Advanced in the main settings page.
+- Fixed in-app update downloads failing, and an email miss typed right after a half-width colon.
 
 ### 新增
 - 新增图片多模态脱敏：代理链路的截图、扩展上传的图片、Office 内嵌图片、PDF 页面都先经本机 OCR 识别，命中的文字在图上物理打码后上行（默认关闭，只走识别与打码，不把图转成文本）。
@@ -65,6 +51,10 @@
 - Fixed missed detections on extra-wide screenshots and phone-photo orientation; sensitive values in image metadata and in PDF authors, comments, forms, bookmarks and text attachments are now replaced while everything else is kept; unsupported animations are blocked.
 - 修复引擎热重载将最小日志模式重置为详细模式的问题，避免意外保存普通个人信息原文。
 - Fixed engine reloads reverting minimal logging to detailed mode, preventing unintended retention of ordinary personal data.
+- 修复应用内更新下载失败：下载限时过短，安装包稍大或网速不快就必失败（浏览器手动下载则正常）。
+- Fixed in-app update downloads failing: the download time limit was too short, so larger installers on slower connections always failed (manual browser downloads worked fine).
+- 图片/文档/PDF 脱敏开关与 OCR 组件管理从「浏览器扩展」卡片拆到主设置页「高级选项」的独立卡片：这是引擎级全局能力，不是扩展专属，不用扩展的用户此前找不到入口。
+- Moved the image/document/PDF masking switch and OCR runtime management out of the browser-extension card into its own card in the main settings page: this is an engine-wide capability, not extension-specific, and was previously unreachable for users who don't use the extension.
 
 ## [0.13.0] - 2026-10-30
 
