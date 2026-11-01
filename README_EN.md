@@ -30,6 +30,7 @@ When using **Cursor, Claude Code, Codex, Pi, OpenCode, ChatGPT, or any AI coding
 - 🔑 **Credentials & Secrets**: `sk-proj-...`, `ghp_...`, Cloud AccessKeys, JWT Tokens, private keys;
 - 🌐 **Internal Infrastructure**: DB connection strings (`mysql://root:Pass123@192.168.1.50:3306/db`), private IP addresses (`10.x`, `172.16.x`, `192.168.x`);
 - 👤 **Business Privacy (PII)**: Phone numbers, ID numbers, real names, credit cards, proprietary internal project names;
+- 🖼️ **Images & Screenshots**: Error screenshots sent from Cursor / Claude Code, photos of badges and IDs, images embedded in Word / PowerPoint, and scanned or vector PDFs — visually readable yet completely missed by traditional regex;
 - 📄 **Documents & Attachments**: Word (`.docx` / `.doc`), Excel (`.xlsx` / `.xls`), and PowerPoint (`.pptx`) files uploaded to web AI containing confidential business data.
 
 **Maskit's Mission**: Act as a transparent local privacy gateway between your developer tools and external AI providers — **mask sensitive tokens before requests leave your machine, and restore them in real-time typewriter stream as answers arrive**!
@@ -71,26 +72,33 @@ When using **Cursor, Claude Code, Codex, Pi, OpenCode, ChatGPT, or any AI coding
 - **Clean Original Extraction + Monotonic OffsetMap**: Extracts entities from the clean original context and translates coordinates back to the mutated text via a monotonic `OffsetMap`, completely eliminating plaintext fragment leakage caused by context truncation;
 - **100% Offline Local Inference**: Runs entirely inside your local process without any external network calls; **off by default** (regex rules already cover the common cases) and can be enabled with one click in Settings.
 
-### 🌐 3. Browser Extension Ecosystem (Web AI Privacy)
+### 🖼️ 3. On-Device Multimodal Masking (OCR Entity-Level Redaction)
+- **Comprehensive Multimodal Support**: Covers chat conversation screenshots, web extension image uploads, images embedded in Office documents (`.docx`), and mixed vector/scanned PDF pages;
+- **Entity-Level Precise Redaction (Labels Preserved)**: Physical pixel-level blacked-out redaction targeted strictly at sensitive strings (phone numbers, ID numbers, emails). Features automatic padding and re-recognition verification to prevent truncated glyph leaks; **structural labels (e.g. "Name:", "Phone:", "Dept:") remain fully intact**, allowing LLMs to understand table layouts and context without degradation;
+- **Complete PDF Vector & Text Layer Sanitization**: PDF pages containing sensitive text are converted to bitmaps and physically masked, while the underlying invisible text layers are thoroughly stripped (preventing selection-copy leaks). Clean pages without sensitive data retain high-fidelity vector text;
+- **Physical Masking & Non-Restorable Design Note**: Image redaction applies irreversible pixel coverage before egress; external models receive already-masked blocks. **Image masking does not support text-like restoration** (the model cannot answer with secrets it never saw), guaranteeing raw originals never leak;
+- **On-Demand Lightweight Runtime (100% Local)**: The main desktop installer stays compact without bundling a 200MB OCR stack. The optional "OCR Component" (RapidOCR + ONNX Runtime, zero egress, sha256 verified and self-tested) can be downloaded and enabled with one click under **Settings → Advanced**.
+
+### 🌐 4. Browser Extension Ecosystem (Web AI Privacy)
 - **Seamless Web AI Protection**: A Chrome & Edge MV3 extension. **ChatGPT, Claude, and DeepSeek are individually verified and pre-authorized out of the box — no manual site adding required** (you still need to enable the extension bridge and paste the access token in Settings); 14 more common AI sites (Kimi, Qwen, Tencent Yuanbao, ChatGLM, ERNIE Bot, Gemini, Grok, Perplexity, Copilot, and more) can be added with one click from Settings, unverified ones are clearly labeled, and custom sites are supported;
 - **Dual-Channel Interception (Fetch + XHR Engines)**: Intercepts standard Fetch as well as low-level `XMLHttpRequest` requests and streaming responses (XHR response restoration currently covers DeepSeek web only); other sites keep native behavior untouched;
 - **Direct Document & Attachment Masking (ChatGPT / Claude)**: Word (`.docx` / `.doc`), Excel (`.xlsx` / `.xls`), and PowerPoint (`.pptx`) files are parsed and masked locally before upload to cloud models; **on sites not yet supported (e.g. DeepSeek) the uploaded file itself is not masked** (passed through as-is), and the extension shows an explicit "attachment not masked" notice — do not send confidential files to those sites;
 - **Local Masking + Typewriter Stream Restoration**: Prompts are masked locally before departure, and model responses are restored in real-time typewriter stream right inside the web chat UI with multi-turn session consistency.
 
-### ⚡ 4. Millisecond SSE Stream Takeover (Native Typewriter Flow)
+### ⚡ 5. Millisecond SSE Stream Takeover (Native Typewriter Flow)
 - Intercepts `text/event-stream` chunk by chunk with incremental restoration;
 - Automatically reassembles split tokens across chunk boundaries, **maintaining native typewriter responsiveness without lag**.
 - **Reasoning traces stay protocol-faithful (disclosed)**: Anthropic extended-thinking (`thinking`) blocks carry an upstream signature; rewriting the signed text invalidates verification and permanently breaks that conversation with HTTP 400. The gateway therefore restores placeholders **only in visible text and tool arguments**, keeps placeholders inside reasoning traces, and leaves signed thinking blocks unmasked as a whole (the count is reported in the event detail instead of silently skipped). Other reasoning channels without a signature keep being restored as usual.
 
-### 🔌 5. No Root CA Installation + Native Fallback Passthrough (Never Breaks Your API)
+### 🔌 6. No Root CA Installation + Native Fallback Passthrough (Never Breaks Your API)
 - **Multi-port Reverse Proxy**: Dedicated local ports per model channel (e.g. `18701` for OpenAI, `18703` for Anthropic). Change `base_url` to local port without installing untrusted self-signed root CAs;
 - **Fallback Passthrough Guarantee**: If the proxy is stopped or closed, ports automatically fallback to raw transparent passthrough. **Your coding tools will never experience unexpected connection dropouts!**
 
-### 🧪 6. Local Offline Lab & Coding Assistant Skill Contract
+### 🧪 7. Local Offline Lab & Coding Assistant Skill Contract
 - **Try It Out (Offline Local Lab)**: No API key needed, nothing sent upstream. Paste any text on the Clients page to inspect masked tokens, round-trip restoration, and hit breakdowns in milliseconds, clearly illustrating the difference between unique entities and occurrences;
 - **Coding Assistant Skill (Placeholder Contract)**: Ships built-in with the package (`maskit-placeholders`), downloadable with a single click or installable via command line. Guides Claude Code, Cursor, Codex, and other assistants to use placeholders verbatim without inventing tokens, splitting them, substituting mock data, or needlessly refusing requests.
 
-### 📊 7. Real-time Logs, Security Audit & Cost Tracking
+### 📊 8. Real-time Logs, Security Audit & Cost Tracking
 - Inspect full request/response diffs with one-click highlight mode;
 - **Adjustable log write detail (minimal / detailed / time-boxed trace)**: minimal mode stores no conversation body or plaintext **at the write side** (database, engine logs, diagnostics bundle and export share one projection) and keeps label distribution only; keep “detailed” when you need long-lived masked↔original comparison; troubleshooting can open a 15-minute time-boxed window (auto-closes on expiry and on restart, and still stores no plaintext). The logs page can also **page back into history** and return to live at any time.
 - **Passive Security Audit & Prompt Injection Detection**: Monitors upstream model responses and detects prompt extraction attempts, credential exfiltration instructions, and destructive command patterns;
