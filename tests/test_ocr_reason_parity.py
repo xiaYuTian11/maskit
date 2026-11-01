@@ -27,7 +27,8 @@ def _frontend_codes():
 
 def _i18n_codes():
     src = (ROOT / "frontend" / "src" / "lib" / "i18n.tsx").read_text(encoding="utf-8")
-    keys = re.findall(r"'settings\.extBridge\.ocrReason_([a-z_]+)'", src)
+    # 命名空间 2026-11-01 从 extBridge 迁到 visual（设置卡拆分，见 VisualMaskingCard）
+    keys = re.findall(r"'settings\.visual\.ocrReason_([a-z_]+)'", src)
     return keys
 
 
