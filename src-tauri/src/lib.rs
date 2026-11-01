@@ -1220,9 +1220,27 @@ fn normalize_proxy_url(raw: &str) -> String {
 
 /// 给 updater 挂上系统代理。check 和 install 两条路径都要挂——
 /// 只挂一条会出现「检查很快、下载很慢」这种更难归因的状态。
-fn updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+///
+/// timeout 分两档（2026-11-01 v0.14.0 用户实测踩坑）：
+/// - check 12s：latest.json 只有几 KB，断网/被墙时快速失败，不打断用户；
+/// - install 15 分钟：插件的 timeout 同时作用于「查 latest.json」和「下载安装包」
+///   两个请求（reqwest ClientBuilder::timeout 是**含响应体读取的总超时**），
+///   安装包 ~130MB，12s 意味着必须全程 ≥11MB/s 才下得完——代理节点稍慢就是
+///   「浏览器手动下载能成功、应用内更新必失败」。下载路径的 TCP 连接仍保持
+///   15s 快速失败（configure_client 在插件设置完 timeout 之后执行，只补连接超时，
+///   不覆盖总超时）。
+fn updater_with_proxy(app: &AppHandle, for_download: bool) -> Result<tauri_plugin_updater::Updater, String> {
     use tauri_plugin_updater::UpdaterExt;
-    let mut builder = app.updater_builder().timeout(Duration::from_secs(12));
+    let timeout = if for_download {
+        Duration::from_secs(900)
+    } else {
+        Duration::from_secs(12)
+    };
+    let mut builder = app.updater_builder().timeout(timeout);
+    if for_download {
+        builder = builder
+            .configure_client(|c| c.connect_timeout(Duration::from_secs(15)));
+    }
     if let Some(p) = system_proxy_url() {
         match url::Url::parse(&p) {
             Ok(u) => builder = builder.proxy(u),
@@ -1238,7 +1256,7 @@ fn updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, 
 /// 服务器挂了）不能变成打断用户的错误弹窗，UI 按 `ok` 决定要不要提示。
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<serde_json::Value, String> {
-    let updater = updater_with_proxy(&app)?;
+    let updater = updater_with_proxy(&app, false)?;;
     match updater.check().await {
         Ok(Some(update)) => Ok(serde_json::json!({
             "ok": true,
@@ -1287,7 +1305,7 @@ fn restart_after_update(app: &AppHandle) -> ! {
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<serde_json::Value, String> {
     use tauri::Emitter;
-    let updater = updater_with_proxy(&app)?;
+    let updater = updater_with_proxy(&app, true)?;;
     let update = updater
         .check()
         .await

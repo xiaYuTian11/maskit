@@ -4,6 +4,12 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 修复
+- 修复应用内更新下载失败：下载限时过短，安装包稍大或网速不快就必失败（浏览器手动下载则正常）。
+- Fixed in-app update downloads failing: the download time limit was too short, so larger installers on slower connections always failed (manual browser downloads worked fine).
+
 ## [0.14.0] - 2026-11-01
 
 ### 更新摘要 / Summary
