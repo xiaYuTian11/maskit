@@ -1,13 +1,14 @@
 # 贡献指南（Contributing）
 
-欢迎贡献！本仓库使用 GitHub Flow：`master` 为稳定分支，功能开发走分支 + PR。
+欢迎贡献！本仓库遵循极简的双分支协作模型：`master` 为生产稳定分支，日常开发与功能迭代在 `dev` 分支进行。
 
-## 分支与 PR
+## 分支与开发流程
 
-1. 从 `master` 新建功能分支：`git checkout -b feat/<描述>`
-2. 提交使用 Conventional Commits：`feat:` / `fix:` / `perf:` / `docs:` / `chore:`
-3. 推送后创建 PR 到 `master`（使用 `.github/PULL_REQUEST_TEMPLATE.md` 模板）
-4. CI 五个 job（`python` / `frontend` / `rust` / `rust-macos` / `version`）全绿 + 维护者审批后合并
+1. **日常开发在 `dev` 分支**：所有功能开发、Bug 修复均基于 `dev` 分支进行；
+2. **提交规范**：使用 Conventional Commits：`feat:` / `fix:` / `perf:` / `docs:` / `chore:`；
+3. **本地全量门禁必须全绿**：合并前必须在本地跑通全量 24 项门禁（`python scripts/verify-all.py`）；
+4. **合并至 `master`**：测试全通后合入 `master`，远端 CI 5 个 job 全绿后方可安排发版；
+5. **正式发版仅在 `master`**：Release 与正式版 Tag 必须且只能在 `master` 分支打出。
 
 分支保护规则见 [docs/BRANCH_PROTECTION.md](docs/BRANCH_PROTECTION.md)。
 
