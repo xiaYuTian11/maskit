@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### 更新摘要 / Summary
+- 应用内更新下载不再轻易失败：下载限时大幅放宽，网速不快也能正常升级。
+- In-app update downloads no longer fail easily: the download time limit is now much more generous.
+
 ### 修复
 - 修复应用内更新下载失败：下载限时过短，安装包稍大或网速不快就必失败（浏览器手动下载则正常）。
 - Fixed in-app update downloads failing: the download time limit was too short, so larger installers on slower connections always failed (manual browser downloads worked fine).
