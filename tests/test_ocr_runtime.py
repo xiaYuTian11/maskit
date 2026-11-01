@@ -461,5 +461,39 @@ class ManifestMergeTests(unittest.TestCase):
                 mod.merge_fragments([a, a])
 
 
+class Cv2NumpyShimPatchTests(unittest.TestCase):
+    """cv2/__init__.py 的 numpy 垫片补丁（2026-11-01 冻结引擎实测踩坑）。
+
+    PyInstaller 冻结引擎自带的 numpy 没有 numpy/core 兼容垫片（分析器只收集
+    被静态引用的模块），组件的 cv2 用 numpy 1.x 写法探测 → 自检必败。
+    补丁加回 numpy._core 回退；漏了它，「组件安装成功」与「组件可用」之间
+    就隔着一个只能靠报错日志发现的坑。
+    """
+
+    def _load(self):
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "scripts" / "build-ocr-runtime.py"
+        spec = importlib.util.spec_from_file_location("build_ocr_runtime", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_patch_adds_core_fallback(self):
+        mod = self._load()
+        raw = (b"try:\n    import numpy\n    import numpy.core.multiarray\n"
+               b"except ImportError:\n    raise\n")
+        patched = mod._patch_stream("site-packages/cv2/__init__.py", raw)
+        self.assertIn(b"import numpy._core.multiarray", patched, "必须有 _core 回退")
+        self.assertIn(b"import numpy.core.multiarray", patched, "原路径保留（有垫片的宿主仍走原路）")
+        # 补丁后的代码必须能编译（缩进错了就是热补丁变炸弹）
+        compile(patched, "cv2/__init__.py", "exec")
+
+    def test_patch_leaves_other_files_untouched(self):
+        mod = self._load()
+        raw = b"import numpy.core.multiarray\n"
+        self.assertEqual(mod._patch_stream("site-packages/other.py", raw), raw)
+        self.assertEqual(mod._patch_stream("site-packages/cv2/version.py", raw), raw)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -167,6 +167,29 @@ def _collect(sp):
     return files
 
 
+# cv2/__init__.py 的 numpy 探测补丁（2026-11-01 实测踩坑）：
+# 它第 12 行 `import numpy.core.multiarray` 是 numpy 1.x 时代的写法。宿主是
+# PyInstaller 冻结引擎时，引擎自带的 numpy（给 NER 用，不能排除）没有
+# `numpy/core` 兼容垫片——分析器只收集被静态引用的模块，垫片没人引用就不进包。
+# 组件自己的 numpy 带垫片，但只要面板进程先导入了冻结 numpy，cv2 拿到的就是
+# 没垫片的那个 → ModuleNotFoundError → 自检失败回滚。退到 `numpy._core`
+# （numpy≥2 的真实位置，探测等价）即可。
+_CV2_LEGACY = b"import numpy.core.multiarray"
+_CV2_FALLBACK = (
+    b"try:\n"
+    b"        import numpy.core.multiarray\n"
+    b"    except ImportError:\n"
+    b"        import numpy._core.multiarray  # numpy>=2 host without the core shim\n"
+)
+
+
+def _patch_stream(name, data):
+    """写入 zip 前的按文件补丁钩子。目前只有 cv2 一处。"""
+    if name == "site-packages/cv2/__init__.py" and _CV2_LEGACY in data:
+        return data.replace(_CV2_LEGACY, _CV2_FALLBACK, 1)
+    return data
+
+
 def _expand_merge_args(patterns):
     """展开 --merge 参数里的通配符。
 
@@ -236,7 +259,12 @@ def main(argv=None):
 
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for src, arc in files:
-            z.write(src, arc)
+            # 只有需要补丁的小文本文件走内存改写，其余直接落盘（87MB 里六道门
+            # 是二进制，逐个 read_bytes 纯浪费）。
+            if arc == "site-packages/cv2/__init__.py":
+                z.writestr(arc, _patch_stream(arc, Path(src).read_bytes()))
+            else:
+                z.write(src, arc)
 
     payload = out.read_bytes()
     manifest = {

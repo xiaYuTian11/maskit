@@ -122,11 +122,17 @@ _ENGINE_LOCK = threading.Lock()
 WORKERS = max(1, min(4, (os.cpu_count() or 2) // 2))
 _SEM = threading.Semaphore(WORKERS)
 _WARMED = [False]
+# 最近一次后端加载失败的真实异常（诊断用）：此前 `except Exception: return
+# REASON_RUNTIME_MISSING` 把它吞掉，冻结引擎上组件 import 失败只能看到
+# 「ocr_runtime_missing」，分不清是路径没挂上、缺标准库模块还是 DLL 加载失败
+# （2026-11-01 实测：官方引擎自检失败，真实异常无任何整条链路可见）。
+# 只取类型名与消息前 200 字，不携带路径之外的敏感信息。
+_LOAD_ERROR = ""
 
 
 def _load_backend():
     """惰性加载后端。返回 (engine, "") 或 (None, reason)。"""
-    global _ENGINE
+    global _ENGINE, _LOAD_ERROR
     if _ENGINE is not None:
         return _ENGINE, ""
     with _ENGINE_LOCK:
@@ -142,20 +148,27 @@ def _load_backend():
             pass
         try:
             from rapidocr_onnxruntime import RapidOCR   # noqa: F401
-        except Exception:
+        except Exception as e:
+            _LOAD_ERROR = "%s: %s" % (type(e).__name__, str(e)[:200])
             return None, REASON_RUNTIME_MISSING
         try:
             # intra_op=1：实测与默认线程数的单次耗时相同（787 vs 799ms），
             # 但 CPU 占用低得多 —— 面板与代理链路是同一个进程，别让它抢核。
             # width_height_ratio=-1：关掉「宽图跳过检测」，理由见 DET_PAD_MIN。
             _ENGINE = RapidOCR(intra_op_num_threads=1, width_height_ratio=-1)
-        except Exception:
+        except Exception as e:
+            _LOAD_ERROR = "init: %s: %s" % (type(e).__name__, str(e)[:200])
             return None, REASON_RUNTIME_MISSING
     return _ENGINE, ""
 
 
 def available():
-    """(是否可用, 不可用原因)。开关降级与自检都读这里。"""
+    """(是否可用, 不可用原因码)。开关降级与自检都读这里。
+
+    原因码保持**纯净**（降级逻辑按字面比较，不能追加详情）；真实异常
+    （如冻结引擎上组件 import 失败的 ModuleNotFoundError）在 `_LOAD_ERROR`，
+    由 `ocr_runtime.status` 与 OcrError.detail 透出。
+    """
     engine, why = _load_backend()
     return (engine is not None), why
 
@@ -352,7 +365,7 @@ def detect(image_bytes, *, deadline=None, allow_rotation=True):
         raise OcrError(REASON_TOO_LARGE, str(len(image_bytes)))
     engine, why = _load_backend()
     if engine is None:
-        raise OcrError(why or REASON_RUNTIME_MISSING)
+        raise OcrError(why or REASON_RUNTIME_MISSING, _LOAD_ERROR)
 
     t0 = time.perf_counter()
     img = _decode(image_bytes)
