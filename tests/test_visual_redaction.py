@@ -311,9 +311,17 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertEqual(res["mode"], vr.MODE_REDACTED, res)
         self.assertGreaterEqual(res["hit_count"], 1)
         self.assertGreaterEqual(res["stats"]["verified"], 1, "自校验应当通过")
-        # 号码区域（实测真值 x≈130..330, y≈87..117）必须灰；标签区必须白
+        # 号码区域（实测真值 x≈130..330, y≈87..117）必须灰；标签区不得被涂。
+        # 标签区不能用硬编码白像素断言：(60,100) 在雅黑下是「手」的笔画间隙、
+        # 在 CI 的 Noto CJK 下落在笔画上（2026-11-01 CI 实测翻红，本地却绿）。
+        # 改为「手机：」条带与原图逐像素一致：实体级打码不碰标签，字体无关。
         self.assertEqual(_pixel(res["bytes"], (200, 100)), vr._FILL)
-        self.assertEqual(_pixel(res["bytes"], (60, 100)), (255, 255, 255))
+        orig = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+        out = Image.open(io.BytesIO(res["bytes"])).convert("RGB")
+        self.assertEqual(out.size, orig.size, "输出尺寸不该变")
+        label_band = (36, 76, 80, 128)    # 「手」所在左半标签；右缘离号码框留白（最坏 ~85px）有余量
+        self.assertEqual(out.crop(label_band).tobytes(), orig.crop(label_band).tobytes(),
+                         "标签区被误涂")
 
     def test_corrupt_image_blocks(self):
         res = vr.process_image_multimodal(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, "ext:bad", tr)
