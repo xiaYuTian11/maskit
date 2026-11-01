@@ -15,7 +15,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.14.0'
+__version__ = '0.14.1'
 import json
 import codecs
 import copy
@@ -2907,6 +2907,17 @@ def _child_env_for_mitmdump():
             "PYTHONIOENCODING": "utf-8",
             "PYTHONUTF8": "1",
             "LLM_SHIELD_DATA_DIR": str(DATA_ROOT),
+            # OCR 组件清单地址必须透传给引擎子进程（2026-11-02 修）。
+            #
+            # 背景：`MASKIT_OCR_MANIFEST_URL` 的默认值是**面板层**注入的
+            # （见 `OCR_MANIFEST_DEFAULT_URL` 那段），而下载/校验/自检全部发生在
+            # 引擎进程（`ocr_runtime` 在 transparent 的导入闭包里）。
+            # 子进程环境是这里手工拼的，不写这行就**不继承**——实测引擎侧
+            # `status()` 报 `manifest_url: false`，用户点「安装 OCR 组件」
+            # 只会拿到 `manifest_missing`（发版后「装了但用不了」的真因）。
+            # 用户自己设过该变量时以用户值为准（`**os.environ` 已先展开）。
+            "MASKIT_OCR_MANIFEST_URL": os.environ.get(
+                "MASKIT_OCR_MANIFEST_URL") or OCR_MANIFEST_DEFAULT_URL,
         }
     bundle_dirs = set()
     for d in (_BUNDLE_ROOT, getattr(sys, "_MEIPASS", None), Path(sys.executable).parent if getattr(sys, "frozen", False) else None):
@@ -2922,6 +2933,10 @@ def _child_env_for_mitmdump():
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "LLM_SHIELD_DATA_DIR": str(DATA_ROOT),
+        # 与打包态分支同口径（见上面那段注释）：清单地址是面板层注入的，
+        # 子进程环境手工拼装，不透传就丢。
+        "MASKIT_OCR_MANIFEST_URL": os.environ.get(
+            "MASKIT_OCR_MANIFEST_URL") or OCR_MANIFEST_DEFAULT_URL,
         "PYTHONPATH": str(_BUNDLE_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
         "PATH": clean_path,
     }
@@ -3186,6 +3201,9 @@ def _start_proxy_locked():
 
 def start_proxy():
     with lock:
+        # 用户显式启动：取消任何待执行的「端口变更合并重启」，避免刚起来又被
+        # 计时器踢下去（debounce 见 `_schedule_restart_for_ports`）。
+        _cancel_pending_restart()
         if proc["p"] and proc["p"].poll() is None:
             return False, "已在运行"
         state["proxy_starting"] = True
@@ -3474,6 +3492,8 @@ def stop_proxy(skip_fallback=False):
     skip_fallback=True 仅用于 App 退出流程：不挂兜底监听（见 _stop_proxy_locked 尾部注释）。
     """
     with lock:
+        # 用户显式停止：取消待执行的合并重启（否则刚停掉就被计时器又拉起来）。
+        _cancel_pending_restart()
         state["proxy_stopping"] = True
         try:
             return _stop_proxy_locked(skip_fallback=skip_fallback)
@@ -3665,6 +3685,68 @@ def _restart_proxy_locked(reason):
         state["auto_recovered_at"] = time.time()
         state["auto_recover_fail"] = ""
     return ok
+
+
+# upstream 端口变更触发的重启合并（debounce，2026-11-02）。
+#
+# 为什么需要：配置保存是**逐项**的，而每改一个 upstream 都会改变监听端口集合，
+# 于是「3 个客户端改成 2 个、再改成 1 个」会触发三次完整的 stop→start。
+# 实测（2026-11-01 真机 engine.log）：升级后前端分批提交 upstream，引擎连续重启
+# 代理 4 次，中间还撞上「0 个 upstream」的非法中间态 → 启动失败 → 6 份崩溃转储。
+# 用户感知就是「升级完代理一直在重连/断流」。
+#
+# 做法：端口变更**不立即**重启，而是登记一个待处理标记；短窗口内合并成一次。
+# 窗口取 1.2s：足够覆盖「前端连续提交几条」的间隔（实测同一轮表单提交的
+# 多条 patch 间隔 <300ms），又短到用户察觉不到延迟。
+#
+# 为什么不能干脆「永不重启」：端口是 mitmdump 启动参数固定下来的，新端口不会
+# 凭空开始监听（见调用点注释）。所以合并而不是取消。
+_RESTART_DEBOUNCE_S = 1.2
+_RESTART_PENDING = {"timer": None, "reason": "", "lock": threading.Lock()}
+
+
+def _schedule_restart_for_ports(reason):
+    """登记一次「端口变化后需重启」，短窗口内的重复登记合并成一次。
+
+    返回 True 表示**本次调用**启动了计时器（首个请求）；重复调用返回 False。
+    调用方据此决定 `proxy_restarted` 字段（合并时如实报 False——此刻还没重启）。
+    """
+    with _RESTART_PENDING["lock"]:
+        _RESTART_PENDING["reason"] = reason or _RESTART_PENDING["reason"]
+        if _RESTART_PENDING["timer"] is not None:
+            return False
+
+        def _fire():
+            with _RESTART_PENDING["lock"]:
+                _RESTART_PENDING["timer"] = None
+                why = _RESTART_PENDING["reason"] or "upstream 端口变化"
+            try:
+                cfg_lock.acquire(timeout=5)
+                try:
+                    _emit_log(f"[panel] {why}（已合并短时间内的多次变更），重启代理")
+                    _restart_proxy_locked(why)
+                finally:
+                    cfg_lock.release()
+            except Exception as e:
+                _emit_log(f"[panel] 合并重启失败: {_safe_public_text(e, 200)}")
+
+        timer = threading.Timer(_RESTART_DEBOUNCE_S, _fire)
+        timer.daemon = True
+        _RESTART_PENDING["timer"] = timer
+        timer.start()
+        return True
+
+
+def _cancel_pending_restart():
+    """用户显式停/启代理时取消待执行的重启（避免与用户意图打架）。"""
+    with _RESTART_PENDING["lock"]:
+        timer = _RESTART_PENDING["timer"]
+        _RESTART_PENDING["timer"] = None
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
 
 
 def _dump_crash_context(reason="crash"):
@@ -5281,8 +5363,13 @@ def api_set_config():
         running = bool(proc["p"] and proc["p"].poll() is None)
         if running and ports_after != ports_before:
             _emit_log(f"[panel] upstream 端口变化 {sorted(ports_before)} -> {sorted(ports_after)}，"
-                      f"自动重启代理使新端口生效")
-            restarted = bool(_restart_proxy_locked("upstream 端口变化"))
+                      f"合并短时间内的多次变更后重启代理")
+            # 合并重启（2026-11-02）：配置保存是逐项的，每改一个 upstream 都改变
+            # 端口集合，于是「3→2→1 个客户端」会触发三次完整 stop→start。实测
+            # （2026-11-01 真机 engine.log）升级后连续重启 4 次，中间还撞上
+            # 「0 个 upstream」的非法中间态 → 启动失败 → 6 份崩溃转储，用户感知
+            # 就是「升级完代理一直在重连」。这里只登记，由 debounce 计时器合并执行。
+            restarted = bool(_schedule_restart_for_ports("upstream 端口变化"))
         if not restarted:
             restarted = _maybe_restart_for_allow_hosts(cfg, allow_before)
     except Exception as e:
@@ -5506,8 +5593,13 @@ def api_patch_config():
         running = bool(proc["p"] and proc["p"].poll() is None)
         if running and ports_after != ports_before:
             _emit_log(f"[panel] upstream 端口变化 {sorted(ports_before)} -> {sorted(ports_after)}，"
-                      f"自动重启代理使新端口生效")
-            restarted = bool(_restart_proxy_locked("upstream 端口变化"))
+                      f"合并短时间内的多次变更后重启代理")
+            # 合并重启（2026-11-02）：配置保存是逐项的，每改一个 upstream 都改变
+            # 端口集合，于是「3→2→1 个客户端」会触发三次完整 stop→start。实测
+            # （2026-11-01 真机 engine.log）升级后连续重启 4 次，中间还撞上
+            # 「0 个 upstream」的非法中间态 → 启动失败 → 6 份崩溃转储，用户感知
+            # 就是「升级完代理一直在重连」。这里只登记，由 debounce 计时器合并执行。
+            restarted = bool(_schedule_restart_for_ports("upstream 端口变化"))
         if not restarted:
             restarted = _maybe_restart_for_allow_hosts(cfg, allow_before)
     except Exception as e:
@@ -7189,9 +7281,26 @@ def _ner_status_payload(cfg):
             pass
         if enabled:
             if not info["available"]:
-                info["reason"] = "模型文件缺失（engine/models/ner_mini_zh/model_quantized.onnx）"
+                # 原因必须**可区分且可行动**（2026-11-02 修）。
+                # 此前不管缺什么一律报「模型文件缺失」，而真实原因可能是依赖没装
+                # （实测日志：`初始化失败：No module named 'tokenizers'`）——
+                # 按那句话去查模型文件永远修不好。
+                missing_deps = st.get("missing_deps") or []
+                if missing_deps:
+                    info["reason"] = (
+                        "缺少推理依赖：%s（客户端安装包应自带；若为源码/容器部署请安装 "
+                        "requirements-dev.txt）" % "、".join(missing_deps))
+                    info["reason_code"] = "ner_deps_missing"
+                    info["missing_deps"] = list(missing_deps)
+                else:
+                    info["reason"] = "模型文件缺失（engine/models/ner_mini_zh/model_quantized.onnx）"
+                    info["reason_code"] = "ner_model_missing"
             elif st.get("last_error"):
                 info["reason"] = str(st.get("last_error"))
+                info["reason_code"] = "ner_init_failed"
+            elif st.get("initialized"):
+                # 开着、能用、已加载：给一句明确确认（否则用户只能猜“开了到底有没有效”）
+                info["reason_code"] = "ner_ready"
     except Exception as e:
         if enabled:
             info["reason"] = f"NER 模块不可用：{type(e).__name__}"

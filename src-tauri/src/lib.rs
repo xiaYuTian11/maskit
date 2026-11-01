@@ -1378,24 +1378,32 @@ async fn install_update(app: AppHandle) -> Result<serde_json::Value, String> {
 async fn get_shield_token() -> Result<String, String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(READY_TIMEOUT_SECS + 5);
     loop {
-        // 这里刻意用 port_ready() 而非 panel_alive()：panel_alive 走 reqwest::blocking，
-        // 而本函数是 async 命令、跑在 tokio 运行时线程上 —— reqwest::blocking 在
-        // async 运行时会 panic（见其 blocking::Client 文档）。就绪与否由
-        // readiness_loop / watchdog（都在普通线程）按 /healthz 判定。
-        if EngineManager::port_ready() {
-            if let Some(t) = token_candidates()
-                .iter()
-                .find_map(|p| std::fs::read_to_string(p).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
-                return Ok(t);
-            }
+        // **先读文件，再看端口**（2026-11-02 修）。
+        //
+        // 原实现要求 `port_ready()` 为真才读 token，于是引擎重启期间
+        // （升级 / 崩溃自愈 / 手动重启）端口短暂不可用时这个命令会一直等到超时，
+        // 超时后返回**空字符串**；而前端 shield-fetch 的重试判据是 `if (fresh)`，
+        // 空串为假 → 不重试、静默继续用旧 token → 此后所有 /api/* 全部 401
+        // （实测日志：连续 8 条 `reason=invalid_token`，UI 一片空白）。
+        //
+        // token 文件是引擎**先写**的（启动时立刻落盘），端口就绪在后。所以
+        // 读到文件就足以返回——它比端口状态更早可用，也更准确。
+        // 端口检查仍保留：它在下面决定「还要不要继续等」（文件不存在时才需要）。
+        if let Some(t) = token_candidates()
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(t);
         }
+        // 文件还没有：等引擎写出来。这里刻意用 port_ready() 而非 panel_alive()，
+        // panel_alive 走 reqwest::blocking，而本函数是 async 命令、跑在 tokio
+        // 运行时线程上 —— reqwest::blocking 在 async 运行时会 panic。
         if std::time::Instant::now() > deadline {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Ok(String::new())
 }

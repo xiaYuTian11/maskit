@@ -576,23 +576,35 @@ class TestUpstreamSidecarSecurity(unittest.IsolatedAsyncioTestCase):
     # ─── 32 MiB 边界测试 ───────────────────────────────────────────────────
 
     async def test_body_at_exact_limit_passes(self):
-        """刚好 32 MiB 的 body 应该通过（不是 413）。"""
+        """刚好 32 MiB 的 body 应该通过（不是 413）。
+
+        ⚠️ 用**专用长超时 client**（2026-11-02）：32 MiB body 要经 mock 上游往返
+        （拼包 + 序列化 + 内存拷贝），默认 `timeout=10.0` 在**满负载**（全量门禁
+        并发跑其它用例）下会 httpx.ReadTimeout 而假红。实测单独跑稳定通过、
+        全量跑必红——而它测的是「边界值不被误判 413」，与网络快慢无关，
+        所以正确做法是给足超时而不是放宽断言。
+        """
         exact_body = b"x" * _MAX_REQUEST_BODY
-        resp = await self.test_client.post(
-            self._sidecar_url("/post"),
-            headers=self._upstream_headers({"Content-Type": "application/octet-stream"}),
-            content=exact_body,
-        )
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as big_client:
+            resp = await big_client.post(
+                self._sidecar_url("/post"),
+                headers=self._upstream_headers({"Content-Type": "application/octet-stream"}),
+                content=exact_body,
+            )
         self.assertEqual(resp.status_code, 200)
 
     async def test_body_one_byte_over_limit_rejected(self):
-        """32 MiB + 1 byte → 413 fail-closed。"""
+        """32 MiB + 1 byte → 413 fail-closed。
+
+        同 ``test_body_at_exact_limit_passes``：大 body 用专用长超时 client。
+        """
         over_body = b"x" * (_MAX_REQUEST_BODY + 1)
-        resp = await self.test_client.post(
-            self._sidecar_url("/post"),
-            headers=self._upstream_headers({"Content-Type": "application/octet-stream"}),
-            content=over_body,
-        )
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as big_client:
+            resp = await big_client.post(
+                self._sidecar_url("/post"),
+                headers=self._upstream_headers({"Content-Type": "application/octet-stream"}),
+                content=over_body,
+            )
         self.assertEqual(resp.status_code, 413)
         self.assertIn("shield_request_too_large", resp.text)
 

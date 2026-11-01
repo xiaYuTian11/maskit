@@ -11695,6 +11695,23 @@ def _scan_response(flow, sid, host, method, path, source, streamed_text=None):
                     continue
                 if label == "USCC" and not _uscc_ok(orig):
                     continue
+                # SECRET 的值语义校验：**复检路径必须与脱敏路径同口径**（2026-11-02 修）。
+                #
+                # 背景：脱敏路径（`_mask_text`）对 SECRET 有 `_secret_value_ok`
+                # 收窄（挡掉 `password=1234`、`token=your-token-here` 这类示例/低熵值），
+                # 而响应侧复检当初漏了这一条。后果是真机实测的 347 条误报：
+                # 代码助手回复里讲解 `.env` 配置时写 `password=xxx` 示例，
+                # 复检把它当“上游泄漏了凭据”报 MEDIUM 告警——而它根本不是凭据。
+                #
+                # `key_name` 的取法必须与脱敏路径**逐字一致**：那边是
+                # `text[m.start():m.start(1)]`（从命中起点到**值捕获组**起点）。
+                # 这里用 `m.start(gidx)` —— `gidx` 是规则表里登记的值组号，
+                # SECRET 规则的值组是 1，所以两者等价。
+                # 曾经写错过一次：把 `m.start(gidx)` 当成「组号」而写成
+                # `m.start() + gidx`，结果 key_name 只拿到 1 个字符，
+                # `_secret_value_ok` 因 key 名不完整把所有真凭据判成“不是凭据”（实测）。
+                if label == "SECRET" and not _secret_value_ok(orig, body[m.start():m.start(gidx)]):
+                    continue
                 if label == "CONNSTR" and not _connstr_ok(orig, m, body):
                     if len(exempt_conn) < _CONNSTR_EXEMPT_MAX:
                         exempt_conn.append((m.start(), m.end()))

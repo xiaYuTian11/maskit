@@ -191,6 +191,11 @@ class TruncationIsPerCallTests(unittest.TestCase):
     `find_names` 跑在 `_MASK_POOL` 的多 worker 线程里。进程级计数会跨请求串号：
     会话 A 触发截断后若 A 那轮没取，计数会挂到下一个取它的会话 B 的事件上，
     A 自己的「本轮姓名扫描未覆盖全文」标记丢失。
+
+    2026-11-02 更新：**截断本身已取消**（改为候选位/证据词扫描，全文都扫，
+    1.32MB 正文实测 8ms）。`return_truncated` 参数保留只为兼容调用方，
+    现在恒为 False。下面第二条用例钉的就是这个新契约 —— 超长文本必须
+    **不再截断**，否则大文本里的人名会整批漏检（这是当初 32KB 上限造成的真漏检）。
     """
 
     def test_return_truncated_flag(self):
@@ -200,9 +205,28 @@ class TruncationIsPerCallTests(unittest.TestCase):
         self.assertFalse(truncated)
         self.assertTrue(spans)
 
-        big = "客户反馈" * 10000   # 远超 MAX_SCAN_CHARS
+        big = "客户反馈" * 10000   # 远超旧的 MAX_SCAN_CHARS
         spans2, truncated2 = zh_names.find_names(big, return_truncated=True)
-        self.assertTrue(truncated2, "超长文本的截断标志没有返回")
+        self.assertFalse(truncated2,
+                         "超长文本不应再截断（32KB 上限会让大正文里的人名整批漏检）")
+
+    def test_long_text_names_are_still_found(self):
+        """超长正文**尾部**的姓名必须能扫到（旧实现在 32KB 处就停了）。
+
+        这是「开着语义识别却在大文本上失效」的直接回归锁：构造一段 >32KB 的
+        正文，把姓名放在最末尾。旧实现返回空，新实现必须命中。
+        """
+        import zh_names
+
+        surname = "\u738b"          # 运行时拼接，不在源码里写姓名
+        given = "\u5927\u9524"
+        filler = "这是正常的业务描述文字，没有任何人名。" * 2000   # ≈42K 字符 > 32KB
+        text = filler + "联系人：" + surname + given + "请回电"
+        self.assertGreater(len(text), 32 * 1024, "构造的文本必须超过旧上限")
+        spans = zh_names.find_names(text)
+        self.assertTrue(spans, "超过 32KB 之后的人名也必须扫到（旧实现在这里返回空）")
+        hit = [text[s:e] for s, e, _ in spans]
+        self.assertIn(surname + given, hit)
 
     def test_no_module_level_counter(self):
         """不允许存在 `take_truncated_count` 这类进程级取走函数。"""
