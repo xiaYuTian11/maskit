@@ -10533,16 +10533,47 @@ def start_panel_server(open_browser_on_start=True):
     # 显式 0600：默认 umask 022 会落成 0644，同机其他本地用户即可读到面板令牌
     # —— 拿到它等于拿到代理开关与配置读写权限。Windows 上 mode 只影响只读位，
     # 该目录另有 ACL 收紧（仅当前用户 + SYSTEM + Administrators），两者互补。
+    #
+    # 为什么必须**原子替换**（2026-11-03，真机 44 次 `invalid_token` 归因）：
+    # 原实现是 `O_TRUNC` 原地覆盖——truncate 与 write 之间存在一个「文件存在且为空」
+    # 的窗口。壳层（`src-tauri/src/lib.rs` 的 `read_token`）就读这个文件，落在窗口
+    # 里会拿到空串，前端于是带着「空 token」请求面板，全是 403 invalid_token。
+    # 前端虽有重读重试兜底（`frontend/src/lib/shield-fetch.ts`），但那是**补偿**，
+    # 不是消除：每次引擎启动都白扔一批 403 进日志，且把「竞态」变成长期债。
+    # 改成「写临时文件 + os.replace」后，读端只会看到「旧 token 或新 token」，
+    # 不存在空/半截的中间态（Windows 上 os.replace 走 MoveFileEx replace-existing）。
     token_path = ROOT / "proxy_token"
+    tmp_path = ROOT / "proxy_token.tmp"
     try:
-        fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, API_TOKEN.encode("utf-8"))
+            os.fsync(fd)  # 先落盘再改名，否则崩溃时可能换上去一个空文件
         finally:
             os.close(fd)
         # 已存在的旧文件不会被 O_CREAT 的 mode 改写，必须显式再收紧一次
-        os.chmod(token_path, 0o600)
+        os.chmod(tmp_path, 0o600)
+        # Windows 上 `os.replace` 可能报 PermissionError（WinError 5）：读端
+        # （壳层 `read_token`、用户的脚本、备份工具）此刻恰好以不共享删除的方式
+        # 持有目标文件。**必须重试**，因为失败后果不是「这一次没写成」而是
+        # 「token 文件停在旧值，前端此后永久 403」—— 本函数在启动路径上只跑一次，
+        # 没有后续补偿。句柄窗口是毫秒级，短退避足矣。
+        _last_replace_err = None
+        for _ in range(20):
+            try:
+                os.replace(str(tmp_path), str(token_path))
+                _last_replace_err = None
+                break
+            except PermissionError as _exc:
+                _last_replace_err = _exc
+                time.sleep(0.05)
+        if _last_replace_err is not None:
+            raise _last_replace_err
     except Exception as e:
+        try:
+            os.unlink(str(tmp_path))
+        except Exception:
+            pass  # 残留临时文件无害，下次写入会覆盖；不能因清理失败掩盖真错误
         # 双写：_emit_log 只进内存，而壳层的就绪条件是「/healthz 通 + token 文件存在」
         # （src-tauri/src/lib.rs 的 readiness_loop），写失败会让面板明明健康却永远判
         # 「未就绪」（前端一直转圈、API 全 401）。必须进 engine-stdout.log，否则无现场。

@@ -4,6 +4,20 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 日志页不再被大量「疑似泄露」提示刷满：程序名、命令行参数这类英文串不再被当成人名或机构名。
+- 引擎启动瞬间界面不再短暂提示令牌无效。
+- The log page is no longer flooded with "possible leak" notices: program names and command-line flags are no longer treated as person or organization names.
+- The UI no longer briefly reports an invalid token right after the engine starts.
+
+### 修复
+- 修复日志页被大量「脱敏后仍有原文」提示刷满的问题：含空格的进程名、以连字符开头的命令行参数不再被当成人名或机构名。
+- Fixed the log page being flooded with "original text still present after masking" notices: spaced process names and leading-hyphen command-line flags are no longer treated as person or organization names.
+- 修复引擎启动瞬间的一批「令牌无效」拒绝：令牌改为原子写入，界面不会再读到空令牌。
+- Fixed a burst of "invalid token" rejections right after engine start: the token is now written atomically, so the UI never reads an empty one.
+
 ## [0.14.1] - 2026-11-02
 
 ### 更新摘要 / Summary

@@ -57,6 +57,37 @@ class NerCodeIdentifierFilterTests(unittest.TestCase):
     def test_cjk_untouched(self):
         self.assertFalse(ner_engine._looks_like_code_identifier("简洁"))
 
+    def test_spaced_product_name_is_code(self):
+        """含空格的**非人名形态**（进程名/产品名）必须过滤。
+
+        2026-11-03 真机：`Pas…mon`（守护进程名）在中文字段里被 BERT 判成 NAME，
+        登记成敏感实体后因 NER 只遮 span、出口复检是全文比对，每次请求都报
+        `egress_verify` flagged（215 次）。旧实现「含空白 → 直接放行」是漏网原因。
+        值用分片拼接，避免落盘时被本地脉关改写（AGENTS.md §3 第 9 条）。
+        """
+        for s in ("Pas" + "eo" + " " + "dae" + "mon",
+                  "ngi" + "nx" + " " + "wor" + "ker"):
+            with self.subTest(s=s):
+                self.assertTrue(ner_engine._looks_like_code_identifier(s), s)
+
+    def test_leading_punct_fragment_is_code(self):
+        """以标点起头的 span 不是人名/机构名（`-funct…n` 曾被判成 ORG，383 次）。
+
+        `-` 故意不在 `_CODE_PUNCT` 里（那是为 `Jean-Luc` 排除的），所以需要
+        单独一条「首字符非字母数字」的判据。
+        """
+        for s in ("-" + "funct" + "ion", "-" + "inter" + "nal"):
+            with self.subTest(s=s):
+                self.assertTrue(ner_engine._looks_like_code_identifier(s), s)
+
+    def test_real_english_names_still_survive(self):
+        """收紧后英文人名仍要保留 —— 过滤只针对标识符形态，不针对真名。"""
+        for s in ("John" + " " + "Smith",
+                  "Mary" + " " + "Jane" + " " + "Wat" + "son",
+                  "Mc" + "Donald"):
+            with self.subTest(s=s):
+                self.assertFalse(ner_engine._looks_like_code_identifier(s), s)
+
 
 class ShortNameContextTests(unittest.TestCase):
     """2~3 字中文 NAME 必须有强上下文佐证，否则按误报跳过。"""

@@ -5994,6 +5994,14 @@ def _expand_long_entity_spans(text, planned, per_needle=64, total=512):
 
     上限 `per_needle` / `total` 是热路径护栏：`str.find` 是 C 速度，但长会话里
     同一串可能重复上千次，无界扩展会把结果区间数推到万级，拖慢 `_mask_by_spans`。
+
+    ⚠️ **作用域是单个字符串叶子**（`text` 就是 `_mask_tree` 交给 `mask()` 的那个叶子），
+    而出口复检 `_mask_egress_verify` 是**整个请求 body**。两者口径差一层：同一长值
+    若出现在**另一个叶子**、且 NER 没在那里标出，本函数扩不到它，复检仍会报残留。
+    不改成请求级两遍扫描的原因：那要求先扫完全部叶子再回填，与「没命中就一个字
+    都不改、保住上游前缀缓存」的设计直接冲突，且会把热路径变成两倍体量。
+    当前接受这个残留：它只产生 `flagged` 事件（默认不阻断），并且真正的长实体
+    在长会话里通常重复出现在同一段文本内，叶子内扩展已能覆盖。
     """
     if not planned:
         return planned

@@ -221,6 +221,15 @@ def _is_fully_placeholderized(text: str) -> bool:
 # 本来就只负责**中文**人名/机构/地址；英文人名（`John Smith`）含空格不受影响，
 # 首字母大写的单个英文词（`John`）也仍交给模型判断。
 _IDENT_RX = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+# 人名形态的单个词：首字母大写、其余字母任意（`John` / `McDonald` / `Jean`）。
+# 只用于「含空白」分支判定：`John Smith` 保留，`Paseo daemon`（进程名）过滤。
+# 放宽到 `[A-Za-z]*` 而不是 `[a-z]*`，是为了不误伤 `McDonald` / `DeVries` 这类真人名。
+_PERSON_WORD_RX = re.compile(r"^[A-Z][A-Za-z]*$")
+# 以非字母数字起头的残片（`-function` / `.env` / `/usr`）：人名与机构名不会长这样。
+# 专门接住 `-` 打头的 span —— `-` **不能**进 `_CODE_PUNCT`（会误伤 `Jean-Luc`），
+# 但以它**开头**的实体可以确定不是人名（2026-11-03 真机：`-function` 被 BERT
+# 判成 ORG，登记后跨叶子部分未遮，383 次 `egress_verify` flagged）。
+_LEADING_PUNCT_RX = re.compile(r"^[^A-Za-z0-9]")
 # 全小写的 ASCII 复合词（`hugging-face` / `home-assistant` / `next.js`）：域名、包名、
 # 项目名形态。`-` 故意**不**进 `_CODE_PUNCT`（否则 `Jean-Luc` / `O'Brien` 这类首字母
 # 大写的英文人名会被一起误伤），代价是 `hugging-face` 这种全小写串会漏到模型里被判
@@ -237,19 +246,34 @@ def _looks_like_code_identifier(text) -> bool:
 
     判据顺序（先宽后窄，含汉字的直接放过）：
       1. 含汉字 → False（中文实体正是本引擎的职责，绝不插手）；
-      2. 含空白 → False（`John Smith` 这类英文人名/机构名）；
+      2. 含空白 → 仅当**每个词都是人名形态**（首字母大写）→ False；
+         否则 True（`Paseo daemon` 这类进程名/产品名）。
       3. 含代码标点 → True（`JSON.parse`、`obj.field`、`arr[i]`）；
-      4. 纯 ASCII 标识符：全大写（常量）或首字母小写（变量）→ True；
-      5. 其余（首字母大写的纯字母词，如 `John`）→ False，交回模型判断。
+      4. 全小写复合词 → True（`hugging-face`）；
+      5. 以非字母数字起头 → True（`-function`）；
+      6. 纯 ASCII 标识符：全大写（常量）或首字母小写（变量）→ True；
+      7. 其余（首字母大写的纯字母词，如 `John`）→ False，交回模型判断。
+
+    第 2/5 条是 2026-11-03 补的（真机 275 条 `egress_verify` flagged 噪声的根因）：
+    旧实现「含空白 → 直接放行」（为保住 `John Smith`）把判据让渡给了空白本身，
+    于是 `Paseo daemon` 被 BERT 判成 NAME 并登记成敏感实体；`-` 又不在
+    `_CODE_PUNCT` 里（那是为 `Jean-Luc` 有意排除的），于是 `-function` 判成 ORG。
+    两者都不是敏感数据，却因 NER 只遮 span、出口复检是全文比对，每次请求都报
+    「脱敏后仍有原文」—— 日志被打黄，真泄漏反而被淹没。
     """
     t = str(text or "")
     if not t or _CJK_RX.search(t):
         return False
     if any(ch in t for ch in " \t\r\n"):
-        return False
+        # 含空白：只有每个词都像人名（首字母大写）才放行。
+        # 这一条必须比旧实现严格 —— 否则 `Paseo daemon`（第 2 词全小写）永远漏网。
+        words = [w for w in t.split() if w]
+        return not all(_PERSON_WORD_RX.match(w) for w in words)
     if _LOWER_COMPOUND_RX.match(t):
         return True
     if any(ch in _CODE_PUNCT for ch in t):
+        return True
+    if _LEADING_PUNCT_RX.match(t):
         return True
     if not _IDENT_RX.match(t):
         return False
