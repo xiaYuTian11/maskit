@@ -3928,6 +3928,16 @@ def default_config():
         "ocr_allow_remote": False,
         # OCR 后端：auto（装了本地引擎就用本地）/ local / http（老部署或自建 OCR 服务）
         "ocr_engine": "auto",
+        # 扫描本身失败（OCR 未就绪/超时/解码失败）时，是否把整图遮成灰色而不是阻断请求。
+        #
+        # 默认关。两个选项都是「不可用」，区别在卡在哪一环：
+        #   · 关 → 请求 503，客户端只报「请求失败」，用户不知道是本地网关拦的；
+        #   · 开 → 请求正常，但用户所有扫不了的图都变成灰块。
+        # 后者适合「宁可看不到图也不要失败」的场景（如自动化流水线）。
+        #
+        # 注意：**定位失败**（已判定敏感但框不准）不归本项管 —— 那种情况默认就是
+        # 整图遮盖（像素零保留，比阻断更彻底），不需要也不应该阻断。
+        "vision_cover_on_scan_fail": False,
         "stream_response": True,
         # 流式接管黑名单：确认某上游接管后断连时把 host 填进来，保持整包路径。
         # 默认空：曾预置的 opencode.ai 是误判（真因是引擎在无完整 SSE 事件可发时
@@ -4675,6 +4685,11 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         "ocr_endpoint": _normalize_ocr_endpoint(raw.get("ocr_endpoint")),
         "ocr_allow_remote": bool(raw.get("ocr_allow_remote", False)),
         "ocr_engine": _normalize_ocr_engine(raw.get("ocr_engine")),
+        # 扫描本身失败（OCR 未就绪/超时/解码失败）时是否整图遮盖而不是阻断。
+        # 默认关：这类失败不知道图里有什么，遮成灰块等于图片功能整体不可用，
+        # 且日志里只有 reason 码，用户无从排查。需要「宁可看不到图也不要失败请求」
+        # 的用户可显式开启（语义见 `visual_redactor.redact_image_bytes`）。
+        "vision_cover_on_scan_fail": bool(raw.get("vision_cover_on_scan_fail", False)),
         "ner_enabled": bool(raw.get("ner_enabled", False)),
         # 严格模式（§B3）：只在用户显式开启时生效；回滚/重置不得让它静默失效，
         # 也不得因为它缺字段而默认变严（缺字段 = 老配置 = best-effort）。
@@ -4951,7 +4966,9 @@ def _sync_runtime_config(cfg):
             import visual_redactor
             visual_redactor.configure(ocr_endpoint=cfg.get("ocr_endpoint"),
                                       allow_remote=cfg.get("ocr_allow_remote", False),
-                                      engine=cfg.get("ocr_engine"))
+                                      engine=cfg.get("ocr_engine"),
+                                      cover_on_scan_fail=cfg.get("vision_cover_on_scan_fail",
+                                                                 False))
         except Exception:
             pass
         try:

@@ -8205,8 +8205,13 @@ def _vision_mask_media(value, sid):
         deadline = time.monotonic() + _VISION_BUDGET_S
     vstats = {}
     try:
-        out, hits, status = vr.mask_data_url(value, sid, _VISION_SHIM, deadline=deadline,
-                                             stats_out=vstats)
+        out, hits, status = vr.mask_data_url(
+            value, sid, _VISION_SHIM, deadline=deadline, stats_out=vstats,
+            # 定位失败（已判定敏感、框不准）→ 整图遮盖，不阻断。
+            # 这类失败在深色背景截图（终端/IDE 深色主题）上极常见：OCR 把占位符后缀
+            # 读错一位就判复认失败，实测 6 分钟 14 次 503，用户以为是“网关坏了”。
+            allow_cover=True,
+            cover_on_scan_fail=vr.cover_on_scan_fail())
     except _VisionBlocked:
         raise
     except Exception:
@@ -13729,7 +13734,9 @@ def _maybe_reload(force=False):
             import visual_redactor
             visual_redactor.configure(ocr_endpoint=s.get("ocr_endpoint"),
                                       allow_remote=s.get("ocr_allow_remote", False),
-                                      engine=s.get("ocr_engine"))
+                                      engine=s.get("ocr_engine"),
+                                      cover_on_scan_fail=s.get("vision_cover_on_scan_fail",
+                                                               False))
         except Exception:
             pass
     global NER_REQUIRE_COMPLETE

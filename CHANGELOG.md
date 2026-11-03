@@ -9,14 +9,18 @@
 ### 更新摘要 / Summary
 - 日志页不再被大量「疑似泄露」提示刷满：程序名、命令行参数这类英文串不再被当成人名或机构名。
 - 引擎启动瞬间界面不再短暂提示令牌无效。
-- The log page is no longer flooded with "possible leak" notices: program names and command-line flags are no longer treated as person or organization names.
+- 图片脱敏不再因定位不准而把整条对话卡死：深色背景截图（终端、深色主题编辑器）现在正常可用。
+- The log page is no longer flooded with "possible leak" notices: program names and command-line flags are no longer treated as names.
 - The UI no longer briefly reports an invalid token right after the engine starts.
+- Image masking no longer stalls a conversation when text cannot be located: dark-background screenshots now work.
 
 ### 修复
 - 修复日志页被大量「脱敏后仍有原文」提示刷满的问题：含空格的进程名、以连字符开头的命令行参数不再被当成人名或机构名。
 - Fixed the log page being flooded with "original text still present after masking" notices: spaced process names and leading-hyphen command-line flags are no longer treated as person or organization names.
 - 修复引擎启动瞬间的一批「令牌无效」拒绝：令牌改为原子写入，界面不会再读到空令牌。
 - Fixed a burst of "invalid token" rejections right after engine start: the token is now written atomically, so the UI never reads an empty one.
+- 修复图片脱敏定位不准时整条对话卡死：改为整图遮盖，图片内容零保留，请求正常完成（此前直接阻断，客户端只报「请求失败」）。
+- Fixed whole-conversation stalls when image text could not be precisely located: the image is now fully covered instead, keeping zero pixel content while letting the request complete (previously it was blocked outright and the client only reported a generic request failure).
 
 ## [0.14.1] - 2026-11-02
 

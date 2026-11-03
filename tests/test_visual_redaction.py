@@ -140,16 +140,35 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(res["format"], "JPEG")
         self.assertTrue(res["bytes"].startswith(b"\xff\xd8"), "JPEG 被写成了别的格式")
 
-    def test_geometry_failure_blocks_instead_of_faking(self):
+    def test_geometry_failure_covers_instead_of_faking(self):
+        """定位失败 → **整图遮盖**（默认），绝不假称已打码。
+
+        2026-11-03 改：旧契约是「图片一律 503 阻断」，实测代价太大——深色背景截图
+        （终端/IDE 深色主题）的 OCR 复认不稳定，6 分钟内 14 次阻断，用户客户端
+        只报「请求失败」，不知道是本地网关拦的。
+
+        遮盖并不降低安全：整图涂灰 = 像素零保留，比“精确遮几个框”更彻底。
+        本测试守住的是**不能假称成功**（`mode` 必须是 REDACTED，不是 CLEAN）。
+        """
         _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),
                                      text="手机：" + FAKE_PHONE, score=0.9)])
         _patch_recognize(self, lambda payload, deadline=None: "")   # 复认永远失败
         res = vr.process_image_multimodal(_png(), SID, tr)
+        self.assertEqual(res["mode"], vr.MODE_REDACTED, "定位失败不能假称干净")
+        self.assertTrue(res["stats"].get("covered"), "必须标为整图遮盖")
+        self.assertEqual(_pixel(res["bytes"], (200, 50)), vr._FILL, "整图必须是遮盖色")
+
+    def test_geometry_failure_can_still_block_when_cover_disabled(self):
+        """`allow_cover=False` 仍保留旧行为（阻断）——给需要严格语义的调用方。"""
+        _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),
+                                     text="手机：" + FAKE_PHONE, score=0.9)])
+        _patch_recognize(self, lambda payload, deadline=None: "")
+        res = vr.process_image_multimodal(_png(), SID, tr, allow_cover=False)
         self.assertEqual((res["mode"], res["reason"]), (vr.MODE_BLOCKED, vr.BLOCK_GEOMETRY))
         self.assertEqual(res["bytes"], b"")
 
-    def test_allow_cover_is_opt_in(self):
-        """只有 PDF 页传 allow_cover=True；图片一律阻断。"""
+    def test_allow_cover_is_default_for_images(self):
+        """默认值就是允许遮盖（与 PDF 页同口径）。"""
         _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),
                                      text="手机：" + FAKE_PHONE, score=0.9)])
         _patch_recognize(self, lambda payload, deadline=None: "")
@@ -157,6 +176,45 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(res["mode"], vr.MODE_REDACTED)
         self.assertTrue(res["stats"].get("covered"))
         self.assertEqual(_pixel(res["bytes"], (200, 50)), vr._FILL)
+
+    # ── 扫描本身失败：默认阻断，可开关降级为整图遮盖 ───────────────────
+
+    def test_scan_failure_blocks_by_default(self):
+        """OCR 未就绪/超时/解码失败 → 默认仍阻断。
+
+        为什么不默认遮盖：这类失败意味着**不知道图里有什么**，遮成灰块等于图片
+        功能整体不可用，而且日志里只有 reason 码，用户无法排查。
+        """
+        def boom(image_bytes, *, deadline=None, max_tokens=None):
+            raise vr._Blocked(vr.BLOCK_UNAVAILABLE)
+        real = vr.detect_blocks
+        vr.detect_blocks = boom
+        self.addCleanup(setattr, vr, "detect_blocks", real)
+        res = vr.process_image_multimodal(_png(), SID, tr)
+        self.assertEqual(res["mode"], vr.MODE_BLOCKED)
+        self.assertEqual(res["reason"], vr.BLOCK_UNAVAILABLE)
+
+    def test_scan_failure_can_be_covered_when_enabled(self):
+        """显式开 cover_on_scan_fail 后，扫不了也整图遮盖（请求不失败）。"""
+        def boom(image_bytes, *, deadline=None, max_tokens=None):
+            raise vr._Blocked(vr.BLOCK_UNAVAILABLE)
+        real = vr.detect_blocks
+        vr.detect_blocks = boom
+        self.addCleanup(setattr, vr, "detect_blocks", real)
+        res = vr.process_image_multimodal(_png(), SID, tr, cover_on_scan_fail=True)
+        self.assertEqual(res["mode"], vr.MODE_REDACTED, "开启后必须降级为遮盖")
+        self.assertTrue(res["stats"].get("covered"))
+        self.assertEqual(res["stats"].get("cover_reason"), vr.BLOCK_UNAVAILABLE,
+                         "降级原因必须如实带出，否则无从归因")
+        self.assertEqual(_pixel(res["bytes"], (200, 50)), vr._FILL)
+
+    def test_cover_on_scan_fail_is_configurable_via_configure(self):
+        """面板下发的配置能影响行为（否则开关等于摆设）。"""
+        vr.configure(cover_on_scan_fail=True)
+        self.addCleanup(vr.configure, cover_on_scan_fail=False)
+        self.assertTrue(vr.cover_on_scan_fail())
+        vr.configure(cover_on_scan_fail=False)
+        self.assertFalse(vr.cover_on_scan_fail())
 
     def test_low_confidence_blocks_are_not_painted(self):
         _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),

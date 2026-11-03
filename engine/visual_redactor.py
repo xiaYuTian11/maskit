@@ -98,6 +98,8 @@ _OK_STATUSES = frozenset({ST_CLEAN, ST_MASKED, ST_COVER_UNLOCALIZED, ST_COVER_UN
 _CONFIGURED_ENDPOINT = ""
 _ALLOW_REMOTE = False
 _ENGINE_PREF = "auto"
+# 扫描本身失败时是否整图遮盖（默认关，语义见 `redact_image_bytes`）。
+_COVER_ON_SCAN_FAIL = False
 
 # 打码填充色：中性灰。不透明是有意的（半透明会把文字透出来），纯黑太刺眼。
 _FILL = (128, 128, 128)
@@ -143,13 +145,14 @@ MAX_DATA_URL_IMAGE_BYTES = 8 * 1024 * 1024
 # 配置
 # ---------------------------------------------------------------------------
 
-def configure(ocr_endpoint=None, allow_remote=None, engine=None):
+def configure(ocr_endpoint=None, allow_remote=None, engine=None,
+              cover_on_scan_fail=None):
     """注入运行时配置（面板 / 引擎在配置热重载时调用）。
 
     本模块不自己读 config.json：它被两个进程（面板 / mitmdump）各自加载，
     路径与锁都不一样；让调用方把已归一化的值推进来，就不会有两份读盘逻辑慢慢漂开。
     """
-    global _CONFIGURED_ENDPOINT, _ALLOW_REMOTE, _ENGINE_PREF
+    global _CONFIGURED_ENDPOINT, _ALLOW_REMOTE, _ENGINE_PREF, _COVER_ON_SCAN_FAIL
     if ocr_endpoint is not None:
         _CONFIGURED_ENDPOINT = str(ocr_endpoint or "").strip()
     if allow_remote is not None:
@@ -157,6 +160,13 @@ def configure(ocr_endpoint=None, allow_remote=None, engine=None):
     if engine is not None:
         choice = str(engine or "").strip().lower()
         _ENGINE_PREF = choice if choice in ("auto", "local", "http") else "auto"
+    if cover_on_scan_fail is not None:
+        _COVER_ON_SCAN_FAIL = bool(cover_on_scan_fail)
+
+
+def cover_on_scan_fail():
+    """扫描本身失败时是否整图遮盖（默认 False，见 `redact_image_bytes`）。"""
+    return bool(_COVER_ON_SCAN_FAIL)
 
 
 def engine_pref():
@@ -706,8 +716,45 @@ def _paint(img, rects):
 # 核心：一张图 → 打码后的图
 # ---------------------------------------------------------------------------
 
+def _scan_fail_result(reason, cover, image_bytes, sid, tr, *, hint_name="", extra=None):
+    """扫描本身失败时的返回。`cover=True` 时尽力整图遮盖，否则阻断。
+
+    为什么需要这一级（用户第一准则的延伸，2026-11-03）：OCR 未就绪、超时、图片太大、
+    解码失败这些情况下，一个 503 会让用户整条对话卡死——而且客户端只报「请求失败」，
+    用户根本不知道是本地网关拦的。遮成灰块至少让请求能跑完。
+
+    为什么默认仍是阻断：遮盖整图 = 用户所有图片都变成灰块，相当于图片功能整体不可用；
+    而且这种“不知道图里有什么”的遮盖对排查毫无帮助（日志里只有 reason 码）。
+    两者都是不可用，区别是「哪个环节卡住」——所以做成开关，由用户按自己的场景选。
+
+    遮盖也失败（Pillow 缺失等）→ 退回阻断（没有第三个选择）。
+    """
+    stats = dict(extra or {})
+    if not cover:
+        return {"mode": MODE_BLOCKED, "reason": reason, "stats": stats,
+                "hit_count": 0, "bytes": b""}
+    try:
+        img, _why, meta, _frames = _load_image_ex(image_bytes)
+        if img is None:
+            return {"mode": MODE_BLOCKED, "reason": reason, "stats": stats,
+                    "hit_count": 0, "bytes": b""}
+        fmt = _output_format(img, hint_name)
+        img = img.convert("RGB")
+        if not _paint(img, [(0, 0, img.size[0], img.size[1])]):
+            return {"mode": MODE_BLOCKED, "reason": reason, "stats": stats,
+                    "hit_count": 0, "bytes": b""}
+        out = _encoded_or_block(img, fmt, meta, {
+            "mode": MODE_REDACTED, "format": fmt, "hit_count": 1,
+            "stats": dict(stats, covered=True, cover_reason=reason), "reason": ""})
+        # `_encoded_or_block` 自己也可能阻断（元数据写不回去），照它返回
+        return out
+    except Exception:
+        return {"mode": MODE_BLOCKED, "reason": reason, "stats": stats,
+                "hit_count": 0, "bytes": b""}
+
+
 def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
-                       max_tokens=None, allow_cover=False):
+                       max_tokens=None, allow_cover=False, cover_on_scan_fail=False):
     """核心入口。返回 dict：
 
     - `mode`: `MODE_REDACTED` / `MODE_CLEAN` / `MODE_BLOCKED`
@@ -716,19 +763,26 @@ def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
     - `hit_count`: 打码的实体数
     - `stats`: `{entities, verified, line_fallback, failed, low_conf, backend, orientation, ms}`
     - `reason`: BLOCKED 时的原因码
+
+    `allow_cover`：定位失败（`failed`>0）时整图遮盖而不是阻断。PDF 页与图片链路都开。
+    `cover_on_scan_fail`：**扫描本身失败**（OCR 未就绪/超时/解码失败/太大/动图）时
+    也整图遮盖。默认为 False：那种情况我们不知道图里有什么，遮盖整图等于把所有
+    图片变成灰块，比阻断更糟（用户会以为图坏了）。需要“宁可看不到图也不要有失败
+    请求”的用户可显式开启。
     """
     ok, why = available()
     if not ok:
-        return {"mode": MODE_BLOCKED, "reason": why, "stats": {}, "hit_count": 0, "bytes": b""}
+        return _scan_fail_result(why, cover_on_scan_fail, image_bytes, sid, tr,
+                                 hint_name=hint_name)
     img, decode_why, meta, frames = _load_image_ex(image_bytes)
     if img is None:
-        return {"mode": MODE_BLOCKED, "reason": decode_why, "stats": {},
-                "hit_count": 0, "bytes": b""}
+        return _scan_fail_result(decode_why, cover_on_scan_fail, image_bytes, sid, tr,
+                                 hint_name=hint_name)
     if frames > 1:
         # 动图（GIF/WebP/APNG）：OCR 只看得到第一帧。实测敏感值只在第 2 帧时被判「干净」
         # 原样上行。逐帧扫描的代价与帧数线性、且这类图很少是业务截图，所以直接阻断。
-        return {"mode": MODE_BLOCKED, "reason": BLOCK_ANIMATED, "stats": {"frames": frames},
-                "hit_count": 0, "bytes": b""}
+        return _scan_fail_result(BLOCK_ANIMATED, cover_on_scan_fail, image_bytes, sid, tr,
+                                 hint_name=hint_name, extra={"frames": frames})
     if deadline is None:
         deadline = time.monotonic() + _OCR_TOTAL_BUDGET_S
     # 输出格式要在 convert 之前取：PIL 的 convert() 返回新对象，`.format` 会丢，
@@ -739,8 +793,8 @@ def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
     try:
         blocks, info = detect_blocks(image_bytes, deadline=deadline, max_tokens=max_tokens)
     except _Blocked as e:
-        return {"mode": MODE_BLOCKED, "reason": e.reason, "stats": {}, "hit_count": 0,
-                "bytes": b""}
+        return _scan_fail_result(e.reason, cover_on_scan_fail, image_bytes, sid, tr,
+                                 hint_name=hint_name)
 
     img = img.convert("RGB") if img.mode not in ("RGB", "L") else img
     rects, locator_stats = _locator.locate(blocks, lambda t: _mask_text(tr, t, sid),
@@ -764,7 +818,22 @@ def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
 
     if stats.get("failed"):
         if allow_cover:
-            # 只给 PDF 页留这一级（整份文档阻断代价更高）；图片/OOXML 一律阻断。
+            # 整图/整页遮盖：确认有敏感内容但**定位不全**。
+            #
+            # 为什么允许遮盖而不是阻断（2026-11-03 定案）：定位失败不等于“没扫到”。
+            # `failed` 只统计「已判定为敏感、但裁图复认没能确认框住」的实体——
+            # 它意味着**我们已经知道这张图里有敏感值**，只是画不准那个框。
+            # 此时整图涂成灰色是**更彻底**的脱敏（像素零保留），安全性比阻断更高：
+            #   · 阻断 → 用户整条对话卡死（客户端只显示“请求失败”，不知道是网关拦的）；
+            #   · 整图遮盖 → 敏感值 100% 不上行，请求正常完成，用户只是看不到图。
+            # 代价对比：漏一个值 vs 整条链路不可用，后者不可补救。
+            #
+            # 注意：这条降级**只针对定位失败**。扫描本身失败（OCR 未就绪、解码失败、
+            # 超时、图片太大、动图）仍然阻断——那种情况我们**不知道图里有什么**，
+            # 遮盖整图等于把用户所有图片都变成灰块，那是另一种不可用。
+            # 原先只给 PDF 页开这个口子（整份合同阻断代价更高）；图片链路实测同样
+            # 会被深色背景截图触发（OCR 把 `l` 认成 `I` 导致占位符复认失败），
+            # 而终端/IDE 深色主题截图在开发场景里极其常见。
             _paint(img, [(0, 0, img.size[0], img.size[1])])
             return _encoded_or_block(img, fmt_out, meta, {
                 "mode": MODE_REDACTED, "format": fmt_out,
@@ -864,14 +933,21 @@ def _recognize(payload, deadline=None):
 # ---------------------------------------------------------------------------
 
 def process_image_multimodal(image_bytes, sid, tr, deadline=None, max_tokens=None,
-                            allow_cover=False):
+                            allow_cover=True, cover_on_scan_fail=False):
     """独立图片（上传/截图/图片消息）。
 
-    `allow_cover` 只给 PDF 页用：定位失败时整页遮盖而不是阻断（整份文档阻断代价更高）。
-    图片与 OOXML 内嵌图一律传 False —— 宁可阻断，也不给一张看不懂的废图。
+    `allow_cover=True`（默认，2026-11-03 改）：**定位失败**（已判定敏感、但框不准）
+    时整图遮盖。这种情况遮盖比阻断更彻底也更安全（像素零保留），且不会让用户
+    整条对话卡死。深色背景截图（终端/IDE 深色主题）的 OCR 复认不稳定，旧行为
+    是每次遇到就 503，实测 6 分钟内 14 次。
+
+    `cover_on_scan_fail`：**扫描本身失败**（OCR 缺失/超时/解码失败）时也遮盖。
+    默认 False——那类情况不知道图里有什么，遮成灰块等于图片功能整体不可用，
+    且对排查无帮助；由用户通过配置显式开启。
     """
     return redact_image_bytes(image_bytes, sid, tr, deadline=deadline,
-                              max_tokens=max_tokens, allow_cover=allow_cover)
+                              max_tokens=max_tokens, allow_cover=allow_cover,
+                              cover_on_scan_fail=cover_on_scan_fail)
 
 
 def mask_embedded_image_bytes(image_bytes, sid, tr, deadline=None, hint_name=""):
@@ -901,11 +977,15 @@ def mask_embedded_image_bytes(image_bytes, sid, tr, deadline=None, hint_name="")
     return res.get("bytes") or image_bytes, int(res.get("hit_count") or 1), status
 
 
-def mask_data_url(value, sid, tr, deadline=None, max_bytes=None, stats_out=None):
+def mask_data_url(value, sid, tr, deadline=None, max_bytes=None, stats_out=None,
+                  allow_cover=True, cover_on_scan_fail=False):
     """`data:image/...;base64,` 里的像素脱敏（代理链路 / 扩展链路共用）。
 
     返回 `(新值, 命中数, 状态)`；状态见模块常量。非图片载体返回 `ST_NOT_APPLICABLE`，
     调用方保持原有豁免逻辑。
+
+    `allow_cover` / `cover_on_scan_fail` 语义见 `redact_image_bytes`：前者默认开
+    （定位失败→整图遮盖，不让对话卡死），后者默认关（扫描失败仍阻断）。
     """
     if not isinstance(value, str):
         return value, 0, ST_NOT_APPLICABLE
@@ -931,7 +1011,9 @@ def mask_data_url(value, sid, tr, deadline=None, max_bytes=None, stats_out=None)
     if len(raw) > limit:
         return value, 0, BLOCK_TOO_LARGE
 
-    res = redact_image_bytes(raw, sid, tr, deadline=deadline)
+    res = redact_image_bytes(raw, sid, tr, deadline=deadline,
+                              allow_cover=allow_cover,
+                              cover_on_scan_fail=cover_on_scan_fail)
     mode = res.get("mode")
     if mode == MODE_BLOCKED:
         return value, 0, res.get("reason") or BLOCK_GEOMETRY
@@ -944,8 +1026,12 @@ def mask_data_url(value, sid, tr, deadline=None, max_bytes=None, stats_out=None)
         # 把定位统计（自校验/退整行）带给调用方：代理链路的 "已遮但退成整行" 必须在
         # 事件里看得见，否则用户只看到"日志里一个数字"。
         stats_out.update(res.get("stats") or {})
+    # 整图遮盖也走这个出口：命中数至少 1，状态标为 COVER，让日志/统计区分
+    # “精确打码”与“图里确实有敏感内容但定位不全”。
+    _stats = res.get("stats") or {}
+    _status = ST_COVER_UNLOCALIZED if _stats.get("covered") else ST_MASKED
     return "data:%s;base64,%s" % (mime, base64.b64encode(out).decode("ascii")), \
-        int(res.get("hit_count") or 1), ST_MASKED
+        int(res.get("hit_count") or 1), _status
 
 
 def is_ok_status(status):
