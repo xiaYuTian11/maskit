@@ -41,12 +41,12 @@ class TestSignalFunctions(unittest.TestCase):
         label = "API" + "KEY_1bcd59"
         placeholder = "{" * 2 + label + "}" * 2
         r = sig.scan_error_leak(500, '{"err":"' + placeholder + '"}')
-        self.assertFalse(any(f["kind"] == "sk_prefix_secret" for f in r))
+        self.assertFalse(any(f["kind"] == "openai_api_key" for f in r))
 
     def test_error_leak_detects_real_sk_key(self):
         """真正的 sk- 前缀凭据仍应保持 CRITICAL。"""
         r = sig.scan_error_leak(500, "sk-" + "Ab3x" * 8)
-        hits = [f for f in r if f["kind"] == "sk_prefix_secret"]
+        hits = [f for f in r if f["kind"] == "openai_api_key"]
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["severity"], sig.CRITICAL)
 

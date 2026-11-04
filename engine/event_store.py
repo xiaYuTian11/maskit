@@ -1413,13 +1413,18 @@ def _audit_visibility_filter():
 
 
 def fetch_audit_events(since=0, limit=500, severity_floor=None, signal_filter=None,
-                       include_deprecated=False):
+                       include_deprecated=False, probe_ids=None):
     """读取审计事件。since=id（返回 id>since 的）。severity_floor=LOW/MEDIUM/HIGH/CRITICAL。
 
     include_deprecated=False（默认）按 `_audit_visibility_filter` 隐藏已撤销的判定，
     这只适用于**给人看的列表**。安全检测的读路径（audit_engine 的探针结果聚合）
     必须传 True：过滤加在检测路径上等于「某个信号被降噪隐藏后，风险矩阵永远看不到
     它」，而矩阵仍会渲染成绿色——这是个假阴性。
+
+    probe_ids（2026-11-04 新增）：只返回这些探针的事件。检测读路径必须传它：
+    不过滤时本函数只取「最近 limit 条」，被动审计（用户正常流量的信号）会在探针
+    逐条发送的数分钟窗口里把行挤满——排在前面的探针即使产出了 HIGH/CRITICAL 发现，
+    也读不回来，聚合层照样把它当「已覆盖且无异常」（假绿）。
     """
     _ensure_db()
     since = int(since or 0)
@@ -1444,6 +1449,13 @@ def fetch_audit_events(since=0, limit=500, severity_floor=None, signal_filter=No
     if signal_filter:
         where.append("signal_type = ?")
         params.append(signal_filter)
+    if probe_ids:
+        # 截断上限 1000：老 SQLite 构建的绑定变量上限是 999，而一轮探针远小于该数；
+        # 超出属于调用方异常，宁可在这里收口也不让 SQL 因变量数溢出而整条失败。
+        pids = [str(p) for p in probe_ids if p][:1000]
+        if pids:
+            where.append("probe_id IN (%s)" % ",".join("?" * len(pids)))
+            params.extend(pids)
     sql = (
         "SELECT id, ts, sid, host, method, path, signal_type, severity, evidence, "
         "request_hash, response_hash, probe_id, audit_ms, audit_scan_bytes, "

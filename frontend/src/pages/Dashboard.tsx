@@ -608,7 +608,7 @@ export default function Dashboard() {
       {status?.auto_recovered_at && !status.auto_recover_fail && (
         <div className="flex items-center gap-2 rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-success-ink">
           <ShieldCheck className="h-4 w-4 shrink-0" />
-          <span>{tf('dash.autoRecovered', { time: status.auto_recovered_at ? dayjs(status.auto_recovered_at).format('HH:mm:ss') : '—' })}</span>
+          <span>{tf('dash.autoRecovered', { time: status.auto_recovered_at ? dayjs.unix(status.auto_recovered_at).format('HH:mm:ss') : '—' })}</span>
           <Button size="icon" variant="ghost" className="ml-auto h-6 w-6 shrink-0" onClick={dismiss}>
             <X className="h-3.5 w-3.5" />
           </Button>

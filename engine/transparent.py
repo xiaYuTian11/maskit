@@ -6663,7 +6663,13 @@ def _mask_text(text, sid):
         # （还原后会丢排版）。
         lead = len(raw_frag) - len(raw_frag.lstrip())
         a, b = s0 + lead, s0 + lead + len(frag)
-        if _name_without_support(text, a, b, frag, lbl):
+        # 会话内值一致性（2026-11-04）：该值已在本会话打码过（fwd 里有它）时，
+        # 不再走「短词语境」启发式。真机 2.5 天 846 个请求的未脱敏原文上行全部
+        # 源于同一模式——同值 A 处（有语境）打码、B 处（无语境）被当误报跳过。
+        # 启发式只该拦「第一次见到的陌生短词」；已知敏感值由会话判定兜底。
+        # 区间来自实体提议器的边界，不是盲目子串匹配，不会切碎更长的词；
+        # 不新增任何阻断——打码照常、请求照常上行。
+        if frag not in fwd and _name_without_support(text, a, b, frag, lbl):
             _short_name_skips[0] += 1
             return None
         # 记账口径说明（易错，必须保留）：_hit() 必须传伤疤坐标系的残片 frag，
@@ -6751,9 +6757,13 @@ def _mask_text(text, sid):
                         pass
                 if _zh_drop:
                     _drop_keys = {(d.get("start"), d.get("end")) for d in _zh_drop}
+                    # 反例词剔除同样只针对「陌生值」：会话内已打码过的值（比如
+                    # 真叫这个名字的人）不因撞上反例词表被放行原文——与
+                    # `_plan_entity` 里的会话已知值豁免同一口径。
                     translated_entities = [
                         e for e in translated_entities
                         if (e.get("start"), e.get("end")) not in _drop_keys
+                        or text[e.get("start", 0):e.get("end", 0)].strip() in fwd
                     ]
                 if _zh_extra:
                     translated_entities.extend(_zh_extra)

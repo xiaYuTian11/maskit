@@ -1608,7 +1608,7 @@ class WriterResilienceTests(unittest.TestCase):
         })
         event_store.append_audit_event({
             "ts": now, "signal_type": "error_leak", "severity": "CRITICAL",
-            "evidence": "sk_prefix_secret len=35 sha256=0123456789abcdef",
+            "evidence": "openai_api_key len=35 sha256=0123456789abcdef",
         })
         event_store.append_audit_event({
             "ts": now, "signal_type": "identity_swap", "severity": "HIGH",
@@ -1619,7 +1619,7 @@ class WriterResilienceTests(unittest.TestCase):
         signals = {(e["signal_type"], e["evidence"]) for e in visible}
         self.assertNotIn("upstream_host: relay.example", evidence)
         self.assertNotIn("canary_echoed: CANARY_demo", evidence)
-        self.assertIn("sk_prefix_secret len=35 sha256=0123456789abcdef", evidence)
+        self.assertIn("openai_api_key len=35 sha256=0123456789abcdef", evidence)
         self.assertIn(("identity_swap", ""), signals, "空 evidence 的有效历史事件不得被过滤")
 
     def test_clear_audit_events_race_old_queue_events_do_not_resurface(self):

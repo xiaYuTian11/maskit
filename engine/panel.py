@@ -5922,7 +5922,7 @@ def _arg_int(name, default, lo=0, hi=100000):
 
 @app.get("/api/audit/events")
 def api_audit_events():
-    since = _arg_int("since", 0, 0, 2**31)
+    since = _arg_int("since", 0, 0, 2**63 - 1)
     limit = _arg_int("limit", 500, 1, 5000)
     floor = request.args.get("floor") or None
     signal = request.args.get("signal") or None
@@ -6611,11 +6611,11 @@ def api_logs():
     if time.time() - _last_log_prune[0] > 3600:
         prune_event_log()
         _last_log_prune[0] = time.time()
-    since = _arg_int("since", 0, 0, 2**31)
+    since = _arg_int("since", 0, 0, 2**63 - 1)
     # 反向游标（§D3.1）：取比 before_seq 更早的一页。与 since 互斥使用
     # （前端「加载更早」只传 before_seq），筛选条件与向前翻同源，
     # 保证同一筛选下两页看到的是同一批行（不会漏筛/漏重）。
-    before_seq = _arg_int("before_seq", 0, 0, 2**31)
+    before_seq = _arg_int("before_seq", 0, 0, 2**63 - 1)
     # 时间下界（可选）：只在这个时间点**之前**的记录里翻。给「回看某个时间段」用，
     # 与 before_seq 同属反向游标（id 与 ts 同序，两者一起给取交集）。
     # 非法值返回 None（= 不限时间），不让一个手写错的参数把请求 500。
@@ -6852,7 +6852,7 @@ def api_log_detail():
     列表用 ?slim=1 拿轻量数据（省掉 79% 体积），点开弹窗时才回源取这一条，
     避免为了极少数被点开的行、把上千条正文全量下发。
     """
-    seq = _arg_int("seq", 0, 0, 2**31)
+    seq = _arg_int("seq", 0, 0, 2**63 - 1)
     if seq <= 0:
         return jsonify({"ok": False, "error": "缺少 seq"}), 400
     # 必须精确按 id 取：fetch_events 是 id > since 且 ORDER BY id DESC，
@@ -7108,7 +7108,7 @@ def api_logs_export():
     except Exception:
         before_ts = None
     ev, has_older = fetch_events_before(
-        before_seq=2**31, before_ts=before_ts, limit=limit, sensitive_only=sensitive_only,
+        before_seq=2**63 - 1, before_ts=before_ts, limit=limit, sensitive_only=sensitive_only,
         query=query, fulltext=fulltext, event_type=event_type, ingress=ingress,
         max_limit=EXPORT_MAX)
     # 截断判定不能再用「拿满 limit」（那是猜测）：直接数一次当前筛选的匹配行数，
@@ -7471,8 +7471,15 @@ def _emit_ext_block(reason, sid, needles=None, decision="blocked", leaked=None,
                          "脱敏后仍能匹配到本次登记的原文（仅记录，请求照常上行，扩展链路）")),
             **{**_report, "decision": decision},
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # 阻断/复检本身已按 fail-closed 语义返回给调用方，这里丢的只是「为什么被拦」
+        # 的事件留痕——吞掉等于事件页无痕（红线：阻断必须留痕）。
+        # 只记异常类型不记 message：message 可能带正文片段，而诊断包会带走 engine.log。
+        try:
+            if _DIAG_LOG_ENABLED:
+                _persist_diag_line("[panel] ext block event emit failed: %s" % type(e).__name__)
+        except Exception:
+            pass
 
 
 @app.post("/api/ext/mask")

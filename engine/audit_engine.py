@@ -121,7 +121,7 @@ def gen_error_triggers():
         ("missing_messages", json.dumps({"model": "claude-3-5-sonnet"}), {}),
         ("unknown_endpoint", json.dumps({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}]}), {"_path_override": "/v1/nonexistent"}),
         ("force_upstream_error", json.dumps({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 99999999}), {}),
-        ("auth_probe", json.dumps({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}]}), {"x-api-key": "sk-fake-xapi-probe-nothing-real-xyz99999", "authorization": "Bearer nothing-fake-token-xyz-999-auth-probe"}),
+        ("auth_probe", json.dumps({"model": "claude-3-5-sonnet", "messages": [{"role": "user", "content": "hi"}]}), {"x-api-key": "sk-" + "0" * 37, "authorization": "Bearer " + "0" * 32}),
     ]
 
 
@@ -445,11 +445,13 @@ def build_probe_plan(upstream_name, model, profile="general"):
 def collect_findings_by_probe(probe_ids):
     """从 audit_events 表按 probe_id 查检测结果。返回 {probe_id: [finding, ...]}。"""
     out = {pid: [] for pid in probe_ids}
-    # fetch_audit_events 不支持 probe_id 过滤，全量扫近 200 条匹配
-    # 必须 include_deprecated=True：这是**检测**读路径，不是给人看的列表。
-    # 默认的读侧降噪过滤会让被隐藏的信号在风险矩阵里永远看不到，而矩阵仍渲染绿色
-    # （假阴性）。降噪只应作用于 UI 列表。
-    evs = fetch_audit_events(since=0, limit=500, include_deprecated=True)
+    # 必须按 probe_id 过滤（2026-11-04）：不传时全表只取「最近 500 条」，探针逐条
+    # 发送（单条超时 30s、整轮数分钟）期间，用户正常流量产生的被动审计行会把排在
+    # 前面的探针结果顶出窗口——探到了风险却读不回来，矩阵照样渲染绿色（假阴性）。
+    # include_deprecated=True 照旧：这是**检测**读路径，不是给人看的列表；
+    # 默认的读侧降噪过滤会让被隐藏的信号在风险矩阵里永远看不到。降噪只应作用于 UI。
+    evs = fetch_audit_events(since=0, limit=1000, include_deprecated=True,
+                             probe_ids=[str(p) for p in probe_ids])
     for ev in evs:
         pid = ev.get("probe_id")
         if pid in out:

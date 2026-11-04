@@ -29,9 +29,15 @@ MAIL_RX = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}")
 # 保留域（RFC2606 / RFC6761）：example.com/org/net、.invalid、.test、.local、.internal
 RESERVED_MAIL_RX = re.compile(
     r"@(example\.(com|org|net)|[\w.-]*\.(invalid|test|local|internal|example))\b")
-# 凭据形态：只认「前缀 + 长随机尾」，避免把 `sk-test`（短、明显假）也拦下来
+# 凭据形态：只认「前缀 + 长随机尾」，避免把 `sk-test`（短、明显假）也拦下来。
+# 2026-11-04 收紧（第二次踩中）：尾段类补 `-_`（新版密钥普遍带连字符，旧类
+# `[A-Za-z0-9]{24,}` 对 `sk-proj-…` 形态直接漏掉，audit_engine 探针的假凭据就这样
+# 躺在生产源码里）；前缀补 gsk/hf/nvapi/xai/pplx/dop_v1。纯小写+下划线的长尾
+# 几乎必是代码标识符（placeholder_identifier 之类），在测试里按「尾段含数字或
+# 大写」再拦——真凭据的随机尾不可能全小写。
 SECRET_RX = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:sk|ah|ghp|gho|xox[baprs]|AKIA)[-_][A-Za-z0-9]{24,}(?![A-Za-z0-9_-])")
+    r"(?<![A-Za-z0-9_-])(?:sk|ah|ghp|gho|gsk|hf|nvapi|xai|pplx|dop_v1|xox[baprs]|AKIA)"
+    r"[-_][A-Za-z0-9_-]{23,}(?![A-Za-z0-9_-])")
 
 # 中文姓名形态（2026-10-25 新增，来自同一条事故链的第二次踩中）。
 #
@@ -84,7 +90,9 @@ class SourcePiiLiteralTests(unittest.TestCase):
         offenders = []
         for f in _production_sources():
             for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                if SECRET_RX.search(line):
+                for m in SECRET_RX.finditer(line):
+                    if not re.search(r"[0-9A-Z]", m.group()):
+                        continue  # 纯小写长尾按代码标识符放行，避免守卫变成噪声源
                     offenders.append("%s:%d" % (f.relative_to(ROOT), i))
         self.assertEqual(offenders, [], "生产源码里出现凭据形态字面量（前缀 + 长随机尾）")
 

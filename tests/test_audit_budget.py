@@ -277,6 +277,34 @@ class AuditCostPersistedTests(unittest.TestCase):
         self.assertIs(rows[0]["audit_scan_truncated"], True,
                       "截断标记必须是真布尔（A-1 的核心验收判据）")
 
+    def test_probe_ids_filter_beats_noise_window(self):
+        """probe_ids 过滤（2026-11-04）：被动审计噪声把「最近 limit 条」窗口填满时，
+        按探针过滤的检测读路径必须仍能读回探针行。旧实现（全表取最近 500 条再在
+        Python 里按 probe_id 匹配）会让排在前面的探针发现被窗口挤出——探到了
+        HIGH 风险也读不回来，风险矩阵渲染成绿色（假阴性）。"""
+        # 探针行**先**写入：真实场景里探针逐条发送期间，被动审计的噪声行随后
+        # 源源写入，才会把排在前面的探针结果顶出「最近 limit 条」窗口
+        self.es.append_audit_event({
+            "ts": 1.0, "signal_type": "prompt_injection", "severity": "HIGH",
+            "probe_id": "probe_step2_x",
+        })
+        for i in range(600):
+            self.es.append_audit_event({
+                "ts": 2.0 + i, "signal_type": "noise", "severity": "LOW",
+            })
+        # 旧行为复现：不传 probe_ids 时只取最近 500 条，探针行被噪声挤出窗口
+        rows = self.es.fetch_audit_events(since=0, limit=500)
+        self.assertTrue(all(r.get("probe_id") != "probe_step2_x" for r in rows),
+                        "前置条件不成立：探针行未被噪声挤出，本测试没有测到旧缺陷")
+        # 新行为：按探针 id 过滤，窗口噪声挤不掉它
+        rows = self.es.fetch_audit_events(since=0, limit=500, probe_ids=["probe_step2_x"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["signal_type"], "prompt_injection")
+        self.assertEqual(rows[0]["severity"], "HIGH")
+        # 空 probe_ids 按旧行为处理（不过滤），不产生空 IN ()
+        rows = self.es.fetch_audit_events(since=0, limit=500, probe_ids=[])
+        self.assertEqual(len(rows), 500)
+
     def test_old_rows_without_cost_fields_read_as_none(self):
         """老条目（升级前写入）读回是 None，而不是被伪装成 0/False：
         「没记录」与「没截断」是两件事。"""

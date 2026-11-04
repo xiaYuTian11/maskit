@@ -11,7 +11,8 @@ import { pickUserNotes } from './releaseNotes'
 export interface EngineState {
   ready: boolean
   port: number
-  started_at: string | null
+  /** 引擎启动时刻（epoch 秒，Rust 侧是 Option<u64>）——格式化必须走 dayjs.unix */
+  started_at: number | null
   pid: number | null
   last_error: string | null
 }
@@ -45,10 +46,6 @@ export function getShellVersion(): Promise<string> {
       .catch(() => '')
   }
   return shellVersionPromise
-}
-
-export async function restartEngine(): Promise<{ ok: boolean; error?: string }> {
-  return await invoke('restart_engine')
 }
 
 /** 开机自启（Rust 写 winreg 指向壳 exe；再调 panel /api/autostart 同步 config） */

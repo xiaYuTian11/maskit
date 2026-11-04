@@ -4,6 +4,22 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 对话里打码过的名字，换个位置再出现也会被打码，不再以原文发出去。
+- Names masked earlier in a conversation stay masked wherever they reappear, instead of going out as plaintext.
+
+### 修复
+- 修复同一对话里已打码的值在无姓名语境的位置被当成误报放行、原文随请求发出的问题：已确认敏感的值在其后出现时直接沿用同一占位符，不再逐处重新判断；请求照常发出，不新增任何阻断。
+- Fixed session-known values being skipped as false positives when reappearing without name context and leaking as plaintext: confirmed values now reuse the same placeholder everywhere instead of being re-judged per occurrence; requests are never blocked.
+- 修复安全审计的探针结果可能被正常流量的记录挤出读取范围、检查结论误显示为无异常的问题。
+- Fixed audit probe findings being evicted from the read window by normal-traffic records, which could render a falsely clean result.
+- 修复界面一批问题：自动恢复时间显示成 1970 年、统计页把加载失败显示成无数据、复制按钮在部分环境静默失败、扩展地址复制成固定端口；托盘开关代理失败时不再误显示为已切换。
+- Fixed several UI issues: auto-recovery time shown as 1970, stats load failures shown as empty data, silent copy failures in some environments, and the extension address copied with a fixed port; the tray no longer shows a switched state when toggling the proxy failed.
+- 关于页拉取更新说明增加超时与失败回退，网络不佳时不再长时间空白。
+- The About page now times out and falls back when fetching release notes instead of staying blank on poor networks.
+
 ## [0.15.1] - 2026-11-04
 
 ### 更新摘要 / Summary

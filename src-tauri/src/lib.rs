@@ -1123,11 +1123,18 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let path = if running { "stop" } else { "start" };
-                    let res = client
+                    // /api/proxy/* 业务失败也回 HTTP 200（body 带 ok:false），401/403
+                    // 同样只算「传输完成」。只看传输层会把「没起来」显示成「运行中」
+                    // ——窗口隐藏时前端轮询已停，这个错状态会一直留到用户下一次点击。
+                    let action_ok = client
                         .post(format!("{base}/api/proxy/{path}"))
                         .header("X-Shield-Token", &token)
-                        .send();
-                    if res.is_ok() {
+                        .send()
+                        .ok()
+                        .and_then(|r| r.json::<serde_json::Value>().ok())
+                        .and_then(|v| v.get("ok").and_then(|v| v.as_bool()))
+                        .unwrap_or(false);
+                    if action_ok {
                         update_tray_proxy_text(!running);
                     }
                 }

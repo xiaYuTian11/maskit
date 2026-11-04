@@ -83,7 +83,8 @@ export interface ProxyStatus {
   admin: boolean
   ca_cert_exists: boolean
   uptime: number
-  auto_recovered_at: string | null
+  /** 引擎侧 time.time()（epoch 秒）——格式化必须用 dayjs.unix，直接 dayjs() 会当毫秒 */
+  auto_recovered_at: number | null
   auto_recover_fail: string
   data_root: string
   db_size_mib: number

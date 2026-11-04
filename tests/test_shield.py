@@ -5147,7 +5147,7 @@ class AuditFailClosedBlockTests(unittest.TestCase):
         self.assertEqual(kw["reason"], "audit_critical_signal")
         self.assertEqual(kw["signal"], "error_leak")
         self.assertEqual(kw["severity"], "CRITICAL")
-        self.assertIn("sk_prefix_secret", kw["evidence"])
+        self.assertIn("openai_api_key", kw["evidence"])
         self.assertIn("sha256=", kw["evidence"], "evidence 必须是摘要/掩码形态")
         self.assertNotIn(secret, kw["evidence"], "凭据原文不得进 BLOCK evidence")
         self.assertEqual(kw["sid"], "sid-1")

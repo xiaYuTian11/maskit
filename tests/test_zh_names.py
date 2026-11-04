@@ -326,5 +326,84 @@ class IntegrationTests(unittest.TestCase):
             tr._known_reset_for_tests()
 
 
+class SessionKnownValueConsistencyTests(unittest.TestCase):
+    """会话内已打码的值，其后出现不再走「短词语境」启发式（2026-11-04）。
+
+    真机 2.5 天复盘：846 个请求带着未脱敏原文上行，其同请求 MASK 事件 100%
+    携带 short_name_no_context——同一值 A 处（有语境）被打码、B 处（无语境）被
+    当误报跳过，B 处原文随请求出网。启发式只该拦「第一次见到的陌生短词」；
+    已是会话已知值的实体由会话判定兜底（实体级一致性，不是盲目子串匹配，
+    不新增任何阻断——打码照常、请求照常上行）。
+    """
+
+    def test_bare_reoccurrence_of_known_value_is_masked(self):
+        name = "陈建国"
+        with_ctx = "联系人：" + name + "说订单有问题"
+        bare = "又提到了" + name + "这个词条"
+        tr = _engine()
+        d = tempfile.mkdtemp(prefix="maskit-known-")
+        saved = {
+            k: getattr(tr, k)
+            for k in ("CUSTOM_WORDS", "BUILTIN_RULES", "SENSITIVE_DISABLED",
+                      "SENSITIVE_WORD_DISABLED", "SENSITIVE_WORD_WHOLE",
+                      "UPSTREAMS", "TARGET_DOMAINS", "API_PATHS",
+                      "CAPTURE_MODE", "FAIL_CLOSED", "_DATA_ROOT")
+        }
+        mtime = tr._cfg_mtime[0]
+        saved_spans = tr._zh_name_spans
+        try:
+            with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"sensitive": {}, "builtin_rules": {}, "ner_enabled": True,
+                     "target_domains": ["api.example.com"],
+                     "api_paths": ["/v1/messages"]},
+                    fh, ensure_ascii=False,
+                )
+            tr._DATA_ROOT = Path(d)
+            tr._cfg_mtime[0] = None
+            tr._maybe_reload(force=True)
+            tr.BUILTIN_RULES = {k: False for k in tr.DEFAULT_BUILTIN_RULES}
+            tr._CUSTOM_WORD_RX_CACHE.clear()
+            tr._known_reset_for_tests()
+            # 实体提议器打桩：NER 在「本机有模型 / CI 无模型」两种环境下行为不同，
+            # 这里保证该值的**每一处出现都会被提议为 NAME 实体**，让测试只考察
+            # 「语境启发式 + 会话已知值」这一层，与检测器覆盖面解耦。
+            def _propose_every(text, ents):
+                i = text.find(name)
+                if i < 0:
+                    return [], [], False
+                return ([{"start": i, "end": i + len(name), "type": "NAME"}],
+                        [], False)
+            tr._zh_name_spans = _propose_every
+
+            # 第一轮：有语境 → 打码（会话 fwd 从此有了这个值）
+            sid = "known-consistency"
+            tr._new_session(sid)
+            out1 = tr.mask(with_ctx, sid)
+            self.assertNotIn(name, out1, f"有语境的首次出现未被遮蔽：{out1!r}")
+
+            # 第二轮（同会话）：裸出现 → 旧实现按「无语境误报」放行、原文明文
+            # 上行；新实现必须沿用同一占位符遮蔽
+            out2 = tr.mask(bare, sid)
+            self.assertNotIn(name, out2,
+                             "会话内已打码的值，裸出现被语境启发式放行（明文上行）"
+                             f"：{out2!r}")
+
+            # 对照：陌生会话里同样的裸出现仍走启发式降噪（0.15.1 的误报修复不受影响）
+            sid2 = "known-consistency-stranger"
+            tr._new_session(sid2)
+            out3 = tr.mask(bare, sid2)
+            self.assertIn(name, out3,
+                          "陌生短词的裸出现不再被降噪，0.15.1 的误报修复被回归了"
+                          f"：{out3!r}")
+        finally:
+            tr._zh_name_spans = saved_spans
+            for k, v in saved.items():
+                setattr(tr, k, v)
+            tr._cfg_mtime[0] = mtime
+            shutil.rmtree(d, ignore_errors=True)
+            tr._known_reset_for_tests()
+
+
 if __name__ == "__main__":
     unittest.main()

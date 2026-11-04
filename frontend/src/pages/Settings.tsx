@@ -783,9 +783,13 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
         let notes = ''
         let pubDate = ''
         try {
+          // 8s 超时 + 显式 r.ok 检查：GitHub 不可达时这段会永久 pending（Tauri 分支
+          // 此前没有超时），403 限流时 r.json() 会把错误体当 `{}` 静默吞掉——两者都
+          // 该抛错走 catch 退到服务端 /api/update/check 兜底（与 checkUpdate 同策略）。
           const r = await (isTauri()
-            ? (await import('@tauri-apps/plugin-http')).fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest')
-            : window.fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest'))
+            ? (await import('@tauri-apps/plugin-http')).fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest', { signal: AbortSignal.timeout(8000) })
+            : window.fetch('https://api.github.com/repos/xiaYuTian11/maskit/releases/latest', { signal: AbortSignal.timeout(8000) }))
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
           const d = await r.json()
           version = String(d?.tag_name || '')
           // GitHub 的 body 是整章 CHANGELOG；服务端 /api/update/check 也可能把 GitHub
@@ -2877,7 +2881,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                   {selfCheck && (
                     <Button size="sm" variant="outline" className="" onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(selfCheck.summary_line + '\n' +
+                        await copyText(selfCheck.summary_line + '\n' +
                           selfCheck.findings.map((f) => `[${f.severity}] ${f.title} | ${f.evidence} | ${f.action}`).join('\n'))
                         toast(t('settings.selfcheck.copied'), 'success')
                       } catch (e) { toast(tf('settings.selfcheck.copyFail', { e: String(e) }), 'error') }

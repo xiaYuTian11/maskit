@@ -638,6 +638,7 @@ const zh: Record<string, string> = {
 
   // ===== 统计页补充 =====
   'stats.refreshing': '刷新中…',
+  'stats.loadFail': '统计数据加载失败：',
   'stats.modelSummary': '模型 {n} 个 · 请求 {r} ·',
   'stats.highRisk': '高危信号',
   'stats.chartAllZero': '所选时段暂无流量数据',
@@ -1632,6 +1633,7 @@ const zh: Record<string, string> = {
   'settings.extBridge.tokenEmpty': '尚未生成（开启开关后自动生成）',
   'settings.extBridge.copy': '复制',
   'settings.extBridge.copied': '已复制到剪贴板',
+  'settings.extBridge.copyFail': '复制失败',
   'settings.extBridge.reveal': '显示',
   'settings.extBridge.mask': '隐藏',
   'settings.extBridge.rotate': '重置令牌',
@@ -2273,6 +2275,7 @@ const en: Record<string, string> = {
 
   // ===== Stats additions =====
   'stats.refreshing': 'Refreshing…',
+  'stats.loadFail': 'Failed to load statistics: ',
   'stats.modelSummary': '{n} models · {r} requests ·',
   'stats.highRisk': 'High-risk signals',
   'stats.chartAllZero': 'No traffic data for selected period',
@@ -3258,6 +3261,7 @@ const en: Record<string, string> = {
   'settings.extBridge.tokenEmpty': 'Not generated yet (turn on the switch to generate)',
   'settings.extBridge.copy': 'Copy',
   'settings.extBridge.copied': 'Copied to clipboard',
+  'settings.extBridge.copyFail': 'Copy failed',
   'settings.extBridge.reveal': 'Show',
   'settings.extBridge.mask': 'Hide',
   'settings.extBridge.rotate': 'Reset Token',

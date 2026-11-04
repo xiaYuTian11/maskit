@@ -45,6 +45,9 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
   const [srcDraft, setSrcDraft] = useState('')
   const srcTouched = useRef(false)
   const unlistenRef = useRef<(() => void) | null>(null)
+  // 自动安装的延迟 timer：组件卸载或再次触发时必须清理，否则旧 timer 在卸载后
+  // 仍会拉起下载流程
+  const installTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoInstallStarted = useRef(false)
 
   useEffect(() => {
@@ -53,6 +56,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
 
   useEffect(() => {
     return () => {
+      if (installTimerRef.current) clearTimeout(installTimerRef.current)
       unlistenRef.current?.()
     }
   }, [])
@@ -74,7 +78,7 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
       if (r.ok && !r.has_update) toast(t('about.upToDate'))
       // 顶栏「更新到 vX」跳进来时，桌面端检查到有新版就自动开始下载安装
       if (r.ok && r.has_update && autoInstall && isTauri()) {
-        setTimeout(() => doInstall(), 300)
+        installTimerRef.current = setTimeout(() => doInstall(), 300)
       }
       // r.ok === false 只在卡片里显示，不弹 toast：网络不好不是用户的错
     } catch (e) {
@@ -88,6 +92,9 @@ export function AboutUpdateCard({ version, dataRoot, running, autoInstall, updat
     setInstalling(true)
     setProgress({ got: 0, total: null })
     try {
+      // 失败后再次点安装（未卸载组件）时先解绑旧监听：直接覆盖会让旧 unlisten
+      // 永远丢失，产生重复进度回调与泄漏
+      unlistenRef.current?.()
       unlistenRef.current = await onUpdateProgress((p) => {
         if (p.event === 'started') setProgress({ got: 0, total: null })
         if (p.event === 'progress') setProgress((s) => ({

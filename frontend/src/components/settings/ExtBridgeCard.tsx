@@ -30,6 +30,8 @@ import {
 import { useI18n } from '@/lib/i18n'
 import { toast } from '@/lib/toast'
 import { getExtPing, rotateExtToken } from '@/api/ext'
+import { engineBaseUrl } from '@/lib/shield-fetch'
+import { copyText } from '@/lib/utils'
 import type { ShieldConfig } from '@/types/api'
 
 interface ExtBridgeCardProps {
@@ -240,10 +242,15 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
                 size="sm"
                 className="h-5 px-1.5 text-2xs text-muted-foreground hover:text-foreground"
                 onClick={async () => {
-                  const isTauri = typeof window !== 'undefined' && (window.location.origin.includes('tauri.localhost') || window.location.protocol === 'tauri:')
-                  const targetUrl = isTauri ? 'http://127.0.0.1:5801' : window.location.origin
-                  await navigator.clipboard.writeText(targetUrl)
-                  toast(t('settings.extBridge.copied'))
+                  try {
+                    // engineBaseUrl：Tauri 下用引擎真实端口（支持 LLM_SHIELD_PANEL_PORT
+                    // 覆盖），浏览器态用当前 origin——此前写死 5801，改端口后复制给
+                    // 扩展的是错地址。copyText 带 WebView2 回退（issue #38）。
+                    await copyText(engineBaseUrl())
+                    toast(t('settings.extBridge.copied'))
+                  } catch {
+                    toast(t('settings.extBridge.copyFail'), 'error')
+                  }
                 }}
               >
                 <Copy className="mr-1 h-3 w-3" />
@@ -251,9 +258,7 @@ export function ExtBridgeCard({ cfg, toggle, saving }: ExtBridgeCardProps) {
               </Button>
             </div>
             <div className="mt-0.5 break-all font-mono text-xs font-semibold text-foreground">
-              {typeof window !== 'undefined' && (window.location.origin.includes('tauri.localhost') || window.location.protocol === 'tauri:')
-                ? 'http://127.0.0.1:5801'
-                : window.location.origin}
+              {engineBaseUrl()}
             </div>
           </div>
           <div className="rounded-lg border bg-muted/20 px-3 py-2">

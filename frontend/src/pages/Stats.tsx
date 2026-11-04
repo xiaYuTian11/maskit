@@ -53,7 +53,7 @@ export default function StatsPage() {
   const [granularity, setGranularity] = useState<Granularity>('day')
   const [days, setDays] = useState(30)
 
-  const { data, isFetching } = useQuery({
+  const { data, isFetching, isError, error } = useQuery({
     queryKey: ['statsHistory', granularity, days],
     queryFn: () => getStatsHistory(days, granularity),
     refetchInterval: hidden ? false : 60000,
@@ -93,6 +93,14 @@ export default function StatsPage() {
     <div className="space-y-4">
       {/* 页头。战绩卡片本地生成分享图，零上传 */}
       <PageHeader title={t('stats.title')} subtitle={t('stats.subtitle')} actions={<ShareCard />} />
+
+      {/* 接口失败 ≠ 无流量：把「没读到」显示成「零数据」会掩盖引擎故障（与审计页同口径）。
+          定时 refetchInterval 会自动重试，这里只需如实可见。 */}
+      {isError && (
+        <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
+          <span className="min-w-0 flex-1 truncate">{t('stats.loadFail')}{String(error).slice(0, 80)}</span>
+        </div>
+      )}
 
       {/* 粒度切换 */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-3 shadow-card">
@@ -141,7 +149,7 @@ export default function StatsPage() {
           <span className="text-sm font-semibold">{t('stats.tokenChart')}</span>
           <span className="text-xs text-muted-foreground">{t('stats.tokenHint')}</span>
         </div>
-        {points.length === 0 && !isFetching ? (
+        {points.length === 0 && !isFetching && !isError ? (
           <EmptyState />
         ) : (
           <TokenBarChart points={points} />
@@ -163,7 +171,7 @@ export default function StatsPage() {
             ))}
           </div>
         </div>
-        {points.length === 0 && !isFetching ? (
+        {points.length === 0 && !isFetching && !isError ? (
           <EmptyState />
         ) : (
           <MultiLineChart points={points} />

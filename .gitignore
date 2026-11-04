@@ -154,3 +154,8 @@ onboarding-verification.tmp
 
 # OCR 运行时组件构建产物（scripts/build-ocr-runtime.py）
 dist_ocr/
+
+# flowspec:begin
+# FlowSpec 门禁配置、模板与规约沙箱（默认不污染业务代码与 SQL 仓库）
+.flowspec/
+# flowspec:end

@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from '@/lib/toast'
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
+import { copyText } from '@/lib/utils'
 import { downloadSkillBundle } from '@/api/settings'
 
 export function SkillBundleCard({ version }: { version?: string }) {
@@ -64,7 +65,9 @@ export function SkillBundleCard({ version }: { version?: string }) {
 
   const copyCommand = async () => {
     try {
-      await navigator.clipboard.writeText(installCommand)
+      // copyText 带 WebView2 非安全上下文的 execCommand 回退（issue #38）；
+      // 直调 navigator.clipboard 在受限环境下会静默失败
+      await copyText(installCommand)
       toast(t('settings.skill.copied'))
     } catch (e) {
       toast(tf('settings.skill.fail', { e: String(e) }), 'error')

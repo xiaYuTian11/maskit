@@ -46,7 +46,7 @@ def severity_ge(a, b):
 # ========== S1 error_leak：错误响应泄漏 ==========
 # 移植自 error_leakage.py:120-130
 SECRET_REGEX_PATTERNS = [
-    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "sk_prefix_secret"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "openai_api_key"),
     (re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{20,}=*"), "bearer_token"),
     (re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"), "aws_access_key"),
     (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "google_api_key"),
@@ -149,7 +149,7 @@ def _redact_evidence(snippet, kind):
 
     曾保留 sk-AAA****WXYZ 首尾片段——若规则是"凭据任何片段都不落日志"，
     首尾字符同样是凭据素材。证据统一收敛为：
-        sk_prefix_secret len=29 sha256=abcd1234ef567890
+        openai_api_key len=29 sha256=abcd1234ef567890
     保留前缀种类字符（sk- 等）不算泄漏（它来自正则匹配的固定前缀）。
     """
     if not snippet:
@@ -191,7 +191,7 @@ def scan_error_leak(status_code, body_text, headers_text="", upstream_hosts=None
             snippet = m.group()[:80]
             if _is_self_probe(snippet):
                 continue
-            sev = CRITICAL if kind in ("sk_prefix_secret", "bearer_token", "aws_access_key", "pem_private_key") else HIGH
+            sev = CRITICAL if kind in ("openai_api_key", "bearer_token", "aws_access_key", "pem_private_key") else HIGH
             results.append({
                 "signal": "error_leak",
                 "severity": sev,
