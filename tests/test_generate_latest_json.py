@@ -111,5 +111,49 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertEqual(len(lines), 2, f"应为两行（中/英），实际：{lines}")
 
 
+class PickSignableTests(unittest.TestCase):
+    """`_pick_sig` 必须挑到**本次发布**的产物，而不是目录里最老的那个。
+
+    2026-11-04 实测事故：本地 `build.ps1` 的产物目录累积了历史版本，
+    `glob()` 顺序由文件系统决定，直接取 `[0]` 会挑到 `Maskit_0.1.0_*.sig`，
+    于是 `latest.json` 把 `v0.15.0` 的下载地址指到 0.1.0 的包上——客户端点更新
+    会拉到一个两年前的安装包。CI 的 `release-assets/` 只有本次产物，抓不到这个
+    问题，所以只能靠这里的用例守。
+    """
+
+    def _sigs(self, *names):
+        return [Path("/tmp/nsis") / n for n in names]
+
+    def test_prefers_tag_match_over_filesystem_order(self):
+        sigs = self._sigs(
+            "Maskit_0.1.0_x64-setup.exe.sig",
+            "Maskit_0.15.0_x64-setup.exe.sig",
+            "Maskit_0.9.0_x64-setup.exe.sig",
+        )
+        self.assertEqual(glj._pick_sig(sigs, "v0.15.0").name,
+                         "Maskit_0.15.0_x64-setup.exe.sig")
+
+    def test_falls_back_to_highest_version(self):
+        """目录里没有本版本（例如用旧目录试跑）时取版本号最大的，不取枚举首个。"""
+        sigs = self._sigs(
+            "Maskit_0.1.0_x64-setup.exe.sig",
+            "Maskit_0.9.0_x64-setup.exe.sig",
+            "Maskit_0.10.0_x64-setup.exe.sig",
+        )
+        self.assertEqual(glj._pick_sig(sigs, "v9.9.9").name,
+                         "Maskit_0.10.0_x64-setup.exe.sig")
+
+    def test_prerelease_suffix_is_kept_verbatim(self):
+        sigs = self._sigs(
+            "Maskit_0.5.0_x64-setup.exe.sig",
+            "Maskit_0.5.0-beta.1_x64-setup.exe.sig",
+        )
+        self.assertEqual(glj._pick_sig(sigs, "v0.5.0-beta.1").name,
+                         "Maskit_0.5.0-beta.1_x64-setup.exe.sig")
+
+    def test_empty_input_returns_none(self):
+        self.assertIsNone(glj._pick_sig([], "v1.0.0"))
+
+
 if __name__ == "__main__":
     unittest.main()

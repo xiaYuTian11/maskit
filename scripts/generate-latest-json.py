@@ -16,6 +16,7 @@ import datetime
 import glob
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,40 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import release_notes as rn  # noqa: E402
+
+
+_VER_IN_NAME_RX = re.compile(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?")
+
+
+def _pick_sig(candidates, tag: str):
+    """从同平台的若干 `.sig` 里挑出**属于本次发布**的那一个。
+
+    为什么必须有这一步（2026-11-04 实测坑）：`build.ps1` 本地打包会把产物留在
+    `bundle/nsis/` 里，那个目录**累积了历史版本**；`glob()` 的枚举顺序由文件系统
+    决定，直接取 `[0]` 时在本地会挑到 `Maskit_0.1.0_x64-setup.exe.sig`，于是生成的
+    `latest.json` 把 `v0.15.0` 的下载地址指到了 0.1.0 的包上——客户端点更新会拉到
+    一个两年前的安装包。CI 的 `release-assets/` 只有本次产物，所以这个问题只在本地
+    `build.ps1` 出现，不会被 CI 抓到。
+
+    挑选顺序：
+      1. 文件名里带**本次 tag 的版本号**（精确匹配 `1.2.3`，预发布连后缀一起比）；
+      2. 否则退到版本号最大的那一个（目录里只有一个版本时等价于直接取）。
+    """
+    if not candidates:
+        return None
+    want = str(tag or "").strip().lstrip("vV")
+    if want:
+        exact = [c for c in candidates if want in c.name]
+        if exact:
+            return sorted(exact, key=lambda c: c.name)[0]
+
+    def _key(p):
+        m = _VER_IN_NAME_RX.search(p.name)
+        if not m:
+            return (0, 0, 0, "")
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or "")
+
+    return sorted(candidates, key=_key, reverse=True)[0]
 
 
 def _release_notes(tag: str, changelog_path: Path | None = None) -> str:
@@ -166,7 +201,6 @@ def main():
     tag = args.tag or os.environ.get("GITHUB_REF_NAME", "")
     if not tag:
         sample = (win_sigs or mac_sigs or linux_sigs or deb_sigs)[0].name
-        import re
         m = re.search(r"(\d+\.\d+\.\d+)", sample)
         if m:
             tag = f"v{m.group(1)}"
@@ -178,7 +212,7 @@ def main():
 
     # 1) Windows x86_64
     if win_sigs:
-        sig_path = win_sigs[0]
+        sig_path = _pick_sig(win_sigs, tag)
         sig_content = sig_path.read_text(encoding="utf-8").strip()
         exe_name = sig_path.with_suffix("").name
         platforms["windows-x86_64"] = {
@@ -188,7 +222,7 @@ def main():
 
     # 2) macOS aarch64 (Apple Silicon)
     if mac_sigs:
-        sig_path = mac_sigs[0]
+        sig_path = _pick_sig(mac_sigs, tag)
         sig_content = sig_path.read_text(encoding="utf-8").strip()
         bundle_name = sig_path.with_suffix("").name
         platforms["darwin-aarch64"] = {
@@ -198,7 +232,7 @@ def main():
 
     # 3) Linux x86_64
     if linux_x64_sigs:
-        sig_path = linux_x64_sigs[0]
+        sig_path = _pick_sig(linux_x64_sigs, tag)
         sig_content = sig_path.read_text(encoding="utf-8").strip()
         bundle_name = sig_path.with_suffix("").name
         platforms["linux-x86_64"] = {
@@ -208,7 +242,7 @@ def main():
 
     # 4) Linux aarch64 (ARM64)
     if linux_arm64_sigs:
-        sig_path = linux_arm64_sigs[0]
+        sig_path = _pick_sig(linux_arm64_sigs, tag)
         sig_content = sig_path.read_text(encoding="utf-8").strip()
         bundle_name = sig_path.with_suffix("").name
         platforms["linux-aarch64"] = {
@@ -219,7 +253,7 @@ def main():
     # 5) Linux x86_64 (deb)：updater 运行时按 `{os}-{arch}-{bundle_type}` 查找，deb 安装的
     #    客户端会命中这里。url 必须指向 .deb 本体（install_deb 的 is_deb 校验要求真 deb 字节）。
     if deb_x64_sigs:
-        sig_path = deb_x64_sigs[0]
+        sig_path = _pick_sig(deb_x64_sigs, tag)
         pkg_name = sig_path.with_suffix("").name  # 去掉 .sig → xxx.deb
         platforms["linux-x86_64-deb"] = {
             "signature": sig_path.read_text(encoding="utf-8").strip(),
@@ -228,7 +262,7 @@ def main():
 
     # 6) Linux aarch64 (deb)
     if deb_arm64_sigs:
-        sig_path = deb_arm64_sigs[0]
+        sig_path = _pick_sig(deb_arm64_sigs, tag)
         pkg_name = sig_path.with_suffix("").name
         platforms["linux-aarch64-deb"] = {
             "signature": sig_path.read_text(encoding="utf-8").strip(),
