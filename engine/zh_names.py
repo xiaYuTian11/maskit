@@ -156,23 +156,42 @@ def _not_name_buckets():
 # 只收 `提交者` 而句式写的是 `提交者是` 时，`endswith` 会失配（实测漏检）。
 # 加 `是` 不会引入误报：`提交者是` 后面跟的必是受事（人或物），而姓氏规则与
 # 名用字判据会把「物」挡掉。
-ZH_ROLES = (
+#
+# **分两档（2026-11-04，真机驱动）**：
+#   · 强：本身只用于指人（`客户` / `联系人` / `我叫` …）；
+#   · 弱：技术文案里同样高频（`签名` / `通知` / `介绍` / `推荐` / `致`）——
+#     它们既能是「角色词 + 人名」（`签名：某甲`），也能是普通动宾（`改签名时…`）。
+#     实测 `改签名{{token}}同步` 里的 `签名` 把普通词判成了姓名。
+# 弱证据只在**两条同时成立**时才被 `has_strong_context` 采纳。
+ZH_ROLES_STRONG = (
     "客户", "联系人", "作者", "提交者", "审核人", "审批人", "负责人", "经办人",
     "收件人", "发件人", "收货人", "申请人", "报告人", "同事", "姓名", "名字",
-    "署名", "签名", "我叫", "他叫", "她叫", "名叫", "叫做", "尊敬的", "亲爱的",
-    "致", "转告", "通知", "抄送", "推荐", "介绍",
+    "我叫", "他叫", "她叫", "名叫", "叫做", "尊敬的", "亲爱的", "转告", "抄送",
     # 「角色 + 是」形态
     "提交者是", "审核人是", "负责人是", "作者是", "客户是", "联系人是",
     "申请人 是", "经办人是", "收件人是", "发件人是", "报告人是",
 )
+ZH_ROLES_WEAK = (
+    "署名", "签名", "致", "通知", "推荐", "介绍",
+)
+# 检出侧（`find_names`）仍用并集：少一条证据就少一个真实姓名，召回优先。
+ZH_ROLES = ZH_ROLES_STRONG + ZH_ROLES_WEAK
 
-# 称谓/动词：出现在姓名**之后**，说明前面是人。
-ZH_AFTER = (
+# 称谓（强证据）：出现在姓名**之后**，几乎只用于指人。
+ZH_TITLES = (
     "先生", "女士", "小姐", "老师", "同学", "同志", "经理", "总监", "主任",
     "师傅", "医生", "律师", "教授", "博士", "工程师", "会计",
+)
+
+# 后置动词（弱证据）：`某甲说` 是姓名，但技术文案里的 `说明` / `提交` / `反馈` /
+# `负责` 同样命中——单靠它不足以证明前面是姓名（2026-11-04 真机：`…回复某词说明…`
+# 与 `…有误某词说…` 都满足旧的后置动词判据，于是 2~3 字普通词被成片打码）。
+ZH_AFTER_VERBS = (
     "说", "讲", "表示", "认为", "反馈", "提到", "提交", "负责", "告诉",
     "回复", "反馈说", "已读", "收到",
 )
+# 检出侧仍用并集，理由同上。
+ZH_AFTER = ZH_TITLES + ZH_AFTER_VERBS
 
 # 前置双字动词：这些词后面跟的通常是**受事**（人）。
 ZH_BEFORE_VERBS = (
@@ -251,7 +270,11 @@ def _by_len(words):
 
 
 _ZH_ROLES_BY_LEN = _by_len(ZH_ROLES)
+_ZH_ROLES_STRONG_BY_LEN = _by_len(ZH_ROLES_STRONG)
+_ZH_ROLES_WEAK_BY_LEN = _by_len(ZH_ROLES_WEAK)
 _ZH_AFTER_BY_LEN = _by_len(ZH_AFTER)
+_ZH_TITLES_BY_LEN = _by_len(ZH_TITLES)
+_ZH_AFTER_VERBS_BY_LEN = _by_len(ZH_AFTER_VERBS)
 _ZH_VERBS_BY_LEN = _by_len(ZH_BEFORE_VERBS)
 
 
@@ -283,10 +306,47 @@ def _has_role_before(text: str, start: int) -> bool:
 
 
 def _has_title_after(text: str, end: int) -> bool:
-    """姓名后是否有称谓/动词（同样允许中间隔标点：`某甲，先生`）。"""
+    """姓名后是否有称谓/动词（同样允许中间隔标点：`某甲，先生`）。
+
+    检出侧口径（`find_names` 用它找名字）：称谓与动词都算，召回优先。
+    """
     tail = text[end:end + 5]
     stripped = tail.lstrip(_SEPARATORS_STR)
     return _head_hits(stripped, _ZH_AFTER_BY_LEN)
+
+
+def _has_title_word_after(text: str, end: int) -> bool:
+    """姓名后是否紧跟**称谓**（强证据，不含 `说`/`提交` 这类高频动词）。"""
+    tail = text[end:end + 5]
+    stripped = tail.lstrip(_SEPARATORS_STR)
+    return _head_hits(stripped, _ZH_TITLES_BY_LEN)
+
+
+def _has_verb_word_after(text: str, end: int) -> bool:
+    """姓名后是否紧跟后置动词（弱证据，见 `ZH_AFTER_VERBS` 的注释）。"""
+    tail = text[end:end + 5]
+    stripped = tail.lstrip(_SEPARATORS_STR)
+    return _head_hits(stripped, _ZH_AFTER_VERBS_BY_LEN)
+
+
+def _has_weak_role_as_label(text: str, start: int) -> bool:
+    """弱角色词是否以**字段标签**形态出现（`签名：某甲` / `通知: 某甲`）。
+
+    为什么需要（2026-11-04）：`签名`/`署名`/`通知`/`介绍`/`推荐`/`致` 降为弱证据后，
+    `签名：某甲` 这种真实表单填写形态会跟着被降噪 —— 那是漏遮一个**真姓名**。
+
+    判据用**分隔符**：标签形态后面必有 `：` / `:` / 空白，而误报的 `改签名时…` 是
+    紧邻的汉字串。中文没有词边界，紧邻无法区分（`签名`+`某甲` 与 `签名`+`时怎么`
+    形态完全一样），分隔符可以。
+    """
+    try:
+        j = _trim_separators(text, start, limit=2)
+        if j >= start:
+            return False                      # 紧邻，没有分隔符
+        head = text[max(0, j - 8):j]
+        return _tail_hits(head, _ZH_ROLES_WEAK_BY_LEN)
+    except Exception:
+        return False
 
 
 def _has_verb_before(text: str, start: int) -> bool:
@@ -470,25 +530,77 @@ def is_han(ch: str) -> bool:
 
 
 def has_strong_context(text, start, end):
-    """实体区间是否有**强**上下文证据：角色词 / 后置称谓 / 自身以称谓结尾。
+    """实体区间是否有**足够**的上下文证据：强证据 1 条，或弱证据 2 条。
 
-    为什么只收强证据（2026-10-28 真机事件库）：`_has_verb_before` 的窗口只有 5 字
-    且收单字动词（`给`/`请`/`和`），`请保持简洁` 这类普通句子就能满足 —— 据此
-    保留 2~3 字候选，等于把高频词全打成占位符。当日 NAME 命中 65103 次，其中
-    62141 次是 ≤3 字中文普通词（`简洁` 4990 / `时直` 4987 / `边界` 4800 / `项目规` 4564），
-    模型看到的正文被替换成占位符。强证据判据不用于提高召回，只用于回答「这个短候选
-    值不值得冒误掩码的风险」。
+    2026-11-04 真机事件库（安装版 0.15.0，24h）实测：NAME 命中 17138 次，**94.1%**
+    是 2~3 字中文普通词（`简洁` 2126 / `常暂存` 1917 / `时直` 1869 / `时怎么` 1863）。
+    这些词恰恰都「有证据」：
+
+    - `最终回复某词说明…` —— 命中后置动词 `说`；
+    - `其前提有误某词说并…` —— 同上；
+    - `改签名某词同步…` —— 命中角色词 `签名`；
+    - `日常、提交、推送…` —— 命中后置动词 `提交`。
+
+    旧实现把「检出用的证据」直接当「保留用的强证据」，而两者用了同一张表 ——
+    于是降噪层只能挡住模型自己「毫无证据」的误报，挡不住这些固定误报，这就是
+    10-28 那次修复上线后比例仍然是 94% 的原因。
+
+    分档之后：单条弱证据不算数。`说` / `说明` / `签名` 这类在技术文案里遍地都是
+    的词，不再单独支撑一次打码；而 `客户某甲`、`某甲先生`、`请联系某甲` 这类
+    真句式仍然是强证据，召回不受影响。
     """
     try:
         if not isinstance(text, str) or start < 0 or end > len(text) or end <= start:
             return False
-        if _has_role_before(text, start) or _has_title_after(text, end):
+        frag = text[start:end]
+        head = text[max(0, start - 8):_trim_separators(text, start)]
+        # 强证据：只指人的角色词 / 后置称谓 / 实体自身以称谓结尾 /
+        # 双字前置动词（`联系`/`转给`/`告诉`，受事必然是人）
+        if (_tail_hits(head, _ZH_ROLES_STRONG_BY_LEN)
+                or _has_title_word_after(text, end)
+                or _tail_hits(frag, _ZH_TITLES_BY_LEN)
+                or _has_strong_verb_before(text, start)
+                or _has_weak_role_as_label(text, start)):
             return True
-        # 双字前置动词（如「联系」「转给」）：单字动词不算强证据。
-        if _has_strong_verb_before(text, start):
-            return True
-        # `张经理` / `王主任`：称谓包在实体自身尾部（NER 常把称谓一起标进实体）
-        return _tail_hits(text[start:end], _ZH_AFTER_BY_LEN)
+        # 弱证据：两条同时成立才算（一条在技术文案里随处可遇）
+        weak = 0
+        if _tail_hits(head, _ZH_ROLES_WEAK_BY_LEN):
+            weak += 1
+        if _has_verb_word_after(text, end):
+            weak += 1
+        return weak >= 2
+    except Exception:
+        return False
+
+
+# 英文人名形态：每个词首字母大写，只含字母/连字符/撇号（`John Smith` / `Jean-Luc`）。
+# 它只用来回答「这个 ASCII 串像不像人名」，不替代 `ner_engine._looks_like_code_identifier`
+# （那个判的是「像不像代码标识符」，两者方向相反）。
+_LATIN_NAME_RX = re.compile(r"^[A-Z][A-Za-z'\-]*(?:\s+[A-Z][A-Za-z'\-]*)*$")
+
+
+def name_shape_ok(frag) -> bool:
+    """NAME 标签的**形态**门槛：这串字看起来像不像一个人名（不看上下文）。
+
+    为什么需要（2026-11-04 真机 24h）：NAME 命中里 5.5% 含非汉字（`15`、
+    `still reason`、`l 5.1`），另有大量 5 字以上的跨词边界切片（`东方通安`、
+    `解析失`）。它们都满足「长度 >= 2」这条唯一的形态判据，于是直接变成了占位符。
+
+    - 纯汉字：2~4 字且首字命中姓氏表（含复姓）。姓氏字开头的普通词（`简洁`）
+      **仍会通过**——它们由 `has_strong_context` 的上下文判据拦，形态只负责挡住
+      明显不是人名的那些；
+    - 含非汉字：只认同 `John Smith` / `Jean-Luc` 形态。含数字、代码标点、
+      全小写词的（`15` / `still reason` / `l 5.1`）一律不认。
+    """
+    try:
+        s = (frag or "").strip()
+        if not s:
+            return False
+        if all(_is_han(c) for c in s):
+            return 2 <= len(s) <= 4 and _surname_len_at(s, 0) > 0
+        if len(s) > 40 or any(c.isdigit() for c in s):
+            return False
+        return bool(_LATIN_NAME_RX.match(s))
     except Exception:
         return False
 

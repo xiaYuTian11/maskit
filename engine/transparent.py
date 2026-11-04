@@ -5979,29 +5979,43 @@ def _ner_entity_spans(text, entities):
 _SHORT_NAME_MAX_CHARS = 3
 
 
-def _short_name_without_context(text, start, end, frag, label):
-    """短中文 NAME 的强上下文复核：True = 判为误报，不遮。
+def _name_without_support(text, start, end, frag, label):
+    """NAME 的保留判据：形态像人名 **且** 上下文成立。True = 判为误报，不遮。
 
-    为什么（2026-10-28 真机事件库）：近 3 天 NAME 命中 65103 次，其中 62141 次
-    （95%）是 ≤3 字中文普通词 —— `简洁` 4990 / `时直` 4987 / `边界` 4800 /
-    `项目规` 4564 / `时明` 4266。它们把正常正文改成占位符，模型据此分析代码必然出错，
-    用户只看到「AI 答得不对」。代价取向与 `ner_engine._looks_like_code_identifier`
-    同一条：**宁可漏掩一个短名，不可误掩普通词**；跳过会计数上报
-    （`short_name_no_context`），不静默。
+    两道门槛（2026-11-04，真机事件库 24h 实测：NAME 命中 17138 次，其中 94.1%
+    是 2~3 字纯汉字普通词，`简洁` 2126 / `常暂存` 1917 / `时直` 1869 / `时怎么` 1863；
+    另有 5.5% 含非汉字，`15` / `still reason` / `l 5.1`）：
+
+    1. **形态**（`zh_names.name_shape_ok`）：纯汉字 2~4 字且姓氏开头，或英文人名
+       形态。挡掉数字、英文短语、代码片段和 5 字以上的跨词边界切片。
+       形态不成立但**强上下文成立**时仍保留（`客户某甲` 这类罕见姓/少数民族姓名
+       不能被静默放过）——所以形态只是「降级依据」，不是「否决」。
+    2. **上下文**（`zh_names.has_strong_context`）：2~3 字中文短名需要强证据
+       （角色词/称谓/双字前置动词）。单条弱证据（`说`/`提交`/`签名`）不算——
+       它们就是上一版被放行的原因。
+
+    形态不成立而被跳过的，视觉上与「短名无上下文」同属一类：**宁可漏掩一个短名，
+    不可误掩普通词**（与 `ner_engine._looks_like_code_identifier` 同一取向）。
+    跳过会计数上报（`short_name_no_context`），不静默。
     """
     try:
         if label not in ("NAME", "PERSON"):
             return False
-        if not (2 <= len(frag) <= _SHORT_NAME_MAX_CHARS):
-            return False
-        import zh_names
-        if any(not zh_names.is_han(ch) for ch in frag):
+        if not frag:
             return False
         # 用户显式配置的词不接受启发式降噪（词表是用户意图，不是模型猜测）
         if frag in CUSTOM_WORDS:
             return False
+        import zh_names
+        if not zh_names.name_shape_ok(frag):
+            return not zh_names.has_strong_context(text, start, end)
+        if len(frag) > _SHORT_NAME_MAX_CHARS:
+            return False
+        if any(not zh_names.is_han(ch) for ch in frag):
+            return False          # 英文人名（形态已过）不做短名降噪
         return not zh_names.has_strong_context(text, start, end)
     except Exception:
+        # 判不出来时按「保留」处理：形态/上下文异常不应变成漏遮
         return False
 
 
@@ -6635,11 +6649,12 @@ def _mask_text(text, sid):
     # 结果才允许进叶子缓存 —— 残缺结果一旦入库就等于把漏检永久固化（与 NER 负缓存
     # 同一类坑）。判据是 `skip_epoch()` 前后是否变化：它只统计「结果残缺」类原因
     # （见 ner_engine._CACHE_POISON_SKIPS），`model_unavailable` 不在其中。
-    # 短名强上下文复核的计数（本叶子）：循环外统一记录，不在热路径上反复调
+    # 姓名误报降噪的计数（本叶子）：形态/上下文两道路径都记在这里，
+    # 循环外统一上报，不在热路径上反复调。
     _short_name_skips = [0]
 
     def _plan_entity(s0, e0, lbl):
-        """实体区间 → planned 条目（None = 跳过）。收窄边界、短名复核、登记映射。"""
+        """实体区间 → planned 条目（None = 跳过）。收窄边界、NAME 复核、登记映射。"""
         raw_frag = text[s0:e0]
         frag = raw_frag.strip()
         if len(frag) < 2:
@@ -6648,7 +6663,7 @@ def _mask_text(text, sid):
         # （还原后会丢排版）。
         lead = len(raw_frag) - len(raw_frag.lstrip())
         a, b = s0 + lead, s0 + lead + len(frag)
-        if _short_name_without_context(text, a, b, frag, lbl):
+        if _name_without_support(text, a, b, frag, lbl):
             _short_name_skips[0] += 1
             return None
         # 记账口径说明（易错，必须保留）：_hit() 必须传伤疤坐标系的残片 frag，
@@ -6761,7 +6776,7 @@ def _mask_text(text, sid):
                 import ner_engine as _ne_short
                 _ne_short.record_skip(
                     "short_name_no_context",
-                    "短中文姓名无角色词/称谓佐证，按误报跳过 %d 处" % _short_name_skips[0],
+                    "姓名形态或上下文不成立，按误报跳过 %d 处" % _short_name_skips[0],
                 )
             except Exception:
                 pass

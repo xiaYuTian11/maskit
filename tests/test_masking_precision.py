@@ -18,7 +18,9 @@
 """
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -90,7 +92,7 @@ class NerCodeIdentifierFilterTests(unittest.TestCase):
 
 
 class ShortNameContextTests(unittest.TestCase):
-    """2~3 字中文 NAME 必须有强上下文佐证，否则按误报跳过。"""
+    """NAME 必须有形态 + 强上下文佐证，否则按误报跳过。"""
 
     def test_strong_context_detected(self):
         name = "张明山"
@@ -112,23 +114,90 @@ class ShortNameContextTests(unittest.TestCase):
                     "普通词被判成有强上下文：%s" % word,
                 )
 
+    def test_single_weak_evidence_rejected(self):
+        """**单条**弱证据不够（2026-11-04 真机 24h 的 94% 误报根因）。
+
+        旧实现把「检出用的证据」直接当「保留用的强证据」，而两者是同一张表，
+        于是下面这些句子全部被放行：后置动词 `说`/`说明`/`提交` 与弱角色词
+        `签名` 在技术文案里遍地都是。
+        """
+        for text, word in [
+            ("最终回复简洁说明：改了什么、如何验证", "简洁"),
+            ("其前提有误时直说并讲清影响", "时直"),
+            ("改签名时怎么同步注释", "时怎么"),
+            ("日常暂存数据到本地", "常暂存"),
+            ("该段照常执行即可", "段照常"),
+        ]:
+            with self.subTest(word=word):
+                s = text.index(word)
+                self.assertFalse(
+                    zh_names.has_strong_context(text, s, s + len(word)),
+                    "单条弱证据被当成了强证据：%s" % word,
+                )
+
+    def test_weak_role_as_field_label_accepted(self):
+        """字段标签形态（弱角色词 + 分隔符）是强证据——不能把真名一起降噪。"""
+        for text, word in [
+            ("签名：陈建国", "陈建国"),
+            ("通知: 张明山开会", "张明山"),
+            ("致 李小明", "李小明"),
+        ]:
+            with self.subTest(word=word):
+                s = text.index(word)
+                self.assertTrue(zh_names.has_strong_context(text, s, s + len(word)))
+
+    def test_two_weak_evidences_accepted(self):
+        """两条弱证据同时成立时保留（`通知` + `说`）。"""
+        name = "李小明"
+        text = "转发通知" + name + "说一下进度"
+        s = text.index(name)
+        self.assertTrue(zh_names.has_strong_context(text, s, s + len(name)))
+
+    def test_name_shape_gate(self):
+        """形态门槛：数字/英文短语/超长汉字切片都不算人名。"""
+        for s in ("15", "still reason", "l 5.1", "张量计算器", "阿依古丽"):
+            with self.subTest(s=s):
+                self.assertFalse(zh_names.name_shape_ok(s), "不像人名却过了形态门槛：%r" % s)
+        for s in ("陈建国", "王小明", "张经理", "欧阳娜娜",
+                  "John Smith", "Jean-Luc", "O'Brien"):
+            with self.subTest(s=s):
+                self.assertTrue(zh_names.name_shape_ok(s), "像人名却被形态门槛拦了：%r" % s)
+
     def test_title_inside_entity_counts(self):
         """`张经理`：称谓包在实体自身尾部，也算强证据。"""
         text = "请转告张经理"
         s = text.index("张")
         self.assertTrue(zh_names.has_strong_context(text, s, s + 3))
 
-    def test_short_name_without_context_helper(self):
+    def test_name_without_support_helper(self):
         text = "同时直接返回结果"
         s = text.index("时直")
-        self.assertTrue(tr._short_name_without_context(text, s, s + 2, "时直", "NAME"))
+        self.assertTrue(tr._name_without_support(text, s, s + 2, "时直", "NAME"))
 
         name = "张明山"
         text2 = "联系人：" + name + "说订单有问题"
         s2 = text2.index(name)
         self.assertFalse(
-            tr._short_name_without_context(text2, s2, s2 + len(name), name, "NAME")
+            tr._name_without_support(text2, s2, s2 + len(name), name, "NAME")
         )
+
+    def test_non_name_shape_rejected(self):
+        """形态不成立且无强上下文时一律按误报跳过（`15` / `still reason`）。"""
+        for frag in ("15", "still reason", "张量计算器"):
+            with self.subTest(frag=frag):
+                text = "共 " + frag + " 项"
+                s = text.index(frag)
+                self.assertTrue(
+                    tr._name_without_support(text, s, s + len(frag), frag, "NAME"),
+                    "非人名形态被当成姓名遮了：%r" % frag,
+                )
+
+    def test_rare_name_with_role_survives_shape_gate(self):
+        """形态不成立但强上下文成立时保留（罕见姓 / 少数民族姓名不能被静默放过）。"""
+        name = "阿依古丽"
+        text = "客户" + name + "反馈了问题"
+        s = text.index(name)
+        self.assertFalse(tr._name_without_support(text, s, s + len(name), name, "NAME"))
 
     def test_custom_word_never_dropped(self):
         """用户显式配置的词不受启发式降噪影响（词表是用户意图）。"""
@@ -138,7 +207,7 @@ class ShortNameContextTests(unittest.TestCase):
         try:
             tr.CUSTOM_WORDS["简洁"] = "TERM"
             self.assertFalse(
-                tr._short_name_without_context(text, s, s + 2, "简洁", "NAME"),
+                tr._name_without_support(text, s, s + 2, "简洁", "NAME"),
                 "自定义词被短名复核剔除了",
             )
         finally:
@@ -150,7 +219,7 @@ class ShortNameContextTests(unittest.TestCase):
         text = addr + "办事处通知"
         s = text.index(addr)
         self.assertFalse(
-            tr._short_name_without_context(text, s, s + len(addr), addr, "ADDR")
+            tr._name_without_support(text, s, s + len(addr), addr, "ADDR")
         )
 
 
@@ -232,6 +301,86 @@ class OffsetMapSyncTests(unittest.TestCase):
         self.assertNotIn(val, out, "known 命中值未被遮蔽")
         after = ner_engine.status().get("skips", {}).get("om_compose", 0)
         self.assertEqual(after, base, "known 改写后 OffsetMap 失同步，NER 被整段跳过")
+
+
+class NameGateIntegrationTests(unittest.TestCase):
+    """端到端：启发层检出的普通词不得被遮，有角色词的姓名仍要被遮。"""
+
+    _KEYS = ("CUSTOM_WORDS", "BUILTIN_RULES", "SENSITIVE_DISABLED",
+             "SENSITIVE_WORD_DISABLED", "SENSITIVE_WORD_WHOLE",
+             "UPSTREAMS", "TARGET_DOMAINS", "API_PATHS",
+             "CAPTURE_MODE", "FAIL_CLOSED", "_DATA_ROOT")
+
+    def setUp(self):
+        self._saved = {k: getattr(tr, k) for k in self._KEYS}
+        self._mtime = tr._cfg_mtime[0]
+        self._dir = tempfile.mkdtemp(prefix="maskit-namegate-")
+        cfg = {"sensitive": {}, "builtin_rules": {}, "ner_enabled": True,
+               "target_domains": ["api.example.com"],
+               "api_paths": ["/v1/messages"]}
+        with open(os.path.join(self._dir, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False)
+        tr._DATA_ROOT = Path(self._dir)
+        tr._cfg_mtime[0] = None
+        tr._maybe_reload(force=True)
+        tr.BUILTIN_RULES = {k: False for k in tr.DEFAULT_BUILTIN_RULES}
+        tr._CUSTOM_WORD_RX_CACHE.clear()
+        tr._known_reset_for_tests()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(tr, k, v)
+        tr._cfg_mtime[0] = self._mtime
+        shutil.rmtree(self._dir, ignore_errors=True)
+        tr._known_reset_for_tests()
+
+    def _mask(self, sid, text):
+        tr._new_session(sid)
+        with mock.patch.object(ner_engine, "is_ner_available", lambda: False):
+            return tr.mask(text, sid)
+
+    def test_plain_word_with_weak_context_not_masked(self):
+        """启发层会检出这些普通词，但它们只有弱证据（后置 `说`/「说明」、弱角色词 `签名`）。"""
+        cases = [
+            "最终回复简洁说明：改了什么、如何验证",
+            "其前提有误时直说并讲清影响",
+            "改签名时怎么同步注释",
+        ]
+        for i, text in enumerate(cases):
+            with self.subTest(text=text):
+                out = self._mask("namegate-weak-%d" % i, text)
+                self.assertEqual(out, text, "普通词仍被遮成了占位符：%r" % out)
+
+    def test_model_entity_without_support_not_masked(self):
+        """模型把普通词标成 NAME 时必须被拦住（真机 94% 误报的主来源）。"""
+        text = "最终回复简洁说明：改了什么"
+        s = text.index("简洁")
+        ents = [{"start": s, "end": s + 2, "type": "NAME"}]
+        sid = "namegate-model"
+        tr._new_session(sid)
+        with mock.patch.object(ner_engine, "is_ner_available", lambda: True),                 mock.patch.object(ner_engine, "extract_entities", lambda t: list(ents)):
+            out = tr.mask(text, sid)
+        self.assertEqual(out, text, "模型误报仍被遮：%r" % out)
+
+    def test_model_numeric_span_not_masked(self):
+        """数字/英文短语不是人名（`15` / `still reason`）。"""
+        text = "共 15 项待处理"
+        ents = [{"start": 2, "end": 4, "type": "NAME"}]
+        sid = "namegate-digit"
+        tr._new_session(sid)
+        with mock.patch.object(ner_engine, "is_ner_available", lambda: True),                 mock.patch.object(ner_engine, "extract_entities", lambda t: list(ents)):
+            out = tr.mask(text, sid)
+        self.assertEqual(out, text, "数字被当成人名遮了：%r" % out)
+
+    def test_field_label_still_masked(self):
+        """`签名：某甲`：字段标签形态下弱角色词也算证据，真实姓名照旧遮。"""
+        out = self._mask("namegate-label", "签名：陈建国")
+        self.assertNotIn("陈建国", out, "字段标签形态的真姓名漏遮：%r" % out)
+
+    def test_role_context_still_masked(self):
+        """`客户陈建国反馈…`：角色词是强证据，必须照旧遮。"""
+        out = self._mask("namegate-role", "客户陈建国反馈说订单有问题")
+        self.assertNotIn("陈建国", out, "真实姓名漏遮：%r" % out)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,16 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.15.1] - 2026-11-04
+
+### 更新摘要 / Summary
+- 普通词语不再被当成人名打码：像「简洁」「边界」这样的日常词，模型读到的是原文而不是占位符。
+- Ordinary words are no longer masked as person names, so the model reads your text instead of placeholders.
+
+### 修复
+- 修复普通词语被误判成人名并替换成占位符的问题：短词必须处在明确的姓名语境里才打码，数字、英文短语与过长的片段不再当作人名。
+- Fixed ordinary words being mistaken for person names. Short candidates now need clear name context, and numbers, English phrases and over-long fragments are no longer treated as names.
+
 ## [0.15.0] - 2026-11-04
 
 ### 更新摘要 / Summary
