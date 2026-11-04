@@ -228,7 +228,13 @@ def main():
                         if time.monotonic() > deadline:
                             raise TimeoutError("isolated proxy startup")
                         time.sleep(.1)
-                client = http.client.HTTPConnection("127.0.0.1", ports[0], timeout=5)
+                # 超时给 15s，不是 5s（2026-11-04 v0.15.1 发版实测）：`--ner` 下
+                # 首个请求要等引擎加载 98MB 量化模型并做首次推理，2 核 GitHub runner
+                # 上超过了 5s → `getresponse()` 抛 TimeoutError，整个 Windows 构建被
+                # “frozen sidecar smoke failed” 拦下（本地 16 核跑同样的命令全绿，
+                # 属于典型的“冷启动只在慢机器上咬人”）。别拿这个值当性能基准，
+                # 它只负责“不把慢机器当失败”；真正的延迟断言在下面的 transport 指标里。
+                client = http.client.HTTPConnection("127.0.0.1", ports[0], timeout=15)
                 for _ in range(2):
                     status, body = chat(client)
                     assert status == 200 and SECRET.encode() in body
