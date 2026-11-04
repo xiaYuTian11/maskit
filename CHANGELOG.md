@@ -4,23 +4,39 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
-## [Unreleased]
+## [0.15.0] - 2026-11-04
 
 ### 更新摘要 / Summary
-- 日志页不再被大量「疑似泄露」提示刷满：程序名、命令行参数这类英文串不再被当成人名或机构名。
-- 引擎启动瞬间界面不再短暂提示令牌无效。
-- 图片脱敏不再因定位不准而把整条对话卡死：深色背景截图（终端、深色主题编辑器）现在正常可用。
-- The log page is no longer flooded with "possible leak" notices: program names and command-line flags are no longer treated as names.
-- The UI no longer briefly reports an invalid token right after the engine starts.
-- Image masking no longer stalls a conversation when text cannot be located: dark-background screenshots now work.
+- 日志里能看出「脱敏的是什么」了：每条显示打码后的形态，不再空白或只显示类别。
+- 自定义敏感词的分类名会出现在占位符里（如「人名」），模型能分清人名与单位。
+- 图片脱敏定位不准时不再卡死对话，深色背景截图正常可用。
+- Log details now show what was masked: each entry keeps the masked form instead of a blank row.
+- Custom word categories now appear inside placeholders, so the model can tell a person from an organisation.
+- Image masking no longer stalls a conversation when text cannot be located; dark-background screenshots work again.
 
 ### 修复
+- 修复「已还原」标记误报：最小记录模式下原本什么都没还原，界面却给每一项都打上了已还原。
+- 修复最小记录模式下日志明细只剩类别名、看不到脱敏形态的问题（脱敏词排行榜同样只显示问号）。
+- 修复事件详情里「已还原 / 未出现 / 状态未知」三种情况被混为一谈：现在如实区分，状态未记录时说明原因。
 - 修复日志页被大量「脱敏后仍有原文」提示刷满的问题：含空格的进程名、以连字符开头的命令行参数不再被当成人名或机构名。
-- Fixed the log page being flooded with "original text still present after masking" notices: spaced process names and leading-hyphen command-line flags are no longer treated as person or organization names.
 - 修复引擎启动瞬间的一批「令牌无效」拒绝：令牌改为原子写入，界面不会再读到空令牌。
+- 修复图片脱敏定位不准时整条对话卡死：改为整图遮盖，图片内容零保留，请求正常完成。
+- Fixed a false "restored" badge: in minimal-logging mode nothing had been restored, yet every item was marked as restored.
+- Fixed log details showing only category names in minimal-logging mode, with the masked form invisible (the masked-word ranking showed question marks too).
+- Fixed the event detail view conflating "restored", "not in this response" and "state not recorded"; it now tells them apart and explains when the state was not saved.
+- Fixed the log page being flooded with "original text still present after masking" notices: spaced process names and leading-hyphen command-line flags are no longer treated as person or organization names.
 - Fixed a burst of "invalid token" rejections right after engine start: the token is now written atomically, so the UI never reads an empty one.
-- 修复图片脱敏定位不准时整条对话卡死：改为整图遮盖，图片内容零保留，请求正常完成（此前直接阻断，客户端只报「请求失败」）。
-- Fixed whole-conversation stalls when image text could not be precisely located: the image is now fully covered instead, keeping zero pixel content while letting the request complete (previously it was blocked outright and the client only reported a generic request failure).
+- Fixed whole-conversation stalls when image text could not be precisely located: the image is now fully covered instead, keeping zero pixel content while letting the request complete.
+
+### 新增
+- 自定义敏感词分类名现在可以出现在占位符里（例如人名、密级），中文分类不再被统一压成一个通用标签。存量日志与对话不受影响。
+- 新增分类级「凭据类」标记：被标记的分类只保存打码形态与摘要，原文永不落库。用于把密钥放进中文分类的场景。
+- Custom word category names can now appear inside placeholders; Chinese categories are no longer collapsed into one generic tag. Existing logs and conversations are unaffected.
+- New per-category "credential" mark: marked categories store only the masked form and a digest, never the plaintext.
+
+### 优化
+- 最小记录模式的词级统计改为保存打码形态（如「张*」）而不是问号，排行榜与明细重新有信息量；原文仍然不落盘。
+- Minimal-logging word stats now keep the masked form instead of a question mark, so the ranking and details are informative again; plaintext is still never stored.
 
 ## [0.14.1] - 2026-11-02
 

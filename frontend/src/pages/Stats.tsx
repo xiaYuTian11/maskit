@@ -12,7 +12,7 @@ import { useVisibility } from '@/lib/useVisibility'
 import { getStatsHistory, getTodayStats, getStatsModels, getPriceSyncStatus, getConfig, type StatsHistoryPoint } from '@/api/settings'
 import { BarChart3, TrendingUp, Layers, Trophy, Tags, LockKeyhole } from 'lucide-react'
 import { cn, formatCompactNumber, formatTokensShort } from '@/lib/utils'
-import { CRED_LABELS, maskWord } from '@/lib/sensitive-word'
+import { isCredentialLabel, maskWord } from '@/lib/sensitive-word'
 import { groupWordsByIngress } from '@/lib/ingress-groups'
 import { useI18n } from '@/lib/i18n'
 import dayjs from 'dayjs'
@@ -394,7 +394,7 @@ function Leaderboards({ days, granularity, hidden }: { days: number; granularity
         name: w.word,
         tag: w.label,
         count: w.count,
-        cred: CRED_LABELS.has(w.label),
+        cred: isCredentialLabel(w.label, cfg?.credential_categories),
         rank: idx + 1,
         barMax: gMax,
       })),

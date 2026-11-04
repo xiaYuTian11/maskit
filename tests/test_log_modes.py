@@ -117,12 +117,27 @@ class LogModeProjectionTests(unittest.TestCase):
         self.assertEqual(row["decision"], "masked")
         self.assertTrue(row["suffix_reused"])
 
-    def test_summary_keeps_label_counts_only(self):
-        """类别数量是保留的（§D1 明列），但每项只留 label，不留任何可还原/可识别片段。"""
+    def test_summary_keeps_label_and_masked_form(self):
+        """最小模式保留「类别 + 打码形态」，但原文与凭据摘要一律不落盘。
+
+        口径 2026-11-04 修订（用户拍板）：旧断言是 `[{"label": "PHONE"}]`——
+        连 preview 都不留。结果是新装（模板默认 summary）的用户在详情弹窗里只看到
+        一排类别名，完全看不出「脱敏的是什么」，而弹窗又拿 `restored !== false`
+        判状态（缺失恒真）→ 每一项都盖「已还原」。
+
+        判据是**能不能逆推出原文**：preview 是打码产物、布尔结论与正文无关，可以留；
+        original / digest 能还原或做同一性对照，不能留。
+        """
         event_store.set_log_mode("summary")
         seq = event_store.append_event(_mask_record())
         row = event_store.fetch_event_by_id(seq)
-        self.assertEqual(row["items"], [{"label": "PHONE"}])
+        # `_mask_record` 的 item 只有 label/original/preview/digest：
+        # 后两者一个属原文、一个属同一性对照，都应被投影掉，只剩 label + preview。
+        self.assertEqual(row["items"], [{"label": "PHONE", "preview": "1" + "*" * 10}])
+        blob = json.dumps(row, ensure_ascii=False)
+        self.assertNotIn(SYNTH_PLAIN, blob, "原文永不得在最小模式下落盘")
+        self.assertNotIn("digest", row["items"][0], "凭据摘要超出「最小」的范围")
+        self.assertNotIn("original", row["items"][0])
 
     def test_summary_keeps_upstream_idle_evidence(self):
         """`upstream_idle_s` 在最小模式下也必须留得住。
@@ -140,13 +155,19 @@ class LogModeProjectionTests(unittest.TestCase):
         self.assertEqual(row["reason"], "upstream_idle")
         self.assertEqual(row["failure_owner"], "upstream")
 
-    def test_summary_words_keep_label_distribution_without_words(self):
-        """词榜在最小模式下只保留类别分布：word 固定 "?"，明文词绝不落盘。"""
+    def test_summary_words_keep_masked_form_not_plaintext(self):
+        """词榜在最小模式下记**打码形态**（不是原文，也不是无信息量的 "?"）。
+
+        口径 2026-11-04 修订：原先固定成 "?"，导致「今日脱敏词明细」在不落明文的
+        机器上是一排问号——用户连「脱敏的是什么形态」都看不到。打码形态不含原文，
+        保留它才让明细有信息量；原文仍只在 detailed + 显式开启时落盘。
+        """
         event_store.set_log_mode("summary")
         event_store.append_event(_mask_record())
         with closing(event_store._connect()) as conn:
             rows = conn.execute("SELECT label, word, cnt FROM daily_words").fetchall()
-        self.assertEqual([(r[0], r[1]) for r in rows], [("PHONE", "?")])
+        self.assertEqual([(r[0], r[1]) for r in rows], [("PHONE", "1" + "*" * 10)])
+        self.assertNotIn(SYNTH_PLAIN, json.dumps(rows, ensure_ascii=False))
 
     def test_detailed_words_keep_user_opt_in_plaintext(self):
         event_store.set_log_mode("detailed")

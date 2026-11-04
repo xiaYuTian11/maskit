@@ -28,3 +28,16 @@ export type CredentialLabel = (typeof CREDENTIAL_LABELS)[number]
 
 /** 便于 `Set` 场景的查表用法（`.has(label)`）。 */
 export const CRED_LABELS: ReadonlySet<string> = new Set(CREDENTIAL_LABELS)
+
+/**
+ * 展示侧判定：该标签是否必须恒打码。
+ *
+ * `extra` 是配置里的 `credential_categories`（用户显式标记的自定义分类，
+ * 如「密钥」）。两半条件必须合并判断——只看内置集合会让中文分类里的
+ * 密钥在「显示明文」开关下被展开（引擎侧已不落原文，但展示层不能靠落库形态
+ * 反推：早期版本的同一条历史事件里可能就躺着原文）。
+ */
+export function isCredentialLabel(label: string, extra?: readonly string[]): boolean {
+  if (CRED_LABELS.has(label)) return true
+  return Array.isArray(extra) && extra.includes(label)
+}

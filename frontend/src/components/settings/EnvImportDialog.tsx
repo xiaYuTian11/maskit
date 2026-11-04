@@ -48,6 +48,14 @@ interface EnvImportDialogProps {
   words: Record<string, string[]>
   /** 目标分类候选：引擎内置规则标签（= `cfg.builtin_rules` 的键），避免用户还要先手工建分类 */
   builtinLabels: string[]
+  /**
+   * 已被用户标记为「凭据类」的自定义分类（`cfg.credential_categories`）。
+   *
+   * 它们是凭据行的**合法目标**：引擎按 `is_credential()` 判定，命中这类分类只存
+   * 打码形态与摘要，原文不落库——与内置凭据标签同等待遇。不传会让用户明明已经
+   * 标好了分类，导入时却选不到它，只能退回内置标签。
+   */
+  credentialCategories?: string[]
   /** 落库回调（父组件接 save({sensitive: next}, msg)） */
   onImport: (next: Record<string, string[]>, message: string) => void
 }
@@ -57,6 +65,7 @@ export function EnvImportDialog({
   onOpenChange,
   words,
   builtinLabels,
+  credentialCategories = [],
   onImport,
 }: EnvImportDialogProps) {
   const { t, tf } = useI18n()
@@ -258,9 +267,15 @@ export function EnvImportDialog({
                   </thead>
                   <tbody className="divide-y divide-border/60">
                     {entries.map((e, i) => {
-                      // 凭据行的可选分类被收窄到 CREDENTIAL_LABELS：分类名就是占位符
-                      // label，选到别的分类会把密钥明文写进事件库（见文件头注释 1）。
-                      const options: readonly string[] = e.secret ? CREDENTIAL_LABELS : allOptions
+                      // 凭据行的候选 = 内置凭据标签 ∪ 用户已标记为凭据的自定义分类。
+                      // 两边都由引擎按 `is_credential()` 判，选哪个都不会让原文落库；
+                      // 选到**未标记**的分类才会（见文件头注释 1）。
+                      const builtinSecret: readonly string[] = CREDENTIAL_LABELS
+                      const secretOptions: readonly string[] = [
+                        ...builtinSecret,
+                        ...credentialCategories.filter((c) => !builtinSecret.includes(c)),
+                      ]
+                      const options: readonly string[] = e.secret ? secretOptions : allOptions
                       return (
                         <tr key={`${e.key}:${e.line}`} className={cn(picked[i] && 'bg-primary/[0.04]')}>
                           <td className="px-3 py-1.5">

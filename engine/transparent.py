@@ -61,7 +61,10 @@ from shield_defaults import (
 from event_store import enqueue_event
 from event_store import enqueue_audit_event
 from event_store import project_event_for_log, stop_log_trace as _stop_log_trace
-from credential_labels import CREDENTIAL_LABELS
+# CREDENTIAL_LABELS 仍保留 re-export：多处测试与旧调用点按名字取它做口径校验
+# （真正判定必须走 is_credential——它还包含用户标记的自定义分类）。
+from credential_labels import (CREDENTIAL_LABELS, is_credential,
+                               set_credential_categories)
 import audit_signals as _audit
 import base64
 import hashlib
@@ -2373,7 +2376,18 @@ def _prefix_secret_regex_locked(key):
 # 旧格式 ⟦X·hex⟧ 用生僻 Unicode 且不带语义：主流 tokenizer 会切成多个罕见 token，
 # 模型复述时容易变形（少一个括号就还原失败），且模型不知道占位符代表什么，回答质量下降。
 # 新格式保留业务标签（PHONE / EMAIL / TERM…），模型能理解"这里原本是个电话号"。
-_LABEL_SAFE_RX = re.compile(r"[^A-Z0-9]+")
+# 标签字符类：ASCII 大写字母数字 + CJK 统一表意文字（\u4e00-\u9fff）。
+#
+# 【为什么允许中文】自定义敏感词的分类名本来就是中文（人名 / 地域 / 密级…）。
+# 旧实现 `_LABEL_SAFE_RX` 把非 ASCII 字符全删并根据空串兑底成 `TERM`，结果模型
+# 看到的全是 `{{TERM_xxxxxx}}`：既看不出这是人名还是密级（回答质量下降），
+# 用户也无法在两份不同实体的 token 之间建立语义对应（实测反馈）。
+# 中文标签不会破坏任何现有机制：
+#   · 后缀（真正的唯一标识）仍是 6 位纯辅音，与标签无关；
+#   · `_token_suffix` 用 rsplit("_", 1) 切分，而 `_safe_label` 会把下划线剥除；
+#   · 还原走后缀索引，标签只参与兼容性校验（两边用同一函数归一化）。
+# 存量 token 的 `TERM` 标签继续被认（字符类向后兼容），不需要迁移。
+_LABEL_SAFE_RX = re.compile(r"[^A-Z0-9\u4e00-\u9fff]+")
 
 # 凭据标签互通族（大模型在写代码/生成命令时，对 CONNSTR/SECRET/PASSWORD/TOKEN 容易混用）
 _CREDENTIAL_SYNONYMS = frozenset({
@@ -2399,7 +2413,14 @@ def _labels_compatible(lab_a, lab_b):
 
 
 def _safe_label(label):
-    """标签 ASCII 化。内置规则标签本身是 ASCII；自定义中文标签统一归 TERM。"""
+    """标签归一化：大写化 + 剥除非 [A-Z0-9 中文] 字符，最多 12 字符。
+
+    **中文分类名不再被压成 TERM**（2026-11-04）。旧行为让自定义词库的分类
+    （人名 / 地域 / 密级…）在占位符里全部消失：模型看到的是一串无差别的
+    `{{TERM_xxxxxx}}`，既读不出语义，也分不清两个 token 属于不同类别。
+    作用域仅限「自定义分类名」：内置规则标签本来全是 ASCII，NER 的
+    NAME/ORG/ADDR 也不受影响。
+    """
     up = _LABEL_SAFE_RX.sub("", str(label or "").upper())
     return up[:12] or "TERM"
 
@@ -2604,7 +2625,7 @@ def _known_add(orig: str, token: str, label: str) -> bool:
     try:
         if not orig or len(orig) < _KNOWN_MIN:
             return False
-        if label in CREDENTIAL_LABELS:
+        if is_credential(label):
             return False
         if label in BUILTIN_RULES:
             # 内置规则命中的值不参与正向打码：规则的校验与边界是它自己的语义，
@@ -3208,7 +3229,7 @@ def _mask_egress_needles(fwd, labels, new_orig=None):
         for orig in pool:
             if not isinstance(orig, str) or len(orig) < _MASK_EGRESS_MIN_NEEDLE:
                 continue
-            if (labels or {}).get(orig) in CREDENTIAL_LABELS:
+            if is_credential((labels or {}).get(orig)):
                 continue
             if _PLACEHOLDER_RX.match(orig):
                 continue
@@ -3773,7 +3794,7 @@ def _warmup_recent_from_db():
                     sfx = _token_suffix(tok)
                     if sfx:
                         issued.add(sfx)
-                    if not orig or label in CREDENTIAL_LABELS or _PLACEHOLDER_RX.match(orig):
+                    if not orig or is_credential(label) or _PLACEHOLDER_RX.match(orig):
                         continue
                     if orig in seen_orig:
                         continue
@@ -3979,7 +4000,7 @@ def _cred_preview(orig, label):
 
 def _preview(orig, label):
     """生成脱敏预览：凭据类不泄露可用信息，其他类型保留少量上下文。"""
-    if label in CREDENTIAL_LABELS:
+    if is_credential(label):
         return _cred_preview(orig, label)
     n = len(orig)
     if n <= 2:
@@ -4009,7 +4030,7 @@ def _redact_credentials(text):
         return text
     try:
         for rx, label, _g in RULES:
-            if label in CREDENTIAL_LABELS:
+            if is_credential(label):
                 text = rx.sub("[REDACTED]", text)
         pref = _prefix_secret_regex()
         if pref:
@@ -4044,13 +4065,13 @@ def _redact_session_credentials(text, s):
         # 2. 跨请求从 _RECENT_REV 还原出来的历史凭据（s["restored_tokens"]）
         candidate_origs = set()
         for orig in (s.get("fwd") or {}):
-            if labels.get(orig, "") in CREDENTIAL_LABELS:
+            if is_credential(labels.get(orig, "")):
                 candidate_origs.add(orig)
         for tok in (s.get("restored_tokens") or set()):
             rec = _RECENT_REV.get(tok)
             if rec and len(rec) >= 2:
                 orig, label = rec[0], rec[1]
-                if label in CREDENTIAL_LABELS and orig:
+                if is_credential(label) and orig:
                     candidate_origs.add(orig)
 
         for orig in candidate_origs:
@@ -5252,13 +5273,21 @@ _TOKEN_ALPHABET = "bcdfghjkmnpqrstvwxz"
 # 事件库预热回来的）全是 hex6 必须继续认，同时不把匹配面扩到英文单词。
 _SUFFIX_PAT = r"(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})"
 
+# 标签字符类（唯一定义源）：ASCII 大写字母数字 + CJK 统一表意文字。
+# 所有占位符正则都用它拼，避免「改一处漏一处」：漏改的那处会让中文标签的 token
+# 静默不匹配（表现为打码正常、还原全丢，且事件里计成 unresolved）。
+# 允许中文的理由见 `_LABEL_SAFE_RX` 上方注释。
+_LABEL_PAT = r"[A-Z0-9\u4e00-\u9fff]{1,12}"
+# 宽松修正遍额外允许小写与下划线（模型会改写大小写、把 IPPRIVATE 补成 IP_PRIVATE）
+_LABEL_PAT_LOOSE = r"[A-Za-z0-9_\u4e00-\u9fff]{1,12}"
+
 # 完整占位符 / 行尾半截占位符（流式时可能被切在两个 chunk 之间）
-_PLACEHOLDER_RX = re.compile(r"\{\{[A-Z0-9]{1,12}_" + _SUFFIX_PAT + r"\}\}")
+_PLACEHOLDER_RX = re.compile(r"\{\{" + _LABEL_PAT + r"_" + _SUFFIX_PAT + r"\}\}")
 # 兼容内部空白与标签改写的双花括号占位符（用于还原时的容错第一遍）
 # 覆盖模型习惯在 {{ 与标签之间加空格（如 Jinja 语法风格 `{{ APIKEY_xxxx }}`），
 # 避免原先按宽松正则替换导致留下 `{{ ` 和 ` }}` 破坏工具命令。
 _BRACED_PLACEHOLDER_RX = re.compile(
-    r"\{\{\s*([A-Za-z0-9_]{1,12})_(" + _SUFFIX_PAT + r")\s*\}\}"
+    r"\{\{\s*(" + _LABEL_PAT_LOOSE + r")_(" + _SUFFIX_PAT + r")\s*\}\}"
 )
 # 「裸露 / 半残」占位符：模型经常把 {{ }} 剥掉或只剩一半再吐回来。
 #
@@ -5272,7 +5301,8 @@ _BRACED_PLACEHOLDER_RX = re.compile(
 # 无花括号的裸 hex6 形态会被日期串/短哈希命中（2026-10-13 真机实测），
 # 替换查不到时原样放行，**计数**面上裸 hex6 已单独收紧（判据见 `_loose_sub`）。
 _LOOSE_PLACEHOLDER_RX = re.compile(
-    r"\{{1,2}\s*([A-Za-z0-9_]{1,12}_" + _SUFFIX_PAT + r")\s*\}{0,2}|([A-Z0-9]{1,12}_" + _SUFFIX_PAT + r")"
+    r"\{{1,2}\s*(" + _LABEL_PAT_LOOSE + r"_" + _SUFFIX_PAT + r")\s*\}{0,2}"
+    r"|(" + _LABEL_PAT + r"_" + _SUFFIX_PAT + r")"
 )
 # 行尾半截占位符（流式时可能被切在两个 chunk 之间），需要扣住等下一块拼。
 #
@@ -5303,7 +5333,9 @@ _LOOSE_PLACEHOLDER_RX = re.compile(
 #
 # `{` 本身仍然是必需的——所以不含花括号的普通文本（`C:\Users\` 之外，
 # 比如「今天天气」）不会被扣住。
-_PARTIAL_RX = re.compile(r"(?:\\{0,3}\{){1,3}\s{0,4}[A-Za-z0-9_]{0,20}\s{0,4}\\{0,3}\}?\\{0,3}$|\\{1,3}$")
+_PARTIAL_RX = re.compile(
+    r"(?:\\{0,3}\{){1,3}\s{0,4}[A-Za-z0-9_\u4e00-\u9fff]{0,20}\s{0,4}\\{0,3}\}?\\{0,3}$"
+    r"|\\{1,3}$")
 # 扣留上限：必须 ≥ _PARTIAL_RX 能匹配出的最长片段，否则「扣不下」会退化成
 # 「就地处理半截占位符」——比如此前是 24，而二次转义的完整片段长 25，
 # 于是它总是不被扣留、还原后留下 `\\}` 残渣。
@@ -5314,7 +5346,7 @@ _PARTIAL_RX = re.compile(r"(?:\\{0,3}\{){1,3}\s{0,4}[A-Za-z0-9_]{0,20}\s{0,4}\\{
 _PARTIAL_MAX = 48
 # 从完整占位符里拆出 label 与后缀。多处要用，别再各写各的正则——
 # 0.1.12 就有三处各自写死 [0-9a-f]{6}，改格式时漏一处就是静默失效。
-_PLACEHOLDER_PARTS_RX = re.compile(r"^\{\{([A-Z0-9]{1,12})_(" + _SUFFIX_PAT + r")\}\}$")
+_PLACEHOLDER_PARTS_RX = re.compile(r"^\{\{(" + _LABEL_PAT + r")_(" + _SUFFIX_PAT + r")\}\}$")
 # 转义形态：模型把 {{ }} 当成需要转义的字符，输出 \{\{X\}\}。
 #
 # 反斜杠要允许「每个花括号前后都有、且不止一个」，两个原因都是实测/推演出来的：
@@ -5344,14 +5376,15 @@ _PLACEHOLDER_PARTS_RX = re.compile(r"^\{\{([A-Z0-9]{1,12})_(" + _SUFFIX_PAT + r"
 # 与转义遍；不带花括号的形态仍交给宽松正则，且宽松正则不许走后缀索引
 # （理由见 _RECENT_SUFFIX 的注释）。
 _ESCAPED_PLACEHOLDER_RX = re.compile(
-    r"(?:\\{0,3}\{){1,3}(?:\\{0,3})\s*([A-Za-z0-9_]{1,12})_(" + _SUFFIX_PAT + r")\s*(?:\\{0,3}\}){1,3}",
+    r"(?:\\{0,3}\{){1,3}(?:\\{0,3})\s*(" + _LABEL_PAT_LOOSE + r")_(" + _SUFFIX_PAT + r")\s*(?:\\{0,3}\}){1,3}",
     re.IGNORECASE,
 )
 # 从「带花括号但标签可能被改写」的形态里取后缀。标签允许含下划线：
 # 模型会自己把 `IPPRIVATE` 补成 `IP_PRIVATE`，用 _PLACEHOLDER_PARTS_RX
 # （标签字符类不含下划线）解析不了这种。
 _ANY_BRACED_SUFFIX_RX = re.compile(
-    r"^\{\{\s*([A-Za-z0-9_]{1,12})_(" + _SUFFIX_PAT + r")\s*\}\}$", re.IGNORECASE
+    r"^\{\{\s*(" + _LABEL_PAT_LOOSE + r")_(" + _SUFFIX_PAT + r")\s*\}\}$",
+    re.IGNORECASE,
 )
 
 
@@ -8623,7 +8656,7 @@ def _mask_event_items(sid, limit=30):
             "length": len(orig),
             "preview": _preview(orig, label),
         }
-        if label in CREDENTIAL_LABELS:
+        if is_credential(label):
             item["cred"] = True
             item["digest"] = _cred_digest(orig)
         else:
@@ -11157,7 +11190,7 @@ async def _request_impl(flow: http.HTTPFlow):
         # 凭据类标签（CREDENTIAL_LABELS：API_KEY/TOKEN/SECRET/ACCESS_KEY/JWT/CONNSTR/PRIVATE_KEY）永不明文落库：
         # 只存类型 + 打码 preview + 长度 + sha256 摘要（审计要求，v1.5.19 起）。
         # 非凭据 PII 保留 original（项目约定：明文只进详情弹窗，导出/列表用 preview）。
-        is_cred = label in CREDENTIAL_LABELS
+        is_cred = is_credential(label)
         item = {
             "tok": tok,
             "label": label,
@@ -11752,7 +11785,7 @@ def _scan_response(flow, sid, host, method, path, source, streamed_text=None):
             for label, vals in found.items():
                 for v in list(vals)[:10]:
                     # 凭据类响应 PII 同样不明文落库（与 MASK 口径一致）
-                    if label in CREDENTIAL_LABELS:
+                    if is_credential(label):
                         items.append({"label": label, "cred": True,
                                       "digest": _cred_digest(v),
                                       "preview": _preview(v, label),
@@ -13035,7 +13068,7 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
             seen_toks.add(tok)
             m = _PLACEHOLDER_PARTS_RX.match(tok)
             lbl = s.get("labels", {}).get(orig, "")
-            is_cred = lbl in CREDENTIAL_LABELS
+            is_cred = is_credential(lbl)
             item = {
                 "tok": tok,
                 "label": lbl,
@@ -13070,7 +13103,7 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
             if rec and len(rec) >= 2:
                 orig, lbl = rec[0], rec[1]
                 m = _PLACEHOLDER_PARTS_RX.match(tok)
-                is_cred = lbl in CREDENTIAL_LABELS
+                is_cred = is_credential(lbl)
                 item = {
                     "tok": tok,
                     "label": lbl,
@@ -13552,6 +13585,9 @@ def _read_settings():
         "words": cw,
         "sensitive_disabled": disabled_labels,
         "sensitive_word_disabled": word_disabled,
+        # 用户显式标记为「凭据类」的自定义分类名。凭据判定要认它，
+        # 否则中文分类里的密钥会以原文落库（见 credential_labels.is_credential）。
+        "credential_categories": list(cfg.get("credential_categories") or []),
         "builtin_rules": builtin,
         "prefixes": prefixes,
         "ttl": int(cfg.get("session_ttl") or DEFAULT_TTL),
@@ -13687,6 +13723,11 @@ def _maybe_reload(force=False):
     # 读者只会看到上一代或新一代，不会看到半填充的中间态）。
     RULE_ACTIONS = dict(s.get("rule_actions") or {})
     ALLOW_VALUES = set(s.get("allow_values") or set())
+    # 凭据分类判定：与面板进程同一份集合。漏同步 = 中文分类里的密钥明文落库。
+    try:
+        set_credential_categories(s.get("credential_categories"))
+    except Exception:
+        pass
     # 永久映射的重建必须排在禁用集赋值**之后**：_sync_custom_word_mappings 用
     # SENSITIVE_DISABLED / SENSITIVE_WORD_DISABLED 判断哪些词仍启用，放在前面会
     # 永远按上一代配置计算（禁用词要等第二次改配置才被清掉）。

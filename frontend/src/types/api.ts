@@ -540,6 +540,11 @@ export interface ShieldConfig {
   sensitive?: Record<string, string[]>
   sensitive_disabled?: string[]
   sensitive_word_disabled?: Record<string, string[]>
+  /**
+   * 被用户显式标记为「凭据类」的自定义分类名（如「密钥」）。
+   * 引擎按它决定原文是否允许落库：命中的分类恒只存打码 preview + 摘要。
+   */
+  credential_categories?: string[]
   /** 整词匹配开关：开启后该词两侧加边界。 */
   sensitive_word_whole?: string[]
   builtin_rules?: Record<string, boolean>

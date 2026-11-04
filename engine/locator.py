@@ -30,8 +30,9 @@ from dataclasses import dataclass
 
 from PIL import Image
 
-# 从 `{{PHONE_abcxyz}}` 里取标签
-_PLACEHOLDER_LABEL_RX = re.compile(r"\{\{\s*([A-Z0-9_]{1,24})_")
+# 从 `{{PHONE_abcxyz}}` 里取标签。标签字符类含 CJK：自定义词库的中文分类名
+# 会原样进 token（`{{人名_bcdfgh}}`），不认就会让视觉脱敏的标签展示空掉。
+_PLACEHOLDER_LABEL_RX = re.compile(r"\{\{\s*([A-Z0-9_\u4e00-\u9fff]{1,24})_")
 
 # pad：左右各 0.5em（em=行高）+ 块宽的 4%（见 char_x 注释：加权模型的字体误差
 # 与块宽成正比，固定 em 留白护不住宽行）。实测宽度加权会**偏窄**，评测里出现过

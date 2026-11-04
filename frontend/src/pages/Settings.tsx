@@ -1103,6 +1103,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
       sensitive: cfg?.sensitive ?? {},
       sensitive_disabled: cfg?.sensitive_disabled ?? [],
       sensitive_word_disabled: cfg?.sensitive_word_disabled ?? {},
+      credential_categories: cfg?.credential_categories ?? [],
       sensitive_word_whole: cfg?.sensitive_word_whole ?? [],
     }
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -1119,12 +1120,15 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
   }
 
   const removeCategory = (cat: string) => {
-    // 三条增量分别对应「删分类 / 清该分类的禁用词 / 取消该分类的整类禁用」。
+    // 四条增量分别对应「删分类 / 清该分类的禁用词 / 取消该分类的整类禁用 / 清凭据标记」。
     // 原先提交三份整表快照，任一表在别处被并发改动都会被静默覆盖。
+    // 凭据标记必须一并清：留着会让以后新建的同名分类「继承」一个用户早已忘记的
+    // 凭据属性（引擎 normalize_config 也会按分类存在性过滤，这里同步做一遍）。
     save(() => patchSequence([
       { key: 'sensitive', op: 'map_del', value: [cat] },
       { key: 'sensitive_word_disabled', op: 'map_del', value: [cat] },
       { key: 'sensitive_disabled', op: 'list_remove', value: [cat] },
+      { key: 'credential_categories', op: 'list_remove', value: [cat] },
     ]), tf('settings.toast.catDeleted', { cat }))
   }
 
@@ -1198,6 +1202,23 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
 
   // 词级禁用（sensitive_word_disabled: {label: [words]}）
   const wordDisabled = (cfg?.sensitive_word_disabled as Record<string, string[]>) ?? {}
+
+  // 凭据类分类（credential_categories: [labels]）
+  //
+  // 这是**安全红线开关**：凭据判定此前只看内置集合，用户把 API key 放进中文分类时
+  // label 不在集合里 → items[].original 明文落库。标记后引擎按 is_credential() 处理，
+  // 只存打码形态 + 摘要。前端这里只负责把标记写进配置，不做任何本地推断——
+  // 「哪些值算凭据」必须由用户显式声明，靠猜必然漏。
+  const credentialCats = (cfg?.credential_categories as string[]) ?? []
+  const toggleCatCredential = (cat: string) => {
+    if (!cfg) return
+    const was = credentialCats.includes(cat)
+    save(() => patchConfig({
+      key: 'credential_categories',
+      op: was ? 'list_remove' : 'list_add',
+      value: [cat],
+    }), tf(was ? 'settings.toast.catCredentialOff' : 'settings.toast.catCredentialOn', { cat }))
+  }
 
   const toggleWordDisabled = (cat: string, word: string) => {
     if (!cfg) return
@@ -1620,6 +1641,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
           <div className="grid items-stretch gap-3 md:grid-cols-2">
             {Object.entries(words).map(([cat, list]) => {
               const isCatDisabled = catDisabledList.includes(cat)
+              const isCredentialCat = credentialCats.includes(cat)
               const filtered = wordSearch.trim()
                 ? list.filter((w) => w.toLowerCase().includes(wordSearch.trim().toLowerCase()))
                 : list
@@ -1627,7 +1649,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
               <Card
                 key={cat}
                 className={cn(
-                  'flex h-full flex-col border bg-card shadow-card transition-all hover:shadow-card-hover',
+                  'group flex h-full flex-col border bg-card shadow-card transition-all hover:shadow-card-hover',
                   isCatDisabled && 'border-dashed border-border/80 bg-muted/15 opacity-65 hover:opacity-100',
                 )}
               >
@@ -1648,6 +1670,22 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                         {t('settings.words.catDisabledBadge')}
                       </span>
                     )}
+                    {/* 凭据类标记：分类名就是占位符标签，而凭据判定只看标签——
+                        中文分类（如「密钥」）不标记就会让原文落库。做成可点击的小徽章，
+                        标记后常显（不藏在悬停里）：它是「原文会/不会落库」的区分点。 */}
+                    <button
+                      type="button"
+                      onClick={() => toggleCatCredential(cat)}
+                      title={isCredentialCat ? t('settings.words.credentialOnHint') : t('settings.words.credentialOffHint')}
+                      className={cn(
+                        'shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium transition-colors',
+                        isCredentialCat
+                          ? 'bg-warning/15 text-warning-ink hover:bg-warning/25'
+                          : 'text-muted-foreground/60 opacity-0 hover:text-foreground group-hover:opacity-100',
+                      )}
+                    >
+                      {isCredentialCat ? t('settings.words.credentialBadge') : t('settings.words.credentialOff')}
+                    </button>
                   </div>
                   <div className="flex items-center gap-1.5">
                     {addWordCat === cat ? (
@@ -1817,6 +1855,7 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
             onOpenChange={setEnvImportOpen}
             words={words}
             builtinLabels={Object.keys(builtinRules)}
+            credentialCategories={credentialCats}
             onImport={(next, msg) => save(() => {
               // 只下发「本地快照里没有的新词」，按分类走 list_add 增量，
               // 不整份覆盖 sensitive（会丢掉别处并发新增的词条与分类）。

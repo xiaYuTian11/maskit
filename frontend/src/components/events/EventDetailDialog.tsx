@@ -680,11 +680,28 @@ export function EventDetailDialog({
                     ? tf('detail.restoreItemsWithTotal', { n: event.items.length, total: event.restored })
                     : tf(event.type === 'RESTORE' ? 'detail.restoreItems' : 'detail.maskItems', { n: event.items.length })}
                 </h3>
+                {/* 最小记录模式下 items 会被裁到只剩 label（+ 打码形态），用户看到一排卡片却
+                    没有任何内容，会误以为“功能坏了”。先把原因写在条目上方，再展示能展示的部分。 */}
+                {logMode === 'summary' && (
+                  <p className="mb-2 rounded-lg border border-dashed bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                    {t('detail.summaryModeItems')}
+                  </p>
+                )}
                 <div className="space-y-2">
                   {(event.items as { label: string; original?: string; preview?: string; tok?: string; hash?: string; length?: number; restored?: boolean; unresolved?: boolean; from_history?: boolean }[]).map(
                     (item, idx) => {
-                      const isRestored = (event.type === 'RESTORE' && item.restored !== false) || item.restored === true
-                      const notRestored = event.type === 'RESTORE' && item.restored === false
+                      // 三态，**必须区分「未知」与「已还原」**：
+                      //   true      → 本轮确实还原了
+                      //   false     → 本轮没还原（模型没提 / 回显但查不到映射）
+                      //   undefined → 字段压根没落盘（summary 最小记录模式会把 items 裁剪到只剩
+                      //               label，见 event_store._project_summary），此时**不能说已还原**
+                      // 旧判据是 `item.restored !== false`，undefined !== false 恒真 → summary
+                      // 模式下每一项都被盖上绿色「已还原」，而它其实什么都没还原（2026-11-04 真实
+                      // 截图：4 项全绿、脱敏内容一片空白）。字段缺失 ≠ 成功，这条与
+                      // `logs.outcome` 的「未观测不能当通过」同一纪律。
+                      const known = typeof item.restored === 'boolean'
+                      const isRestored = known && item.restored === true
+                      const notRestored = event.type === 'RESTORE' && known && item.restored === false
                       // 「回显但未还原」= 模型复述了该占位符，但引擎查不到原文映射
                       // （映射过期 / 引擎重启 / 复用表淘汰）。与「模型压根没提」
                       // （notRestored 且无此标记）处置完全不同：前者要查映射，后者本来正常。
@@ -709,6 +726,14 @@ export function EventDetailDialog({
                                 <span className="flex items-center gap-1 rounded bg-warning/15 px-1.5 py-0.5 text-2xs font-medium text-warning-ink" title={t('detail.itemUnresolvedEchoHint')}>
                                   <span className="h-1.5 w-1.5 rounded-full bg-warning/70" />
                                   <span>{t('detail.itemUnresolvedEcho')}</span>
+                                </span>
+                              )}
+                              {/* 状态未落盘：不能冒充已还原，也不能当成失败。用中性灰点 + 明确文案，
+                                  并在 title 里说清为什么（summary 模式不记 restored 字段）。 */}
+                              {!known && event.type === 'RESTORE' && (
+                                <span className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground" title={t('detail.itemStateUnknownHint')}>
+                                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
+                                  <span>{t('detail.itemStateUnknown')}</span>
                                 </span>
                               )}
                               <Badge variant="outline" className="font-mono text-2xs">

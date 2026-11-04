@@ -72,7 +72,7 @@ SNIPPET_HEADER = """# Maskit 占位符使用契约（AGENTS.md / rules 片段）
 # 只用于"包内不得出现真实 token"这条自检（见模块 docstring）。不 import 引擎：
 # 打包脚本要能在没有 mitmproxy/flask 的干净环境里离线跑（门禁 CI 的 version job）。
 _STRICT_TOKEN_RX = re.compile(
-    r"\{\{[A-Z0-9]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}\}"
+    r"\{\{[A-Z0-9\u4e00-\u9fff]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}\}"
 )
 _FRONTMATTER_RX = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 

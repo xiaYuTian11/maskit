@@ -45,7 +45,7 @@ import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { cn, formatCompactNumber, formatTokensShort, formatBytes, formatPercent } from '@/lib/utils'
-import { CRED_LABELS, maskWord } from '@/lib/sensitive-word'
+import { isCredentialLabel, maskWord } from '@/lib/sensitive-word'
 import { groupWordsByIngress, ingressQuery } from '@/lib/ingress-groups'
 import { Hint } from '@/components/common/Hint'
 import { StatCard } from '@/components/patterns/StatCard'
@@ -183,6 +183,9 @@ export default function Dashboard() {
     refetchInterval: hidden ? false : 10000,
   })
   const { data: cfg } = useQuery({ queryKey: ['config'], queryFn: getConfig, refetchInterval: hidden ? false : 120000 })
+  // 用户显式标记为「凭据类」的自定义分类：展示层必须与引擎同一口径打码，
+  // 否则命中这类词的记录会在「显示明文」开关下被展开。
+  const credCats = cfg?.credential_categories ?? []
 
   // 写队列健康（drops/dead_letters/restarts > 0 时显示告警横幅）
   const { data: health } = useQuery({
@@ -984,7 +987,10 @@ export default function Dashboard() {
         </div>
       </Card>
 
-      <EventDetailDialog open={detailOpen} onOpenChange={setDetailOpen} seq={detailSeq} />
+      {/* logMode 必须传：最小记录模式下详情弹窗要说明「明细未落盘」，
+          不传的话那一排只剩类别名的卡片看起来就是坏了 */}
+      <EventDetailDialog open={detailOpen} onOpenChange={setDetailOpen} seq={detailSeq}
+        logMode={(cfg?.log_mode as 'summary' | 'detailed' | undefined) ?? undefined} />
 
       {/* ===== 客户端上游卡片 ===== */}
       <div>
@@ -1107,7 +1113,7 @@ export default function Dashboard() {
                     </p>
                   )}
                   {g.items.map((w) => {
-                    const cred = CRED_LABELS.has(w.label)
+                    const cred = isCredentialLabel(w.label, credCats)
                     const display = cred || !maskedPlain ? maskWord(w.word, cred) : w.word
                     const searchTerm = cred ? w.label : (w.word.startsWith('<') ? w.label : w.word)
                     return (

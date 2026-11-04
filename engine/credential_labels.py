@@ -24,6 +24,46 @@ CREDENTIAL_LABELS = frozenset({
     "PRIVATE_KEY",
 })
 
+# ========== 用户显式标记为凭据的自定义分类（2026-11-04）==========
+#
+# 为什么需要它（**这是现存的一个真安全洞**，不是新功能）：
+# 凭据判定一直只看 `label in CREDENTIAL_LABELS`，而自定义分类名由用户自由填写。
+# 用户建一个叫「密钥」/「密码表」的中文分类放 API key 时，`label` 不在上面那个
+# 集合里 → `items[].original` **明文写进本地 SQLite**，直接违反「凭据原文永不落库」。
+# 中文标签推广后这个面会扩大（让用户更习惯用中文分类名），所以必须同时堵。
+#
+# 为什么用「分类级标记」而不是「认中文同义词」：`密钥` / `密码` / `凭据` / `证件`
+# 的枚举永远漏一个，而漏一个就是一条明文。标记由用户显式给出，引擎只做忠实执行。
+#
+# 跨进程约定：这是**可变模块级状态**，engine 与 panel 各自在配置加载时写入
+# （面板 run 在 Flask 进程、引擎 run 在 sidecar 进程，两边都读同一份 config.json）。
+CREDENTIAL_CATEGORIES = set()
+
+
+def set_credential_categories(labels) -> None:
+    """整体替换「被标记为凭据的自定义分类」集合（配置热重载时调）。
+
+    就地 clear+update 而不是重新绑定：调用方可能已持有旧引用，换对象会让那些
+    读者永远看不到新配置（与 `transparent.CUSTOM_WORDS` 用整表换对象是**相反**
+    的取舍，因为那里的读者是并发线程、这里是单次配置加载后的纯读）。
+    """
+    try:
+        CREDENTIAL_CATEGORIES.clear()
+        CREDENTIAL_CATEGORIES.update(
+            str(x).strip() for x in (labels or []) if str(x or "").strip()
+        )
+    except Exception:
+        pass
+
+
+def is_credential(label) -> bool:
+    """该标签是否按**凭据**处理（原文永不落库）。
+
+    唯一的判定入口。新增调用点必须用它，不要直接写 `label in CREDENTIAL_LABELS`——
+    那份内置集合只是一半条件，漏掉用户标记的那一半就是一次明文落盘。
+    """
+    return label in CREDENTIAL_LABELS or label in CREDENTIAL_CATEGORIES
+
 # ========== 凭据**回流**检测的种类（audit_signals 的 `_CREDENTIAL_PATTERNS`） ==========
 # 与上面的 CREDENTIAL_LABELS 不是一回事：那份是**脱敏侧**的标签（打码时用的业务标签），
 # 这份是**审计侧**凭据回流规则匹配到的 kind 名，两者口径不同、不可合并。

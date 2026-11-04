@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 from contextlib import closing
-from credential_labels import CREDENTIAL_LABELS
+from credential_labels import CREDENTIAL_LABELS, is_credential
 from credential_labels import (CREDENTIAL_ECHO_KINDS, CREDENTIAL_ECHO_REAL_MARKER,
                                CREDENTIAL_ECHO_SAMPLE_MARKER)
 
@@ -608,7 +608,25 @@ def _bounded_meta(raw, max_keys=24):
 
 
 def _project_summary(rec):
-    """最小记录投影：只放行白名单字段，items 只保留类别标签。"""
+    """最小记录投影：只放行白名单字段；items 保留类别 + 打码形态 + 还原结论。
+
+    **items 的口径是 2026-11-04 改的**（用户明确拍板）：旧行为只留 `label`，
+    结果详情弹窗里一排卡片只有类别名、没有任何内容——用户完全看不出「到底脱敏了
+    什么」，而 summary 又是新装的模板默认（`config.example.json`），等于默认体验
+    就是残缺的。实测反馈：“为什么现在不能看详细的还原信息了”。
+
+    保留 / 不保留的判据：**能不能逆推出原文**。
+      · `preview`（`张*` / `1**@***.com` / `<PHONE 11 位>`）是打码产物，含首尾字符，
+        不构成原文，但它正是“脱敏的是什么”的唯一可读线索，必须留；
+      · `restored` / `unresolved` / `from_history` 是布尔结论，与正文无关，
+        却不留就会让前端把「未记录」演成「已还原」（`restored !== false` 恒真）；
+      · `length` 是整数，配合 preview 才能区分「两个字的名字」与「一整个长 ID」。
+    仍然**绝不落**：`original`（原文）、`digest`（凭据摘要——不需要在最小模式下
+    出现，它能做同一性对照，超出了“最小”的范围）。
+
+    这与 `SECURITY.md` 的「最小记录不保存对话正文与 item 原文」一致：一条正文都没有，
+    留下的只有打码形态与布尔结论。
+    """
     out = {}
     for k, v in rec.items():
         if k not in _SUMMARY_KEEP_FIELDS:
@@ -622,15 +640,25 @@ def _project_summary(rec):
         elif isinstance(v, (list, tuple)):
             out[k] = [x[:_TEXT_FIELD_MAX] if isinstance(x, str) else x
                       for x in list(v)[:32]]
-    # 类别数量：只留 label，**不留 preview/digest/original**。
-    # preview（如 `1**@***.com`）看着像脱敏，但它仍是可识别的部分信息，
-    # 与「最小模式只留类别数量」的口径不符。
+    # items 逐字段白名单（不是整条透传）：白名单外的新字段默认不落盘，
+    # 方向与 `_SUMMARY_KEEP_FIELDS` 一致——漏判的代价是不可逆的原文落库，
+    # 而漏留一个诊断字段只是“看不到”。
+    _ITEM_KEEP = ("label", "preview", "length", "restored", "unresolved", "from_history")
     items = rec.get("items")
     if isinstance(items, list):
-        labels = [{"label": str(it.get("label") or "")}
-                  for it in items if isinstance(it, dict)]
-        if labels:
-            out["items"] = labels
+        kept = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            row = {k: it[k] for k in _ITEM_KEEP if it.get(k) is not None}
+            # preview 是字符串，统一截断：某个 label 的 preview 异常长时
+            # 也不该把一条事件撑成几百字节。
+            if isinstance(row.get("preview"), str):
+                row["preview"] = row["preview"][:_TEXT_FIELD_MAX]
+            if row.get("label"):
+                kept.append(row)
+        if kept:
+            out["items"] = kept
     return out
 
 
@@ -768,9 +796,14 @@ def _update_stats(conn, rec, replay=False):
             return
         if typ != "MASK":
             return
-        # 词级明细随写入模式收敛（§D1）：最小模式只保留**类别计数**（词位固定 "?"，
-        # 排行榜的 label 分布照常），trace/detailed 才保留词级明细；明文词只在
-        # detailed + 用户显式开启时落盘。凭据类任何模式都只走 preview。
+        # 词级明细随写入模式收敛（§D1）：最小模式记**打码形态**（`张*` / `1***@***.com`），
+        # detailed 才可能有明文词（还受 `record_plaintext_words` 控制）；凭据类任何
+        # 模式都只走 preview。
+        #
+        # 口径 2026-11-04 修订：原先 summary 把词位固定成 `"?"`，于是「今日脱敏词明细」
+        # 在不落明文的机器上是一排问号——用户连「脱敏的是什么形态」都看不到，
+        # 与 items 被裁到只剩 label 是同一个问题。打码形态不是原文，保留它才能让
+        # 排行榜与明细有信息量；原文仍然只在 detailed + 用户显式开启时落盘。
         mode = effective_log_mode()
         keep_plain = RECORD_PLAINTEXT_WORDS and mode == LOG_MODE_DETAILED
         for it in rec.get("items") or []:
@@ -784,9 +817,9 @@ def _update_stats(conn, rec, replay=False):
             # 与 /api/logs 的 slim 红线不冲突——那条约束的是事件列表推送面，
             # 明文仍只经 /api/logs/detail 回源；这里是用户显式选择的统计维度。
             # 凭据类 items 强制绝不落原文（防 legacy 数据重放/历史残留）：恒只走 preview。
-            is_cred = bool(it.get("cred")) or lbl in CREDENTIAL_LABELS
+            is_cred = bool(it.get("cred")) or is_credential(lbl)
             if mode == LOG_MODE_SUMMARY:
-                word = "?"
+                word = str(it.get("preview") or "?")
             elif keep_plain and not is_cred:
                 word = str(it.get("original") or it.get("preview") or "")
             else:
@@ -1776,9 +1809,11 @@ def fetch_sibling_event(sid, exclude_id=None):
 
 
 # 凭据标签：唯一定义源在 credential_labels.py（panel / transparent / 前端共用）。
+# 判定走 `is_credential()`（内置集合 ∪ 用户显式标记的自定义分类），不直接比集合。
 # 以前这里自己写了一份 5 元素的集合，少了 CONNSTR 与 PRIVATE_KEY —— 结果是
 # 「凭据原文永不落库」在**读路径**上失效：修复前写入的历史 RESTORE payload 里
 # CONNSTR 项带 original（连接串密码原文），fetch_restore_items 会把它当普通 PII 返回。
+# 保留这个名字给按名字取集合的调用点/测试；判定一律走 is_credential()。
 _RESTORE_CREDENTIAL_LABELS = CREDENTIAL_LABELS
 
 # 占位符格式 {{LABEL_后缀}}：命中视为不可展示原文（RESTORE 明细的 original 可能是
@@ -1788,7 +1823,10 @@ _RESTORE_CREDENTIAL_LABELS = CREDENTIAL_LABELS
 # 见 transparent._TOKEN_ALPHABET），历史库里全是 6 位 hex。这里与
 # transparent._SUFFIX_PAT 必须保持一致——event_store 不 import transparent
 # （那会把 mitmproxy 拖进面板进程），所以是刻意的副本，由测试守死两边不漂移。
-_PLACEHOLDER_RE = re.compile(r"^\{\{[A-Z0-9]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}\}$")
+# 与引擎 `transparent._PLACEHOLDER_RX` 同口径（目标文件里手工同步，由
+# `tests/test_placeholder_label_cjk.py` 守漂移）。标签字符类含 CJK：
+# 自定义词库的中文分类名会原样进 token（如 `{{人名_bcdfgh}}`）。
+_PLACEHOLDER_RE = re.compile(r"^\{\{[A-Z0-9\u4e00-\u9fff]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}\}$")
 
 
 def _day_end(now):
@@ -1854,7 +1892,7 @@ def fetch_restore_items(now=None, limit=200):
             if not isinstance(raw, dict) or raw.get("restored") is not True:
                 continue
             label = str(raw.get("label") or "其他")
-            cred = bool(raw.get("cred")) or label in _RESTORE_CREDENTIAL_LABELS
+            cred = bool(raw.get("cred")) or is_credential(label)
             preview = str(raw.get("preview") or "")
             original = None if cred else raw.get("original")
             if original is not None:
@@ -2825,7 +2863,7 @@ def _today_stats_legacy(now=None, day_start=None):
         counter = counters.setdefault(ing, {})
         for it in rec.get("items") or []:
             lbl = str(it.get("label") or "其他")
-            is_cred = bool(it.get("cred")) or lbl in CREDENTIAL_LABELS
+            is_cred = bool(it.get("cred")) or is_credential(lbl)
             word = str(it.get("preview") or "") if is_cred else (it.get("original") or str(it.get("preview") or ""))
             if not word:
                 word = "?"

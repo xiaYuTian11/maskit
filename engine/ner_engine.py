@@ -179,8 +179,12 @@ _CJK_RX = re.compile("[\u4e00-\u9fff]")
 # 两边漂移会让早退判据失效（轻则白白多推理，重则把含明文的叶子当成"已遮完"跳过）。
 #
 # 后缀与 transparent 一致：6 位 hex（旧）或 6 位纯辅音（新）。
+# 标签字符类含 CJK（自定义词库的中文分类名会原样进 token，如 `{{人名_bcdfgh}}`）——
+# 这一份必须跟得上：漏改会让早退判据失效（把已遮的叶子当待扫文本，白跑推理），
+# 更坑的是 `_ner_entity_spans` 也靠它切分区，不认中文标签就可能把标签文字
+# 当成人名再遮一次。
 _PLACEHOLDER_ANY_RX = re.compile(
-    r"\{\{[A-Z0-9]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}")
+    r"\{\{[A-Z0-9\u4e00-\u9fff]{1,12}_(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})\}")
 
 
 def _is_fully_placeholderized(text: str) -> bool:

@@ -15,7 +15,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.14.1'
+__version__ = '0.15.0'
 import json
 import codecs
 import copy
@@ -63,7 +63,7 @@ from shield_defaults import (
     extract_usage,
     SSEUsageAccumulator,
 )
-from credential_labels import CREDENTIAL_LABELS
+from credential_labels import CREDENTIAL_LABELS, is_credential, set_credential_categories
 import inspection
 import skill_bundle
 
@@ -1280,11 +1280,13 @@ def _read_chunked_body(rfile, limit=64 * 1024 * 1024, keep=None):
 _PT_RESTORE_TTL = 60.0        # 映射缓存刷新周期：透传期间引擎仍在写 MASK 事件
 _PT_RESTORE_MAX_EVENTS = 5000  # 与引擎侧 _WARMUP_MAX_EVENTS 对齐
 _PT_RESTORE = {"map": {}, "loaded_at": 0.0, "lock": threading.Lock()}
-# 只认严格形态：兜底路径不做标签改写容错（IP_PUBLIC/全小写等变体留给脱敏管线）
-_PT_TOKEN_RX = re.compile(r"\{\{[A-Z0-9]{1,12}_[a-z0-9]{6}\}\}")
+# 只认严格形态：兜底路径不做标签改写容错（IP_PUBLIC/全小写等变体留给脱敏管线）。
+# 标签字符类含 CJK：自定义词库的中文分类名会直接进 token（`{{人名_bcdfgh}}`），
+# 不认就会在透传阶段漏还原——而透传阶段恰好是引擎停机时的唯一兜底。
+_PT_TOKEN_RX = re.compile(r"\{\{[A-Z0-9\u4e00-\u9fff]{1,12}_[a-z0-9]{6}\}\}")
 # 尾部疑似被 TCP 边界切开的半截占位符（"{{IPPR" / "{{IPPUBLIC_qz"）：
 # 先扣住等下一块，流末（final=True）再处理
-_PT_PARTIAL_RX = re.compile(r"\{\{[A-Za-z0-9_]{1,18}$")
+_PT_PARTIAL_RX = re.compile(r"\{\{[A-Za-z0-9_\u4e00-\u9fff]{1,18}$")
 # 缓冲硬顶：上游持续推送无帧边界的巨型数据时防无界累积，超限强制按 final 清空
 _PT_BUF_MAX = 4 << 20
 
@@ -1349,7 +1351,7 @@ def _pt_restore_map():
                             label = it.get("label") or ""
                             if not tok or not orig or not _PT_TOKEN_RX.fullmatch(tok):
                                 continue
-                            if label in CREDENTIAL_LABELS or _PT_TOKEN_RX.fullmatch(orig):
+                            if is_credential(label) or _PT_TOKEN_RX.fullmatch(orig):
                                 continue
                             m.setdefault(tok, orig)
                     except Exception:
@@ -3827,6 +3829,11 @@ def default_config():
         # 新结构：sensitive 仍用 {label: [words]} 兼容；组禁用/词禁用独立字段
         "sensitive_disabled": [],
         "sensitive_word_disabled": {},
+        # 被用户显式标记为「凭据类」的自定义分类名（如「密钥」「密码表」）。
+        # 为什么必须有：凭据判定此前只看内置 CREDENTIAL_LABELS，用户把 API key
+        # 放进中文分类时 label 不在那个集合里 → items[].original **明文落库**，
+        # 直接违反「凭据原文永不落库」。细节见 engine/credential_labels.py。
+        "credential_categories": [],
         # 整词匹配清单：命中这些词的打码要求两侧是词边界（避免「王」打中「王国」）。
         # 走 /api/config/patch 的 list_add/list_remove 维护（前端 Settings 在用）。
         "sensitive_word_whole": [],
@@ -4308,6 +4315,7 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
     sensitive = {}
     sensitive_disabled = set()
     sensitive_word_disabled = {}
+    credential_categories = set()
     sens = raw.get("sensitive")
     total_words = 0
     if isinstance(sens, dict):
@@ -4320,6 +4328,11 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
             if isinstance(words, dict):
                 if not bool(words.get("enabled", True)):
                     sensitive_disabled.add(label)
+                # 分类级「凭据」标记（dict 形态）：与顶层 credential_categories 等价，
+                # 两种写法都归到同一个集合——它们是同一语义的两种配置面，
+                # 各算各的必然漂移（一处转了、另一处没转 = 明文落库）。
+                if bool(words.get("credential")):
+                    credential_categories.add(label)
                 word_iter = words.get("words") or []
                 dis = []
                 for w in words.get("disabled_words") or []:
@@ -4371,8 +4384,15 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         lab = str(lab or "").strip()
         if LABEL_RE.fullmatch(lab):
             sensitive_disabled.add(lab)
+    # 顶层 credential_categories：只保留仍存在的分类名（分类被删了，标记也跟着失效，
+    # 否则以后建同名分类会「继承」一个用户早已忘记的凭据标记）。
+    for lab in raw.get("credential_categories") or []:
+        lab = str(lab or "").strip()
+        if LABEL_RE.fullmatch(lab):
+            credential_categories.add(lab)
     # 只保留仍存在的标签
     sensitive_disabled = [l for l in sensitive_disabled if l in sensitive]
+    credential_categories = [l for l in credential_categories if l in sensitive]
 
     raw_swd = raw.get("sensitive_word_disabled")
     if isinstance(raw_swd, dict):
@@ -4657,6 +4677,7 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         "sensitive": sensitive,
         "sensitive_disabled": sensitive_disabled,
         "sensitive_word_disabled": sensitive_word_disabled,
+        "credential_categories": credential_categories,
         "sensitive_word_whole": _uniq([str(w) for w in (raw.get("sensitive_word_whole") or []) if w])[:MAX_ITEMS],
         "builtin_rules": builtin_rules,
         "rule_actions": rule_actions,
@@ -4973,6 +4994,12 @@ def _sync_runtime_config(cfg):
             pass
         try:
             set_record_plaintext_words(cfg.get("record_plaintext_words", True))
+        except Exception:
+            pass
+        # 用户标记为「凭据类」的自定义分类（原文永不落库）。面板自己也会写事件
+        # （扩展桥接 / 试验台 / 自检），所以必须与引擎进程同步同一份判定。
+        try:
+            set_credential_categories(cfg.get("credential_categories"))
         except Exception:
             pass
         # 日志写入模式基值（§D1）：面板自己也会写事件（扩展桥接/试验台/自检），
@@ -8521,7 +8548,7 @@ def api_ext_restore():
                         seen_toks.add(tok)
                         m = tr._PLACEHOLDER_PARTS_RX.match(tok)
                         lbl = s.get("labels", {}).get(orig, "")
-                        is_cred = lbl in CREDENTIAL_LABELS
+                        is_cred = is_credential(lbl)
                         item = {
                             "tok": tok,
                             "label": lbl,
@@ -8550,7 +8577,7 @@ def api_ext_restore():
                         if rec and len(rec) >= 2:
                             orig, lbl = rec[0], rec[1]
                             m = tr._PLACEHOLDER_PARTS_RX.match(tok)
-                            is_cred = lbl in CREDENTIAL_LABELS
+                            is_cred = is_credential(lbl)
                             item = {
                                 "tok": tok,
                                 "label": lbl,
@@ -9606,7 +9633,7 @@ def _scrub_legacy_event(row):
         for item in row.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            if str(item.get("label", "")).upper() not in _CREDENTIAL_LABELS:
+            if not is_credential(str(item.get("label", "")).upper()):
                 continue
             original = item.pop("original", None)
             if original is None:
