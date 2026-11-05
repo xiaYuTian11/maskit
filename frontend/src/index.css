@@ -77,11 +77,11 @@
     --primary-foreground: 0 0% 100%;
     --primary-ink: 211 100% 62%;
     /* 列表 hover / 选中态必须比卡片本身更亮一点，否则控件「消失」在卡面里 */
-    --secondary: 240 4% 21%;
+    --secondary: 240 4% 23%;
     --secondary-foreground: 240 6% 96%;
     --muted: 240 4% 19%;
-    --muted-foreground: 240 3% 62%;
-    --accent: 240 4% 21%;
+    --muted-foreground: 240 3% 64%;
+    --accent: 240 4% 26%;
     --accent-foreground: 240 6% 96%;
     --destructive: 4 100% 62%;
     --destructive-foreground: 0 0% 100%;
@@ -301,12 +301,27 @@ details[open] > summary .chev {
 .bg-card {
   background-image: linear-gradient(
     180deg,
-    color-mix(in srgb, #fff 3.5%, transparent) 0%,
+    color-mix(in srgb, #fff 4.5%, transparent) 0%,
     transparent 55%
   );
 }
 [data-theme='light'] .bg-card {
   background-image: none;
+}
+
+/* 浮层质感强化：为所有 Popover/Select/Tooltip 增加深邃层次感与边缘高光 */
+[data-theme='dark'] .bg-popover {
+  box-shadow:
+    0 12px 36px -4px rgb(0 0 0 / 0.65),
+    0 4px 12px -2px rgb(0 0 0 / 0.4),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.12),
+    0 0 0 1px rgb(255 255 255 / 0.08);
+}
+[data-theme='light'] .bg-popover {
+  box-shadow:
+    0 10px 25px -5px rgb(0 0 0 / 0.1),
+    0 4px 10px -2px rgb(0 0 0 / 0.05),
+    0 0 0 1px rgb(0 0 0 / 0.08);
 }
 
 /* ===== macOS Vibrancy =====

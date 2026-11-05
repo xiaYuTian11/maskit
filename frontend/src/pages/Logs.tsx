@@ -996,21 +996,21 @@ export default function LogsPage() {
           <Button
             size="sm"
             variant="outline"
-            className="px-2.5"
+            className="px-2.5 transition-colors hover:border-border/80 hover:bg-muted/50"
             onClick={loadOlder}
             loading={olderLoading}
             disabled={!events.length || olderLoading || (historyMode && !hasOlder)}
             title={t('logs.olderTitle')}
           >
-            {!olderLoading && <History className="mr-1 h-3.5 w-3.5" />} {t('logs.older')}
+            {!olderLoading && <History className="mr-1 h-3.5 w-3.5 text-muted-foreground" />} {t('logs.older')}
           </Button>
-          <Button size="sm" variant="outline" className="px-2.5" onClick={doExport} loading={exporting}>
+          <Button size="sm" variant="outline" className="px-2.5 border-primary/30 bg-primary/5 text-primary-ink hover:bg-primary/10 transition-colors" onClick={doExport} loading={exporting}>
             {!exporting && <Download className="mr-1 h-3.5 w-3.5" />} {t('logs.export')}
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="px-2.5 text-destructive-ink hover:text-destructive-ink"
+            className="px-2.5 border-destructive/30 text-destructive-ink hover:border-destructive/60 hover:bg-destructive/10 transition-colors"
             onClick={() => setConfirmClear(true)}
             disabled={clearing}
           >

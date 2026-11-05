@@ -522,21 +522,17 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* 趋势焦点卡：整页唯一的「视觉主体」。
-          在此之前，控制台是 6 张等权数字卡叠一堆开关，视线无处停留；
-          一张横跨的曲线把「现在什么态势」先讲清楚，其余信息自然退成背景。 */}
-      <Card className="border bg-card shadow-card">
-        <CardContent className="p-5">
-          <div className="flex flex-wrap items-start justify-between gap-4">
+      {/* 趋势焦点卡：整页唯一的「视觉主体」。 */}
+      <Card className="border border-border/80 bg-card/60 shadow-[0_8px_30px_rgba(0,0,0,0.4)] backdrop-blur-xl">
+        <CardContent className="p-6">
+          <div className="flex flex-wrap items-start justify-between gap-6">
             <div className="min-w-0">
-              {/* 用「区间累计」而不是「今日」：下面 6 张卡已经是今日口径，
-                  焦点卡再报一次今日请求就是重复信息，占着最贵的位置说同一件事。 */}
-              <div className="text-[12px] font-medium text-muted-foreground">
+              <div className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
                 {trendDays === 7 ? t('dash.stats7d') : t('dash.stats30d')}
               </div>
-              <div className="mt-1.5 flex items-baseline gap-2.5">
+              <div className="mt-2 flex items-baseline gap-3">
                 <div
-                  className="text-[42px] font-semibold leading-none tabular-nums tracking-[-0.03em]"
+                  className="text-5xl font-bold leading-none tabular-nums tracking-tighter text-foreground"
                   title={String(trendTotals.requests)}
                 >
                   {formatCompactNumber(trendTotals.requests, unitSystem).compact}
@@ -544,7 +540,7 @@ export default function Dashboard() {
                 {trendDelta !== null && (
                   <span
                     className={cn(
-                      'text-[13px] font-medium tabular-nums',
+                      'flex items-center text-sm font-medium tabular-nums',
                       trendDelta > 0
                         ? 'text-success-ink'
                         : trendDelta < 0
@@ -556,24 +552,27 @@ export default function Dashboard() {
                   </span>
                 )}
               </div>
-              <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-foreground">
-                <span>
+              <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-primary" />
                   {t('dash.maskedReq')}{' '}
-                  <b className="font-medium tabular-nums text-foreground">
+                  <b className="font-semibold text-foreground">
                     {formatCompactNumber(trendTotals.masks, unitSystem).compact}
                   </b>
                 </span>
-                <span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-success" />
                   {t('dash.restored')}{' '}
-                  <b className="font-medium tabular-nums text-foreground">
+                  <b className="font-semibold text-foreground">
                     {formatCompactNumber(trendTotals.restored, unitSystem).compact}
                   </b>
                 </span>
-                <span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-warning" />
                   {t('dash.alerts')}{' '}
                   <b
                     className={cn(
-                      'font-medium tabular-nums',
+                      'font-semibold',
                       trendTotals.alerts > 0 ? 'text-warning-ink' : 'text-foreground',
                     )}
                   >
@@ -583,7 +582,9 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
-          <Sparkline points={trendPoints} />
+          <div className="mt-6">
+            <Sparkline points={trendPoints} />
+          </div>
         </CardContent>
       </Card>
 

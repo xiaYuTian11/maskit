@@ -24,11 +24,10 @@ import { useI18n } from '@/lib/i18n'
 
 function MetaItem({ k, v, wide }: { k: string; v: React.ReactNode; wide?: boolean }) {
   return (
-    // 不再给每个键值对套一块 bg-muted 圆角：弹窗里一格一底色，十几格就是十几块
-    // 补丁，真实层级（标题 / 字段 / 值）被底色抹平。改为纯文字层级，靠字号与颜色区分。
-    <div className={cn('min-w-0', wide && 'col-span-2')}>
-      <div className="text-2xs text-muted-foreground">{k}</div>
-      <div className="mt-0.5 break-all text-[13px] leading-5">{v}</div>
+    // 使用轻量卡片内胆包裹，建立清晰的数据网格层级，避免裸露文字散落
+    <div className={cn('min-w-0 rounded-lg border border-border/60 bg-muted/30 p-2.5 transition-colors', wide && 'col-span-2')}>
+      <div className="text-2xs font-medium text-muted-foreground">{k}</div>
+      <div className="mt-1 break-all text-[13px] font-medium leading-5">{v}</div>
     </div>
   )
 }
@@ -320,16 +319,17 @@ export function EventDetailDialog({
 
         {event && (
           <div className="space-y-5">
-            <section aria-label={t('p6.journey.title')} className="rounded-lg border p-3 text-xs">
-              <h3 className="mb-2 font-medium">{t('p6.journey.title')}</h3>
-              <ol className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <section aria-label={t('p6.journey.title')} className="rounded-xl border border-border/70 bg-muted/20 p-3.5 text-xs">
+              <h3 className="mb-2.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">{t('p6.journey.title')}</h3>
+              <ol className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
                 {[
                   [t('p6.journey.ingress'), t(event.ingress === 'ext' ? 'p6.verify.ext' : 'p6.verify.proxy')],
                   [t('p6.journey.inspect'), event.decision ? t(DECISION_LABELS[event.decision] ?? event.decision) : t('p6.journey.missing')],
                   [t('p6.journey.forward'), typeof event.upstream_ms === 'number' ? formatDuration(event.upstream_ms) : t('p6.journey.missing')],
                   [t('p6.journey.restore'), typeof event.restored === 'number' ? String(event.restored) : t('p6.journey.missing')],
-                ].map(([label, value], index) => <li key={label}>
-                  <p className="text-muted-foreground">{index + 1}. {label}</p><p className="mt-1 break-words">{value}</p>
+                ].map(([label, value], index) => <li key={label} className="rounded-lg border border-border/40 bg-card/60 p-2.5 shadow-2xs">
+                  <p className="text-2xs font-medium text-muted-foreground">{index + 1}. {label}</p>
+                  <p className="mt-1 break-words font-semibold text-foreground">{value}</p>
                 </li>)}
               </ol>
             </section>
@@ -579,10 +579,10 @@ export function EventDetailDialog({
 
             {/* 顶栏链路全景图：直观告知用户本条请求是 脱敏请求(出站) 还是 还原回复(入站) 或 异常/直连 */}
             {stageInfo && (
-              <div className="rounded-lg border bg-muted/20 p-3">
-                <div className="flex items-center justify-between gap-2">
+              <div className="rounded-xl border border-border/70 bg-muted/20 p-3 shadow-2xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-muted-foreground">{t('detail.pipelineStage')}</span>
+                    <span className="text-2xs font-semibold uppercase tracking-wider text-muted-foreground">{t('detail.pipelineStage')}</span>
                     <Badge
                       className={cn(
                         'text-xs font-mono',
@@ -592,31 +592,31 @@ export function EventDetailDialog({
                       {stageInfo.label}
                     </Badge>
                   </div>
-                  <div className="flex items-center gap-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
                     {(event.count ?? 0) > 0 && (
-                      <span className="text-primary-ink">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-2xs font-medium text-primary-ink">
                         {t('logs.colMasked')} <strong>{event.count}</strong>
                       </span>
                     )}
                     {(event.restored ?? 0) > 0 && (
-                      <span className="text-success-ink">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-2xs font-medium text-success-ink">
                         {t('logs.colRestored')} <strong>{event.restored}</strong>
                       </span>
                     )}
                     {(event.unresolved ?? 0) > 0 && (
-                      <span className="text-warning-ink" title={t('logs.unresolvedHint')}>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-warning/30 bg-warning/10 px-2 py-0.5 text-2xs font-medium text-warning-ink" title={t('logs.unresolvedHint')}>
                         {t('logs.colUnresolved')} <strong>{event.unresolved}</strong>
                       </span>
                     )}
                     {/* 外部占位符：本机从未签发过的后缀。同样要看得见，但中性色、
                         不报警：还原不了它们是必然的，不是引擎的错 */}
                     {(event.foreign ?? 0) > 0 && (
-                      <span className="text-muted-foreground" title={t('logs.foreignHint')}>
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-2xs font-medium text-muted-foreground" title={t('logs.foreignHint')}>
                         {t('logs.colForeign')} <strong>{event.foreign}</strong>
                       </span>
                     )}
                     {(event.degraded ?? 0) > 0 && (
-                      <span className="text-muted-foreground">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                         {t('logs.colDegraded')} <strong>{event.degraded}</strong>
                       </span>
                     )}

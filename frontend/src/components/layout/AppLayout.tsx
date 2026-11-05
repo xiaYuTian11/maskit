@@ -529,6 +529,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             >
               <GithubIcon className="h-4 w-4" />
             </Button>
+            {/* // @guard G201 顶栏代理控制按钮状态突出，运行态健康微绿与悬浮危险红 */}
             <Button
               size="sm"
               variant={isRunning ? 'outline' : 'default'}
@@ -536,14 +537,19 @@ export function AppLayout({ children }: { children: ReactNode }) {
               disabled={!engineAvailable || isStarting || isStopping}
               loading={proxyBusy || isStarting || isStopping}
               className={cn(
-                'h-8 gap-1.5 rounded-full px-4 text-[13px] font-medium',
-                // 停止是破坏性操作，但「运行中」不是异常态：常驻红描边让顶栏长期
-                // 像有个没处理的告警（实测整屏最重的颜色就是这枚按钮）。
-                // 改成中性描边，只在指针停上去时转红 —— 危险提示在按下之前给，不在常态里常驻。
-                isRunning && 'hover:border-destructive/40 hover:text-destructive-ink hover:bg-destructive/10',
+                'h-8 gap-1.5 rounded-full px-4 text-[13px] font-medium transition-all duration-200',
+                isRunning
+                  ? 'border-success/40 bg-success/10 text-success-ink shadow-sm hover:border-destructive/50 hover:bg-destructive/15 hover:text-destructive-ink hover:shadow-[0_0_12px_rgba(239,68,68,0.2)]'
+                  : 'bg-primary text-primary-foreground shadow-[0_0_14px_rgba(10,132,255,0.35)] hover:bg-primary/90 hover:shadow-[0_0_18px_rgba(10,132,255,0.5)]',
               )}
             >
-              {!(proxyBusy || isStarting || isStopping) && (isRunning ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />)}
+              {!(proxyBusy || isStarting || isStopping) && (
+                isRunning ? (
+                  <Square className="h-3 w-3 fill-current opacity-90" />
+                ) : (
+                  <Play className="h-3.5 w-3.5 fill-current" />
+                )
+              )}
               {isStarting
                 ? t('layout.startingProxy')
                 : isStopping
