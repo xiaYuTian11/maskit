@@ -398,5 +398,64 @@ class CacheSelfCheckTests(_LeafCacheIsolation):
         self.assertEqual(tr._LEAF_CACHE_STATS["hit"], hits + 1)
 
 
+class UnchangedLeafCacheTests(_LeafCacheIsolation):
+    """零命中的叶子只存哨兵，不在缓存里留原文副本（2026-11-05）。
+
+    `masked == 入参` 时旧实现把整段文本存进缓存 —— 它和「缓存里不得出现原文」
+    的说法直接矛盾（虽然只是内存、不出网，但上限是 32M 字符的长期驻留）。
+    """
+
+    TEXT = "普通的开发对话，没有任何需要脱敏的内容。"
+
+    def test_zero_hit_entry_holds_no_text(self):
+        tr.mask(self.TEXT, "unchanged-1")
+        ent = tr._LEAF_CACHE.get(tr._leaf_cache_key(self.TEXT))
+        self.assertIsNotNone(ent, "零命中叶子没入缓存（长会话的普通文本会每轮重算）")
+        self.assertIs(ent[2], tr._LEAF_UNCHANGED, "缓存里存了原文副本")
+
+    def test_hit_returns_the_input_unchanged(self):
+        a = tr.mask(self.TEXT, "unchanged-2")
+        self.assertEqual(a, self.TEXT)
+        hits = tr._LEAF_CACHE_STATS["hit"]
+        b = tr.mask(self.TEXT, "unchanged-3")
+        self.assertEqual(b, a, "哨兵命中后返回的内容与入参不一致")
+        self.assertGreater(tr._LEAF_CACHE_STATS["hit"], hits,
+                           "用例前提：第二次必须真的命中缓存")
+
+    def test_sampling_selfcheck_accepts_the_sentinel(self):
+        """抽样自检必须拿「入参」比对，否则哨兵会被当成不一致，缓存被误关。"""
+        tr.mask(self.TEXT, "unchanged-4")
+        tr._LEAF_CACHE_TICK[0] = tr._LEAF_CACHE_VERIFY_EVERY - 1   # 下一次就抽中
+        poison = tr._LEAF_CACHE_STATS["poison"]
+        self.assertEqual(tr.mask(self.TEXT, "unchanged-5"), self.TEXT)
+        self.assertEqual(tr._LEAF_CACHE_STATS["poison"], poison,
+                         "哨兵被自检误判成不一致，缓存被整体关掉了")
+        self.assertTrue(tr._LEAF_CACHE_OK[0], "缓存被自检关掉，后续优化全部失效")
+
+
+class NerAvailabilityInvalidationTests(_LeafCacheIsolation):
+    """模型从「不可用」变「可用」后，旧结果必须作废（2026-11-05）。
+
+    否则同一段文本一半遮、一半不遮：按「没跑 NER」存下的历史叶子永远沿用旧结论，
+    而新叶子却遮了。
+    """
+
+    TEXT = "这句话里只有普通叙述，没有需要遮的内容。"
+
+    def test_availability_flip_invalidates_cached_result(self):
+        with mock.patch.object(tr, "_ner_available_cached", return_value=False):
+            tr._leaf_cache_clear()
+            tr.mask(self.TEXT, "na-1")
+            self.assertIn(tr._leaf_cache_key(self.TEXT), tr._LEAF_CACHE,
+                          "用例前提：这条叶子应当已入缓存")
+            hits = tr._LEAF_CACHE_STATS["hit"]
+        with mock.patch.object(tr, "_ner_available_cached", return_value=True):
+            tr.mask(self.TEXT, "na-2")
+            self.assertEqual(
+                tr._LEAF_CACHE_STATS["hit"], hits,
+                "NER 可用性变了仍命中旧结果（同一段文本会一半遮一半不遮）",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

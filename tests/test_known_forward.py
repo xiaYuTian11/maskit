@@ -41,6 +41,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -372,6 +373,86 @@ class AccountingTests(_IsolatedCase):
         self.assertGreater(n, 0, "known_hits 取不到（没进事件就是不可见）")
         self.assertEqual(tr._take_known_hits("k1"), 0,
                          "known_hits 取走后未清零，会串到下一个请求")
+
+
+class SentRecheckTests(_IsolatedCase):
+    """冻结记录必须补上「其后才学会的」已知值（2026-11-05）。
+
+    背景：`sent` 按 (覆盖项, 文本) 冻结，而 known 集合会随对话扩张。一段在
+    「该值还不认识」时发出过的文本，其冻结记录里没有它的区间 —— 于是明文会
+    一轮一轮地重发（清掉 sent 后同一段文本立刻变占位符，可复现）。
+
+    修法：只对 `_KNOWN_NEW`（最近新增的已知值）做**定向**复核，命中才重算。
+    不做全局失效（实测 2000 条 known × 500 叶子重扫 1.6s）。
+    """
+
+    LATER = "Night" + "jar" + "Retro" + "Mask"
+
+    def _leaf(self):
+        return "the staging code for it is " + self.LATER
+
+    def _learn(self):
+        tok = "{" * 2 + "TERM_" + "rtmk01" + "}" * 2
+        self.assertTrue(
+            tr._known_add(self.LATER, tok, "TERM"),
+            "用例前提：该值必须能进 known（≥ 8 字符、非凭据、非内置规则）",
+        )
+
+    def test_frozen_text_gets_the_value_it_learned_later(self):
+        leaf = self._leaf()
+        first = self.mask(leaf, "retro-1")
+        self.assertEqual(first, leaf, "用例前提：轮1 还不认识这个值")
+        self._learn()
+        again = self.mask(leaf, "retro-2")
+        self.assertNotIn(self.LATER, again, "已确认敏感的值在旧文本里明文重发")
+        third = self.mask(leaf, "retro-3")
+        self.assertEqual(third, again, "重算后应当重新冻结：同一段文本字节漂移了")
+
+    def test_leaves_without_the_new_value_are_not_rescanned(self):
+        """定向复核的「定向」：不含新值的叶子不许重算（否则退化成全局失效）。"""
+        hot = self._leaf()
+        cold = "an unrelated sentence that carries nothing sensitive"
+        self.mask(hot, "recheck-1")
+        self.mask(cold, "recheck-2")
+        self._learn()
+        with mock.patch.object(tr, "_known_lookup_spans",
+                               wraps=tr._known_lookup_spans) as spy:
+            self.mask(cold, "recheck-3")
+            self.assertEqual(spy.call_count, 0,
+                             "不含新值的叶子被重算了（全局失效的形态）")
+            self.mask(hot, "recheck-4")
+            self.assertEqual(spy.call_count, 1, "含新值的叶子没有重算")
+
+    def test_pending_list_is_bounded(self):
+        for i in range(tr._KNOWN_NEW_MAX * 3):
+            tr._known_add("pending" + "value" + "%03d" % i, "{" * 2 + "TERM_"
+                          + "%06d" % i + "}" * 2, "TERM")
+        self.assertLessEqual(
+            len(tr._KNOWN_NEW), tr._KNOWN_NEW_MAX,
+            "_KNOWN_NEW 无界（每个请求的复核成本会随进程运行时间增长）",
+        )
+
+
+class KnownLeafCacheKeyTests(_IsolatedCase):
+    """有 known 命中的叶子必须能命中结果缓存（2026-11-05）。
+
+    旧实现写缓存时用**预替换前**的文本做键，而查询用的是**预替换后**的文本
+    —— 键天然不等，这类叶子每轮都 miss（写得进、查不到）。修正后同一段文本
+    第二个请求就命中，且打码结果与占位符不变。
+    """
+
+    def test_premasked_leaf_hits_the_cache(self):
+        self.register(VALUE)                      # VALUE 进 known（自定义词）
+        text = "the staging pass is " + VALUE + " for now"
+        first = self.mask(text, "kc-1")
+        self.assertNotIn(VALUE, first, "用例前提：这段文本必须被 known 预替换")
+        hits = tr._LEAF_CACHE_STATS["hit"]
+        second = self.mask(text, "kc-2")          # 新请求
+        self.assertEqual(second, first, "命中结果与冷跑逐字节不一致")
+        self.assertGreater(
+            tr._LEAF_CACHE_STATS["hit"], hits,
+            "带 known 命中的叶子没命中缓存（键口径不一致：写入用预替换前、查询用预替换后）",
+        )
 
 
 if __name__ == "__main__":

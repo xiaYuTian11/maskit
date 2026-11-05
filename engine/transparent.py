@@ -2557,9 +2557,19 @@ _KNOWN_MAX = 2000
 _KNOWN_BY_HEAD = {}
 # 4-gram 位图（1<<14 位 = 2KB）：粗过滤，命中才做完整比对
 _KNOWN_BITS = bytearray(1 << 11)
-# 代数：任何增删都 +1，让 sent 记录能判定「我记住的那份还有效吗」
+# 代数：任何增删都 +1。**它不进 `_sent_key`**（sent 的有效性判据是覆盖项指纹，
+# 见 `_sent_key` 的注释）；这里只用于观测与测试，别照着「sent 靠它判定」去推论。
 _KNOWN_GEN = 0
 _KNOWN_LOCK = threading.Lock()
+
+# 最近新增的已知值（orig -> ts），给 `_sent_recheck` 做**定向**复核用。
+#
+# 为什么不把 `_KNOWN_GEN` 并进 `_sent_key`（= 一学到新值就让全部冻结记录失效）：
+# 实测 2000 条 known × 500 叶子要重扫 **1.6s**，而那正是 0.16 刚修掉的体感问题。
+# 这里只保留最近 `_KNOWN_NEW_MAX` 个，成本上限 ≈ N × 叶子数（32 × 500 叶子实测 2ms），
+# 且只重扫「真含这个新值」的叶子。
+_KNOWN_NEW = {}
+_KNOWN_NEW_MAX = 32
 
 # ===================== 已发送字节固化（sent）=====================
 #
@@ -2567,8 +2577,15 @@ _KNOWN_LOCK = threading.Lock()
 # 会让**历史叶子**也被重新打码 → 前缀字节变化 → 上游 prompt cache 全量重写
 # （magpie 真实事故：cache_read 0，cache_write 412K→426K）。
 #
-# 做法：一段文本首次被打码时，把它**当时**命中的 known 区间记下来（按文本哈希）；
+# 做法：一段文本首次发出时，把它**当时**命中的 known 区间记下来（按文本哈希）；
 # 之后同一段文本直接用记下的区间，不再按当前 known 重算。新文本才用新 known。
+#
+# 代价与兜底（2026-11-05）：冻结记录也会把「当时没认出来」这个结论一起冻住，
+# 于是某个值在别处被确认敏感后，旧文本仍可能在明文重发。为此加了 `_sent_recheck`：
+# 只对「最近新增的已知值」做定向复核（不用 `_KNOWN_GEN` 做全局失效 ——
+# 实测那会让 2000 条 known × 500 叶子重扫 1.6s）。边界仍不消：学到它的那一次
+# 请求里，发现点**之前**已处理完的叶子仍是旧形态，下一轮才补。详见 SECURITY.md
+# 「已发送字节固化与结果缓存」一节 —— 改了这里必须同步改那里。
 #
 # 记录的是**区间**（start, end, token），不是原文 —— 原文仍在 `_RECENT_REV`，
 # 这里不新增一份原文持有。
@@ -2579,6 +2596,9 @@ _SENT_MAX = 1 << 13          # 8192 条（长会话每轮重发同一批历史�
 _SENT_CUR = {}
 _SENT_OLD = {}
 _SENT_LOCK = threading.Lock()
+# 定向复核触发重算的次数（外发到 `engine-runtime.json` 的 leaf_cache 段）。
+# 它常年 0 或个位数是正常的：只有「学到新值 + 该值真在旧文本里」才会非零。
+_SENT_STATS = {"recheck": 0}
 
 
 def _known_reset_for_tests():
@@ -2593,6 +2613,7 @@ def _known_reset_for_tests():
         for i in range(len(_KNOWN_BITS)):
             _KNOWN_BITS[i] = 0
         _KNOWN_GEN += 1
+    _known_transient_reset()
     with _SENT_LOCK:
         _SENT_CUR.clear()
         _SENT_OLD.clear()
@@ -2647,6 +2668,12 @@ def _known_add(orig: str, token: str, label: str) -> bool:
             idx = (g >> 3) & ((1 << 14) - 1)
             _KNOWN_BITS[idx >> 3] |= 1 << (idx & 7)
             _KNOWN_GEN += 1
+            # 定向复核的候选：此后若某段**已冻结**的文本里含这个值却没遮它，
+            # 就丢掉冻结重算一次（见 `_sent_recheck`）。有界：只留最近 N 个。
+            _KNOWN_NEW.pop(orig, None)
+            _KNOWN_NEW[orig] = time.time()
+            while len(_KNOWN_NEW) > _KNOWN_NEW_MAX:
+                _KNOWN_NEW.pop(next(iter(_KNOWN_NEW)))
         return True
     except Exception:
         return False
@@ -2966,6 +2993,43 @@ def _sent_store(key, spans):
             _SENT_OLD.update(_SENT_CUR)
             _SENT_CUR.clear()
         _SENT_CUR[key] = spans
+
+
+def _sent_recheck(text, spans):
+    """冻结记录里有没有漏掉「其后才学会的」已知值？返回 spans 或 None（要重算）。
+
+    为什么需要（2026-11-05 实测）：`sent` 只按 (覆盖项, 文本) 冻结，而 known 集合
+    会随对话扩张。一段在「该值还不认识」时发出过的文本，其冻结记录里没有它的区间
+    ——于是明文会一轮一轮地重发下去（清掉 sent 后同一段文本立刻变占位符，可复现）。
+
+    为什么不直接把 `_KNOWN_GEN` 并进 `_sent_key`：那是**全局**失效，实测 2000 条
+    known × 500 叶子要重扫 1.6s；定向复核只碰「真含这个新值」的叶子（32 × 500
+    叶子实测 2ms）。重扫结果会由调用方重新 `_sent_store`，所以每个叶子对同一个
+    新值最多重算一次。
+
+    判据用**区间**而不是 `v in covered`：新值可能是某个已遮长值的子串，用子串判
+    会永远判不中，于是每个请求都重算这一条（性能坑，不是正确性坑）。
+    """
+    try:
+        with _KNOWN_LOCK:
+            pending = list(_KNOWN_NEW)
+        if not pending:
+            return spans
+        covering = [(s, e) for s, e, _t, _l in spans]
+        for v in pending:
+            if not v:
+                continue
+            pos = text.find(v)
+            while pos >= 0:
+                if not any(s <= pos and pos + len(v) <= e for s, e in covering):
+                    _SENT_STATS["recheck"] += 1
+                    return None
+                pos = text.find(v, pos + 1)
+        return spans
+    except Exception:
+        # 复核出错就沿用冻结结果：那是「改动前的形态」，宁可少补一次，
+        # 也不能让这张表把脱敏主链打挂。
+        return spans
 
 
 # ===================== 出口前复检（egress verify）=====================
@@ -5979,6 +6043,82 @@ def _ner_entity_spans(text, entities):
 _SHORT_NAME_MAX_CHARS = 3
 
 
+# ===================== 已确认短名（跨请求）=====================
+#
+# 为什么需要：`_name_without_support` 的误报降噪只该拦「**第一次**见到的陌生短词」。
+# 一个在本机以**强上下文**遮过的短名（角色词/称谓 + 姓名形态），其后在任何一轮
+# 出现都该照遮。原实现只看「本会话表 fwd」，而 sid 是 uuid4、每请求一个，
+# 于是「历史里早的裸名 + 晚的有语境名」这个天然顺序下，裸名每轮都以明文重发
+# （2026-11-05 复现：把 sent/叶子缓存都清掉冷跑也一样，说明根因是判据作用域）。
+#
+# 与 `_RECENT_FWD` 的区别：那里是「原文 → 它上次拿到的占位符」，**任何**被遮过的值
+# 都会进（含一次误报）；这里只收「短汉名 + 强上下文」一种确认，因为它是唯一需要
+# 越过误报降噪的类别。误报一旦被确认会粘 TTL（默认 24h），用户仍可用值级白名单
+# 精确放行那一个值（`_allow_value_hit` 在所有命中路径上都生效）。
+_CONFIRMED = {}          # orig -> ts（被强上下文确认的时刻）
+_CONFIRMED_MAX = 2000    # 与 `_KNOWN_MAX` 同量级；每条只有几十字节
+
+
+def _known_transient_reset():
+    """清空「只对当前覆盖项成立」的两张表（配置换代的统一出口）。
+
+    `_KNOWN_NEW` 与 `_CONFIRMED` 都建立在「这套规则/词表下这个值确实敏感」之上：
+    用户改了开关、换了词表，它们的结论就该作废重算（与 `_leaf_cache_bump()`
+    同一时机）。只在 `_known_reset_for_tests` 里清会漏掉生产路径。
+    """
+    try:
+        with _KNOWN_LOCK:
+            _KNOWN_NEW.clear()
+        with _STATE_LOCK:
+            _CONFIRMED.clear()
+    except Exception:
+        pass
+
+
+def _is_short_han_name(frag):
+    """短汉名（姓名误报降噪的唯一适用对象）。判不出来按 False。"""
+    try:
+        if not frag or not (2 <= len(frag) <= _SHORT_NAME_MAX_CHARS):
+            return False
+        import zh_names
+        return all(zh_names.is_han(ch) for ch in frag)
+    except Exception:
+        return False
+
+
+def _confirm_short_name(orig):
+    """登记「已确认的短名」（只在该值已通过启发式时调；幂等、有界）。"""
+    try:
+        if not orig:
+            return
+        with _STATE_LOCK:
+            _CONFIRMED.pop(orig, None)
+            _CONFIRMED[orig] = time.time()
+            while len(_CONFIRMED) > _CONFIRMED_MAX:
+                _CONFIRMED.pop(next(iter(_CONFIRMED)))
+    except Exception:
+        pass
+
+
+def _short_name_confirmed(orig, now=None):
+    """该短名此前是否已被强上下文确认过（跨请求，受复用表 TTL 约束）。"""
+    try:
+        if not orig or not _CONFIRMED:
+            return False
+        now = now or time.time()
+        with _STATE_LOCK:
+            ts = _CONFIRMED.get(orig)
+        if ts is None:
+            return False
+        if now - ts <= _recent_ttl():
+            return True
+        with _STATE_LOCK:
+            _CONFIRMED.pop(orig, None)
+        return False
+    except Exception:
+        return False
+
+
 def _name_without_support(text, start, end, frag, label):
     """NAME 的保留判据：形态像人名 **且** 上下文成立。True = 判为误报，不遮。
 
@@ -6115,13 +6255,15 @@ def mask(text, sid):
 #
 # 缓存的是**整个叶子的脱敏结果**，命中判据是双重的：
 #   1. 代号一致（配置热重载 / 词表换代 / NER 开关变化时整体作废）；
-#   2. 缓存时登记的每一个**占位符**在当前会话 `rev` 里还能查到原文、且
-#      `fwd[原文]` 仍然是同一个占位符。
+#   2. 缓存时登记的每一个**占位符**在**跨请求复用表**里还能查到原文（未过 TTL）、
+#      `fwd[原文]` 仍是同一个占位符、且原文摘要与存缓存时一致。
+#      （0.16 前这里比的是本会话表，而 sid 每请求一个、fwd 恒空 —— 缓存从未命中过。）
 # 第 2 条把「LRU 淘汰 / 面板清空映射 / 跨会话复用」全部挡在门外：映射一漂就当
 # 未命中重跑。命中时逐条重放 `_hit()`，last_hits / new_orig 口径与重跑一致。
 #
 # ⚠️ 缓存里**不得出现原文**（§G1，与 ner_engine 的结果缓存同一口径）：键是进程密钥的
-# 摘要，值是「脱敏后的文本 + 占位符清单」，原文一律经 `rev` 从会话表现取。
+# 摘要，值是「脱敏后的文本 + 占位符清单」，原文一律经复用表从会话表现取；
+# 零命中的叶子只存 `_LEAF_UNCHANGED` 哨兵（脱敏结果就是入参，没必要存副本）。
 _LEAF_CACHE_MAX = max(256, _env_int("MASKIT_LEAF_CACHE_MAX", 8192))
 _LEAF_CACHE_MAX_CHARS = max(1_000_000, _env_int("MASKIT_LEAF_CACHE_CHARS", 32_000_000))
 _LEAF_CACHE_MAX_LEAF = max(4096, _env_int("MASKIT_LEAF_CACHE_MAX_LEAF", 262144))
@@ -6130,6 +6272,10 @@ _LEAF_CACHE_MAX_LEAF = max(4096, _env_int("MASKIT_LEAF_CACHE_MAX_LEAF", 262144))
 # 抽样是唯一的网，命中即整体关闭缓存（宁可不要这个优化，不能给错文本）。
 _LEAF_CACHE_VERIFY_EVERY = max(16, _env_int("MASKIT_LEAF_CACHE_VERIFY", 256))
 _LEAF_CACHE_KEY = os.urandom(32)
+# 「本叶子一个字节都没改」的哨兵。零命中时 `masked` 与入参逐字节相同，直接存文本
+# 等于在缓存里留一份原文副本（与下面的 §G1 相反）。存哨兵、命中时原样返回入参即可：
+# 既守住了「缓存里不出现被脱敏的值 / 不出现原文副本」，也省掉这份内存。
+_LEAF_UNCHANGED = object()
 _LEAF_CACHE = collections.OrderedDict()   # 摘要 -> (代号, 原长, 脱敏文本, [(占位符, 标签, 原文摘要)])
 _LEAF_CACHE_CHARS = 0
 _LEAF_CACHE_LOCK = threading.Lock()
@@ -6175,24 +6321,53 @@ def _orig_digest(orig):
 def _leaf_cache_gen():
     """缓存代号：**任何**能改变脱敏输出的进程内配置都要在它里面。
 
-    漏一项 = 那个配置改了之后旧结果继续命中（静默给错文本）。三道保险：
+    漏一项 = 那个配置改了之后旧结果继续命中（静默给错文本）。四道保险：
       · `_LEAF_CACHE_GEN`：配置热重载（`_maybe_reload` 在设置真正变化时
         `_leaf_cache_bump()`，覆盖三态动作 / 值白名单 / 规则开关 / 标签禁用）、
         词表执行计划重建、跨进程清空映射、显式清空；
       · `NER_ENABLED`：语义识别开关（它直接改变输出）；
+      · `_ner_available_cached()`：模型**能否真跑**（文件齐备 + 依赖可导入）。
+        与开关是两件事：模型从不可用变可用后，旧条目必须作废，否则同一段文本
+        会出现「缓存过的一半不遮、新的一半遮」（2026-11-05 复核发现）；
       · `BUILTIN_RULES`：**内容**进代号，不只比对象身份。规则表在生产路径上
         是整体换对象发布的（`_maybe_reload`），但直接改 key 也能改变输出，
         而 `id()` 看不见原地修改 —— 2026-11 实测（`test_idcard_single_switch`）：
         关掉 IDCARD 后旧结果仍被命中，因为缓存从不命中时这个洞被掩盖了。
         代价是每个叶子多一次 30 项排序（实测远低于一次正则扫描）。
     """
-    return (_LEAF_CACHE_GEN[0], bool(NER_ENABLED),
+    return (_LEAF_CACHE_GEN[0], bool(NER_ENABLED), _ner_available_cached(),
             tuple(sorted(BUILTIN_RULES.items())))
 
 
 def _leaf_cache_bump():
     """配置/词表换代：代号一变，旧条目在下次查找时整体作废。"""
     _LEAF_CACHE_GEN[0] += 1
+
+
+# NER 可用性的缓存（`_leaf_cache_gen()` 每个叶子都要读，不能每次去 stat 三个
+# 模型文件 + 试导入依赖）。2 秒窗口足够：可用性只在模型下载完/依赖装完后变化。
+_NER_AVAIL = {"t": -1e9, "v": False}
+_NER_AVAIL_TTL = 2.0
+
+
+def _ner_available_cached():
+    """NER 现在**真能跑**吗（缓存 2s；判据仍以 `ner_engine.is_ner_available` 为准）。
+
+    为什么要进 `_leaf_cache_gen()`：模型从「不可用」变「可用」后，之前按
+    「没跑 NER」存下的叶子结果必须作废 —— 否则同一段文本一半遮、一半不遮：
+    缓存过的历史永远不遮，新文本却遮（2026-11-05 复核发现）。
+    """
+    now = time.monotonic()
+    if now - _NER_AVAIL["t"] < _NER_AVAIL_TTL:
+        return _NER_AVAIL["v"]
+    try:
+        import ner_engine
+        val = bool(ner_engine.is_ner_available())
+    except Exception:
+        val = False
+    _NER_AVAIL["t"] = now
+    _NER_AVAIL["v"] = val
+    return val
 
 
 def _leaf_cache_stats():
@@ -6210,6 +6385,8 @@ def _leaf_cache_stats():
         stats = dict(_LEAF_CACHE_STATS)
         size = len(_LEAF_CACHE)
         chars = _LEAF_CACHE_CHARS
+    with _KNOWN_LOCK:
+        sent_pending = len(_KNOWN_NEW)
     enabled = bool(_LEAF_CACHE_OK[0])
     hit = int(stats.get("hit", 0))
     miss = int(stats.get("miss", 0))
@@ -6225,6 +6402,11 @@ def _leaf_cache_stats():
         "chars_max": _LEAF_CACHE_MAX_CHARS,
         "verify": int(stats.get("verify", 0)),
         "poison": int(stats.get("poison", 0)),
+        # sent 定向复核（2026-11-05）：pending = 还没被历史复用过的新值个数，
+        # recheck = 因它触发重算的叶子次数。两者只在「新学到值」之后短暂非零；
+        # recheck 长期为 0 说明扫描面没扩张，突然飙升则说明有值在反复被重新认识。
+        "sent_pending": sent_pending,
+        "sent_recheck": int(_SENT_STATS.get("recheck", 0)),
     }
 
 
@@ -6236,7 +6418,8 @@ def _leaf_cache_clear():
 
 
 def _leaf_cache_lookup(text, sid):
-    """查缓存；命中返回 `(脱敏文本, [(占位符, 标签)])`，未命中返回 None。
+    """查缓存；命中返回 `(脱敏文本 或 `_LEAF_UNCHANGED` 哨兵, [(占位符, 标签)])`，
+    未命中返回 None。
 
     校验对象是**跨请求的复用表**（`_tables()`），不是当前会话表 —— 这是本缓存
     能否真正生效的关键。
@@ -6303,7 +6486,7 @@ def _leaf_cache_lookup(text, sid):
     return ent[2], ent[3]
 
 
-def _leaf_cache_verify(expect, masked):
+def _leaf_cache_verify(expect, masked, original=None):
     """抽样自检：`expect` 是本次命中到的旧文本，`masked` 是重算结果。
 
     不一致 = 缓存给错了文本（漏进代号的输入、或命中校验有洞）。命中路径上的错误
@@ -6312,7 +6495,12 @@ def _leaf_cache_verify(expect, masked):
     if expect is None:
         return
     _LEAF_CACHE_STATS["verify"] += 1
-    if expect == masked:
+    # 哨兵 = 「当时一个字节都没改」，重算结果必须等于**入参本身**。
+    # 拿不到入参就不比对（不能拿 None 去比，那会把自己误判成不一致并关掉缓存）。
+    if expect is _LEAF_UNCHANGED and original is None:
+        return
+    ok = (masked == original) if expect is _LEAF_UNCHANGED else (expect == masked)
+    if ok:
         return
     _LEAF_CACHE_OK[0] = False
     _LEAF_CACHE_STATS["poison"] += 1
@@ -6328,6 +6516,12 @@ def _leaf_cache_store(text, masked, tokens, dependent=False, owner_sid=None):
     （典型：短词无语境时按误报降噪），跨会话复用会把不该遮的词遮掉。
     冷跑的条目一律 `dependent=False`（会话 `fwd` 是空的，命中全是本次新增），
     所以「客户端每轮重发整段原文历史」的主场景不受限制。
+
+    同理，**本次发生过姓名启发式跳过**的叶子也按会话相关处理（调用方传 True）：
+    那个「不遮」结论取决于「当时还没确认过该值」，而 `_CONFIRMED` 会随对话变化。
+    不这么标记就会被缓存钉死 —— 实测顺序：轮1 裸名（降噪跳过、入缓存）→
+    轮2 同值以强上下文出现（确认）→ 轮3 裸名重发，旧缓存直接命中，仍然明文。
+    sid 每请求一个，所以这类条目等价于「下次重算」，代价只有这一个叶子。
     """
     global _LEAF_CACHE_CHARS
     if not _LEAF_CACHE_OK[0]:
@@ -6336,11 +6530,14 @@ def _leaf_cache_store(text, masked, tokens, dependent=False, owner_sid=None):
     if size > _LEAF_CACHE_MAX_LEAF:
         return                      # 单条超大叶子不入库（一条就顶掉小半张表）
     key = _leaf_cache_key(text)
+    # 零命中时只存哨兵，不放原文副本（见 `_LEAF_UNCHANGED`）；字符数照旧计入，
+    # 保证大叶子仍按 LRU 先淘汰（内存上界与「存文本」时同口径）。
+    payload = _LEAF_UNCHANGED if masked == text else masked
     with _LEAF_CACHE_LOCK:
         old = _LEAF_CACHE.pop(key, None)
         if old is not None:
             _LEAF_CACHE_CHARS -= old[1]
-        _LEAF_CACHE[key] = (_leaf_cache_gen(), size, masked, tokens,
+        _LEAF_CACHE[key] = (_leaf_cache_gen(), size, payload, tokens,
                             bool(dependent), owner_sid)
         _LEAF_CACHE_CHARS += size
         while _LEAF_CACHE and (_LEAF_CACHE_CHARS > _LEAF_CACHE_MAX_CHARS
@@ -6436,6 +6633,8 @@ def _mask_text(text, sid):
     # 两步的顺序很关键：**先查 sent，命中就用记下的区间；只有新文本才按当前
     # known 重算**。否则 known 集合一扩张，所有历史叶子的字节就会跟着变，
     # 上游 prompt cache 整段失效（magpie 真实事故：cache_read = 0）。
+    # 例外（零散不批量）：命中后还要过 `_sent_recheck` —— 冻结记录如果漏了
+    # 「其后才学会的」已知值，就只对这条叶子重算一次（见该函数注释）。
     #
     # 为什么在这里（规则扫描之前）：known 命中的是**规则匹配不到的裸引用**，
     # 先遮掉之后，后面所有规则都不会再碰这些区间（它们已变成占位符）。
@@ -6443,6 +6642,9 @@ def _mask_text(text, sid):
         _cov = _known_coverage()
         _k = _sent_key(text, _cov)
         _spans = _sent_lookup(_k)
+        if _spans is not None and _KNOWN_NEW:
+            # 定向复核：这段文本当初冻结时还不认识某个值，但那个值后来被确认了。
+            _spans = _sent_recheck(text, _spans)
         if _spans is None:
             _spans = _known_lookup_spans(text)
             _sent_store(_k, list(_spans))
@@ -6471,6 +6673,12 @@ def _mask_text(text, sid):
         _ner_warn_once("known_scan", "known 扫描降级: %s: %s" % (type(_e).__name__, _e))
 
     # ── 叶子结果缓存命中路径（批次 8）───────────────────────────────────────
+    # 缓存键用的文本：**known 预替换之后**的那一份（与下面 `_leaf_cache_lookup`
+    # 用的是同一个变量）。旧实现写入时用 `original`（预替换前），而有 known 命中的
+    # 叶子查询时用的是替换后的文本 —— 键天然不等，这类条目写得进、永远查不到
+    # （实测：同一段带已知值的文本每轮都 miss）。哨兵语义随之定义为
+    # 「输出 == 查询用的这份文本」，与命中时返回入参的约定一致。
+    _lc_src = text
     # 抽样自检：每 _LEAF_CACHE_VERIFY_EVERY 次调用里有一次故意不用缓存，走完整
     # 重算，末尾由 `_leaf_cache_verify()` 比对（不一致即整体关闭缓存）。
     _lc_expect = None
@@ -6495,7 +6703,8 @@ def _mask_text(text, sid):
                             _hit(_rec[0], _lbl)
                 s.setdefault("last_hits", set()).update(hit_orig)
                 s.setdefault("new_orig", set()).update(new_orig)
-                return _probe[0]
+                # 零命中条目只存了哨兵：脱敏结果就是入参本身，原样返回（不复制）。
+                return text if _probe[0] is _LEAF_UNCHANGED else _probe[0]
 
     # Key 前缀命中归 API_KEY；可被 builtin_rules.API_KEY 关闭
     if _rule_enabled("API_KEY"):
@@ -6746,19 +6955,27 @@ def _mask_text(text, sid):
         # （还原后会丢排版）。
         lead = len(raw_frag) - len(raw_frag.lstrip())
         a, b = s0 + lead, s0 + lead + len(frag)
-        # 会话内值一致性（2026-11-04）：该值已在本会话打码过（fwd 里有它）时，
-        # 不再走「短词语境」启发式。真机 2.5 天 846 个请求的未脱敏原文上行全部
-        # 源于同一模式——同值 A 处（有语境）打码、B 处（无语境）被当误报跳过。
-        # 启发式只该拦「第一次见到的陌生短词」；已知敏感值由会话判定兜底。
+        # 会话内值一致性（2026-11-04）；跨请求扩展（2026-11-05，见 `_CONFIRMED`）：
+        # 该值已在本请求（fwd）或本机（confirmed）被遮过时，不再走「短词语境」
+        # 启发式。真机 2.5 天 846 个请求的未脱敏原文上行全部源于同一模式——
+        # 同值 A 处（有语境）打码、B 处（无语境）被当误报跳过。
+        # 启发式只该拦「第一次见到的陌生短词」；已确认敏感值由这两级判定兜底。
         # 区间来自实体提议器的边界，不是盲目子串匹配，不会切碎更长的词；
         # 不新增任何阻断——打码照常、请求照常上行。
-        if frag not in fwd and _name_without_support(text, a, b, frag, lbl):
+        _short = lbl in ("NAME", "PERSON") and _is_short_han_name(frag)
+        if (frag not in fwd
+                and not (_short and _short_name_confirmed(frag))
+                and _name_without_support(text, a, b, frag, lbl)):
             _short_name_skips[0] += 1
             return None
         # 记账口径说明（易错，必须保留）：_hit() 必须传伤疤坐标系的残片 frag，
         # 绝不能传原文实体。因为 restore() 会把占位符换回 fwd[TOKEN]，
         # 出网文本在该位置只剩残片，注册成完整原文会导致还原时把占位符覆盖的部分重复吐出。
         _hit(frag, lbl)
+        if _short:
+            # 过了启发式 = 这次是「强上下文确认」（短汉名只有这一条出路），记下来，
+            # 其后任何一轮出现都不再被当陌生词跳过。
+            _confirm_short_name(frag)
         token = fwd.get(frag)
         if not token:
             return None
@@ -6883,16 +7100,18 @@ def _mask_text(text, sid):
     # 抽样自检的比对必须排在 `_ner_clean` 判断**之前**：否则 NER 一降级这一轮就不比对，
     # 缓存里的错误内容要等到下一次「完整跑完」才被发现。
     if _LEAF_CACHE_OK[0]:
-        _leaf_cache_verify(_lc_expect, text)
+        _leaf_cache_verify(_lc_expect, text, original)
         # 只有「完整跑完」的结果才入库：NER 降级时这条叶子是残缺的，存进去等于把漏检
         # 永久固化。代价是 NER 开启时命中率取决于预算是否充足，方向是保守的。
         if _ner_clean:
             # `hit_orig - new_orig` 非空 = 本次有命中来自会话既有值（不是本次新增），
-            # 说明这条结果依赖会话状态 → 只在同会话复用。
+            # 说明这条结果依赖会话状态 → 只在同会话复用。姓名启发式跳过同理：
+            # 那个「不遮」的结论取决于「当时是否已确认」，会被 `_CONFIRMED` 推翻。
             _leaf_cache_store(
-                original, text,
+                _lc_src, text,
                 [(t, l, d) for t, (l, d) in hit_tokens.items()],
-                dependent=bool(hit_orig - new_orig), owner_sid=sid)
+                dependent=bool(hit_orig - new_orig) or bool(_short_name_skips[0]),
+                owner_sid=sid)
     return text
 
 
@@ -13915,6 +14134,9 @@ def _maybe_reload(force=False):
     # 命中面之后会静默沿用旧策略 —— 例如把某标签从 mask 改成 warn，历史叶子
     # 仍被遮住，用户在面板上改了却看不到任何效果。
     _leaf_cache_bump()
+    # `_KNOWN_NEW` / `_CONFIRMED` 建立在「这套覆盖项下该值确实敏感」之上，
+    # 配置换代时一并作废（与叶子缓存同一时机）。
+    _known_transient_reset()
 
     br = dict(DEFAULT_BUILTIN_RULES)
     raw_br = s.get("builtin_rules") or {}

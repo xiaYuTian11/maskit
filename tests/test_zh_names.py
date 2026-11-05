@@ -389,11 +389,99 @@ class SessionKnownValueConsistencyTests(unittest.TestCase):
                              "会话内已打码的值，裸出现被语境启发式放行（明文上行）"
                              f"：{out2!r}")
 
-            # 对照：陌生会话里同样的裸出现仍走启发式降噪（0.15.1 的误报修复不受影响）
+            # 对照（2026-11-05 语义变更）：该值已被强上下文确认，按 `_CONFIRMED`
+            # 它在**陌生请求**里也必须被遮 —— 否则同一个值换个请求就漏，
+            # 那是作用域 bug（原实现只看每请求新建的 fwd，而 sid 是 uuid4）。
+            # 「从未被确认过的陌生短词仍被降噪」由下一个用例锁住。
             sid2 = "known-consistency-stranger"
             tr._new_session(sid2)
             out3 = tr.mask(bare, sid2)
-            self.assertIn(name, out3,
+            self.assertNotIn(name, out3,
+                             "已确认的短名在陌生请求里又被降噪放行了"
+                             f"：{out3!r}")
+        finally:
+            tr._zh_name_spans = saved_spans
+            for k, v in saved.items():
+                setattr(tr, k, v)
+            tr._cfg_mtime[0] = mtime
+            shutil.rmtree(d, ignore_errors=True)
+            tr._known_reset_for_tests()
+
+
+class ConfirmedShortNameAcrossRequestsTests(unittest.TestCase):
+    """已确认的短名必须跨请求一致（2026-11-05）。
+
+    生产形态是**每个请求一个新 sid**（`uuid4().hex[:16]`），而 0.16 的
+    「会话内值一致性」只看这个每请求新建的 `fwd`。于是「历史里早的裸名 +
+    晚的有语境名」这个天然顺序下，裸名在后续每一轮都以明文重发。
+
+    两个方向都要锁：
+      1. 被强上下文确认过的短名 → 陌生请求里也必须遮；
+      2. **从未被确认过**的陌生短词 → 仍走降噪不遮（0.15.1 的误报修复不能回归）。
+    """
+
+    NAME = "陈" + "建" + "国"
+    STRANGER = "常" + "暂" + "存"
+
+    def test_confirmed_name_is_masked_in_a_stranger_request(self):
+        tr = _engine()
+        d = tempfile.mkdtemp(prefix="maskit-confirmed-")
+        saved = {
+            k: getattr(tr, k)
+            for k in ("CUSTOM_WORDS", "BUILTIN_RULES", "SENSITIVE_DISABLED",
+                      "SENSITIVE_WORD_DISABLED", "SENSITIVE_WORD_WHOLE",
+                      "UPSTREAMS", "TARGET_DOMAINS", "API_PATHS",
+                      "CAPTURE_MODE", "FAIL_CLOSED", "_DATA_ROOT")
+        }
+        mtime = tr._cfg_mtime[0]
+        saved_spans = tr._zh_name_spans
+        try:
+            with open(os.path.join(d, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"sensitive": {}, "builtin_rules": {}, "ner_enabled": True,
+                     "target_domains": ["api.example.com"],
+                     "api_paths": ["/v1/messages"]},
+                    fh, ensure_ascii=False,
+                )
+            tr._DATA_ROOT = Path(d)
+            tr._cfg_mtime[0] = None
+            tr._maybe_reload(force=True)
+            tr.BUILTIN_RULES = {k: False for k in tr.DEFAULT_BUILTIN_RULES}
+            tr._CUSTOM_WORD_RX_CACHE.clear()
+            tr._known_reset_for_tests()
+
+            def _propose(text, ents):
+                out = []
+                for val in (self.NAME, self.STRANGER):
+                    i = text.find(val)
+                    if i >= 0:
+                        out.append({"start": i, "end": i + len(val), "type": "NAME"})
+                return out, [], False
+
+            tr._zh_name_spans = _propose
+
+            # 请求 0（新 sid）：裸出现、尚未确认 → 降噪跳过（并且会被结果缓存记下）
+            out0 = tr.mask("又提到了" + self.NAME + "这个词条", "req-0")
+            self.assertIn(self.NAME, out0,
+                          "陌生短词的裸出现不再被降噪，0.15.1 的误报修复被回归了"
+                          f"：{out0!r}")
+
+            # 请求 1：有语境 → 遮 + 确认
+            out1 = tr.mask("联系人：" + self.NAME + "说订单有问题", "req-1")
+            self.assertNotIn(self.NAME, out1, f"有语境的首次出现未遮：{out1!r}")
+
+            # 请求 2（新 sid，生产形态）：同一个裸名字重发 → 必须遮。
+            # ⚠️ 这一条同时锁「缓存不得把跳过的结论钉死」：请求 0 的叶子已入缓存，
+            # 旧实现会直接命中它、跳过实体重判（实测修前仍是明文）。
+            out2 = tr.mask("又提到了" + self.NAME + "这个词条", "req-2")
+            self.assertNotIn(self.NAME, out2,
+                             "已确认的短名在下一个请求里又被降噪放行（明文上行），"
+                             "或缓存的旧「跳过」结论把重判顶掉了"
+                             f"：{out2!r}")
+
+            # 请求 3（新 sid）：**从未**被确认的陌生短词 → 仍降噪（不遮）
+            out3 = tr.mask("又提到了" + self.STRANGER + "这个词条", "req-3")
+            self.assertIn(self.STRANGER, out3,
                           "陌生短词的裸出现不再被降噪，0.15.1 的误报修复被回归了"
                           f"：{out3!r}")
         finally:

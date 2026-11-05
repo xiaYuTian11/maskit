@@ -10072,6 +10072,10 @@ def _project_engine_metrics(eng):
             "max": int(lc.get("max") or 0),
             "chars_max": int(lc.get("chars_max") or 0),
             "poison": int(lc.get("poison") or 0),
+            # sent 定向复核（2026-11-05）：`sent_pending` 是还没被历史复用过的新值
+            # 个数，`sent_recheck` 是因它触发重算的叶子次数。只放计数，无自由文本。
+            "sent_pending": int(lc.get("sent_pending") or 0),
+            "sent_recheck": int(lc.get("sent_recheck") or 0),
         }
     return out
 

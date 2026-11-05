@@ -4,6 +4,28 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 以前漏发出去的内容，下一轮会补上打码：已确认敏感的值，即使在更早的对话里没被认出来，也会在历史重发时遮住。
+- Content that slipped through earlier is now masked on the next turn: confirmed values get masked even in older parts of the conversation that missed them.
+- 对话里遮过一次的名字，换个请求也会继续被遮，不再看它是不是恰好排在带称呼的那句之后。
+- Once a name has been masked, later requests keep masking it instead of depending on where it happened to appear.
+
+### 修复
+- 修复已发送的历史文本沿用旧结果、导致其后才确认的敏感值继续以原文重发的问题：只在文本真的含该值时重算一次，之后恢复字节稳定。
+- Fixed already-sent history replaying an old result, which kept resending a value that was only confirmed sensitive later: the text is now recomputed once, only when it really contains that value.
+- 修复短名跨请求不一致：同一个名字在更早的消息里裸出现时，以前每个请求都会被当成普通词跳过。
+- Fixed short names being inconsistent across requests: a name that appeared bare in earlier messages used to be skipped as an ordinary word in every request.
+- 修复两处缓存口径问题：带已知值的文本一直命中不了结果缓存；模型从不可用变为可用后旧结果不再失效。
+- Fixed two cache-key issues: text that went through known-value replacement could never hit the result cache, and cached results stayed valid after the model became available.
+
+### 优化
+- 缓存里不再保留没有命中任何敏感词的整段文本副本，内存占用与说明口径一致。
+- The cache no longer keeps a copy of text that had nothing to mask, so memory use matches what the documentation claims.
+- 运行指标新增「待复核的新值」与「定向重算次数」，面板能看出这条兜底是否在干活。
+- Runtime metrics now show pending newly-confirmed values and how often a targeted recompute ran.
+
 ## [0.16.0] - 2026-11-05
 
 ### 更新摘要 / Summary
