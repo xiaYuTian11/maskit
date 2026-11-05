@@ -315,6 +315,15 @@ export interface ShieldEvent {
    */
   upstream_idle_s?: number
   mask_ms?: number
+  /**
+   * 图片 OCR 脱敏（MASK 事件）：本轮真的打码/遮盖了几张图。
+   * 0 或缺省 = 这次请求没带图片。它不是占位符命中，所以单独列。
+   */
+  vision_masked?: number
+  /** 其中**整图遮盖**的张数（定位不全但已确认敏感，已涂灰）：请求照常放行 */
+  vision_covered?: number
+  /** 图片链路总耗时（毫秒）。与 mask_ms 区分：后者含文本脱敏，排障时要能拆开看 */
+  vision_ms?: number
   first_byte_ms?: number
   upstream_ms?: number
   total_ms?: number
@@ -417,6 +426,14 @@ export interface PrefixStats {
 export interface TodayStats {
   requests: number
   alerts: number
+  /**
+   * 真阻断数（`decision=blocked`：请求被拦下、没发出去）与仅记录数
+   * （`decision=flagged`：出口复检抓到残留但按「用户第一准则」照常放行）。
+   * **不能拿 `by_type.BLOCK.events` 当阻断数**：它把两者混在一起，实测虚高一个
+   * 数量级。旧后端可能不返回这两个字段，渲染时回退到原口径。
+   */
+  blocked?: number
+  flagged?: number
   /** MASK 事件数（真实字段 mask_events） */
   mask_events: number
   /** 脱敏词项总数（真实字段 masked_items） */

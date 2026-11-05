@@ -47,6 +47,20 @@ fn resolve_engine_port(get: impl Fn(&str) -> Option<String>) -> u16 {
     }
     5801
 }
+
+/// 桌面端**支持**的面板端口范围：与 `tauri.conf.json` 的 CSP `connect-src`、
+/// `capabilities/default.json` 的 `http:scope` 一一对应（两者都是构建期固定的）。
+///
+/// 为什么不用「限制解析范围」来实现：环境变量是引擎侧与壳层共用的真值源，
+/// 引擎会在任意端口监听（`panel.py` 读同一个变量），壳层单方面不认只会让
+/// 两边端口对不上；而把 CSP 放宽到 `127.0.0.1:*` 又等于给页面 JS 开一条
+/// 经 Rust 代发、绕过 CORS 探测本机全部 HTTP 服务的通道。
+/// 所以保留解析、在就绪判定里**明确告知**（见 `readiness_loop`）。
+const SUPPORTED_PANEL_PORTS: std::ops::RangeInclusive<u16> = 5801..=5805;
+
+fn panel_port_supported(port: u16) -> bool {
+    SUPPORTED_PANEL_PORTS.contains(&port)
+}
 /// 就绪等待上限（秒）
 const READY_TIMEOUT_SECS: u64 = 20;
 /// 崩溃自动重启：1 分钟窗口内的最大重启次数
@@ -434,6 +448,17 @@ impl EngineManager {
 
     /// 就绪轮询：等待引擎写 token 文件 + 面板 `/healthz` 可用（上限 READY_TIMEOUT_SECS）
     fn readiness_loop(&self) {
+        // 端口超出 CSP/capability 覆盖范围时，WebView 侧根本发不出请求：继续探活
+        // 只会刷一串无意义的失败，用户看到的是「白屏 + 一直转圈」，无从自救。
+        // 直接给出可行动的结论（改回默认端口，或用浏览器访问）。
+        let port = engine_port();
+        if !panel_port_supported(port) {
+            self.set_last_error(&format!(
+                "面板端口 {port} 超出桌面端支持范围 5801-5805（受 WebView 安全策略限制）。\
+                 请改回默认端口，或直接用浏览器访问 http://127.0.0.1:{port}/"
+            ));
+            return;
+        }
         let start = std::time::Instant::now();
         let deadline = start + Duration::from_secs(READY_TIMEOUT_SECS);
         loop {
@@ -807,16 +832,38 @@ impl EngineManager {
 // 全局 AppHandle：崩溃监控线程重拉引擎时使用（setup 时初始化）
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
-// 全局托盘「启动/停止代理」菜单项引用：用于动态切换文案
+// 托盘语言（zh / en）：前端把当前界面语言下发到这里，菜单文案随之切换。
+// 为什么不让壳层自己读：语言只存在浏览器 `localStorage('dm-lang')`，Rust 侧看不到；
+// 也不另建一条配置真值源 —— 那会出现「界面英文、托盘中文、配置里第三种」的多头。
+static TRAY_LANG_EN: AtomicBool = AtomicBool::new(false);
+// 最近一次代理运行状态：切换语言时要按它重算「启动/停止代理」，否则文案会翻错。
+static TRAY_PROXY_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 托盘四段文案：显示窗口 / 启动代理 / 停止代理 / 退出。
+fn tray_labels() -> [&'static str; 4] {
+    if TRAY_LANG_EN.load(Ordering::Relaxed) {
+        ["Show Window", "Start Proxy", "Stop Proxy", "Quit"]
+    } else {
+        ["显示窗口", "启动代理", "停止代理", "退出"]
+    }
+}
+
+// 全局托盘菜单项引用：切换语言 / 代理状态时动态改写文案
+#[cfg(not(target_os = "linux"))]
+static TRAY_SHOW_ITEM: OnceLock<tauri::menu::MenuItem<tauri::Wry>> = OnceLock::new();
 #[cfg(not(target_os = "linux"))]
 static TRAY_TOGGLE_ITEM: OnceLock<tauri::menu::MenuItem<tauri::Wry>> = OnceLock::new();
+#[cfg(not(target_os = "linux"))]
+static TRAY_QUIT_ITEM: OnceLock<tauri::menu::MenuItem<tauri::Wry>> = OnceLock::new();
 
 pub fn update_tray_proxy_text(running: bool) {
+    TRAY_PROXY_RUNNING.store(running, Ordering::Relaxed);
     #[cfg(target_os = "linux")]
     linux_tray::update_proxy_text(running);
     #[cfg(not(target_os = "linux"))]
     if let Some(item) = TRAY_TOGGLE_ITEM.get() {
-        let text = if running { "停止代理" } else { "启动代理" };
+        let labels = tray_labels();
+        let text = if running { labels[2] } else { labels[1] };
         let _ = item.set_text(text);
     }
 }
@@ -1803,6 +1850,34 @@ fn update_tray_proxy_status(running: bool) {
     update_tray_proxy_text(running);
 }
 
+/// 前端下发当前界面语言（zh / en），同步托盘菜单文案。
+#[tauri::command]
+fn set_tray_language(lang: String) {
+    TRAY_LANG_EN.store(lang.starts_with("en"), Ordering::Relaxed);
+    let labels = tray_labels();
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(item) = TRAY_SHOW_ITEM.get() {
+            let _ = item.set_text(labels[0]);
+        }
+        if let Some(item) = TRAY_QUIT_ITEM.get() {
+            let _ = item.set_text(labels[3]);
+        }
+        if let Some(item) = TRAY_TOGGLE_ITEM.get() {
+            // 要按最近一次真实的启停状态重算，否则「代理正在运行」会被写回
+            // 「启动代理」—— 用户点它就会去启一个已经跑着的代理。
+            let text = if TRAY_PROXY_RUNNING.load(Ordering::Relaxed) {
+                labels[2]
+            } else {
+                labels[1]
+            };
+            let _ = item.set_text(text);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    linux_tray::update_language();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let manager = Arc::new(EngineManager::new());
@@ -1834,7 +1909,8 @@ pub fn run() {
             set_autostart,
             check_update,
             install_update,
-            update_tray_proxy_status
+            update_tray_proxy_status,
+            set_tray_language
         ])
         .setup(|app| {
             // 日志插件 release 也注册。此前只在 debug 注册，导致壳层所有
@@ -1902,10 +1978,13 @@ pub fn run() {
             {
                 use tauri::menu::{Menu, MenuItem};
                 use tauri::tray::TrayIconBuilder;
-                let show_i = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-                let toggle_i = MenuItem::with_id(app, "toggle", "启动代理", true, None::<&str>)?;
+                let labels = tray_labels();
+                let show_i = MenuItem::with_id(app, "show", labels[0], true, None::<&str>)?;
+                let toggle_i = MenuItem::with_id(app, "toggle", labels[1], true, None::<&str>)?;
                 let _ = TRAY_TOGGLE_ITEM.set(toggle_i.clone());
-                let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+                let _ = TRAY_SHOW_ITEM.set(show_i.clone());
+                let quit_i = MenuItem::with_id(app, "quit", labels[3], true, None::<&str>)?;
+                let _ = TRAY_QUIT_ITEM.set(quit_i.clone());
                 let menu = Menu::with_items(app, &[&show_i, &toggle_i, &quit_i])?;
                 let tray = TrayIconBuilder::new()
                     .icon(app.default_window_icon().unwrap().clone())
@@ -2437,5 +2516,17 @@ mod engine_port_tests {
         assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "not-a-port"), ("SHIELD_ENGINE_PORT", "6002")]), 6002);
         assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "70000")]), 5801, "越界端口不能被接受");
         assert_eq!(port(&[("LLM_SHIELD_PANEL_PORT", "  6003  ")]), 6003, "两端空白应被容忍");
+    }
+
+    /// 桌面端只支持 CSP/capability 覆盖的 5801-5805：范围外的端口仍然会解析
+    /// （引擎侧照旧监听），但壳层必须在就绪判定里明确告知，而不是沉默地白屏。
+    #[test]
+    fn supported_panel_ports_are_the_csp_window() {
+        for p in 5801..=5805 {
+            assert!(super::panel_port_supported(p), "{p} 应当受支持");
+        }
+        for p in [5800u16, 5806, 6001, 9000] {
+            assert!(!super::panel_port_supported(p), "{p} 超出 CSP 范围，不应被当作可用");
+        }
     }
 }

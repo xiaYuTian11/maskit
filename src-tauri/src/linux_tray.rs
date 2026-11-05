@@ -54,17 +54,20 @@ impl ksni::Tray for LinuxTray {
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        // 文案与其它平台共用一份真值（`super::tray_labels()`）：
+        // 各平台各写一份的话，切语言后 Linux 会一直停在中文。
+        let labels = super::tray_labels();
         [
-            ("show", "显示窗口"),
+            ("show", labels[0]),
             (
                 "toggle",
                 if self.running {
-                    "停止代理"
+                    labels[2]
                 } else {
-                    "启动代理"
+                    labels[1]
                 },
             ),
-            ("quit", "退出"),
+            ("quit", labels[3]),
         ]
         .into_iter()
         .map(|(id, label)| {
@@ -111,6 +114,13 @@ pub(super) fn install(app: &AppHandle) -> io::Result<()> {
 pub(super) fn update_proxy_text(running: bool) {
     if let Some(tray) = TRAY.get() {
         tray.update(|tray| tray.running = running);
+    }
+}
+
+/// 语言切换：`ksni` 的菜单是从 `menu()` 现算的，触发一次 update 即可重发文案。
+pub(super) fn update_language() {
+    if let Some(tray) = TRAY.get() {
+        tray.update(|tray| tray.running = tray.running);
     }
 }
 

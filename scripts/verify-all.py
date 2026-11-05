@@ -35,7 +35,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 GATES = [
     # ---- python（ci.yml: python job）----
     {"group": "python", "name": "Compile check", "cwd": ".", "argv": ["{python}", "-m", "py_compile", "@engine/*.py"]},
-    {"group": "python", "name": "Unit tests", "cwd": ".", "argv": ["{python}", "-m", "unittest", "discover", "-s", "tests"]},
+    {"group": "python", "name": "Unit tests", "cwd": ".", "argv": ["{python}", "-m", "unittest", "discover", "-s", "tests", "-t", "."]},
     {"group": "python", "name": "Smoke tests (stream)", "cwd": ".", "argv": ["{python}", "tests/smoke_stream.py"]},
     {"group": "python", "name": "Smoke tests (egress)", "cwd": ".", "argv": ["{python}", "tests/smoke_egress.py"]},
     {"group": "python", "name": "Smoke tests (transport)", "cwd": ".", "argv": ["{python}", "tests/smoke_transport.py"]},

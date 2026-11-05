@@ -394,6 +394,18 @@ export function EventDetailDialog({
             {(event.ner_init_ms != null || event.ner_infer_ms != null || event.ner_budget_wait_ms != null) && (
               <p className="text-xs text-muted-foreground">{t('detail.nerTiming')}: {[event.ner_init_ms, event.ner_infer_ms, event.ner_budget_wait_ms].map((v) => v == null ? t('transport.unknown') : formatDuration(v)).join(' / ')}</p>
             )}
+            {/* 图片打码：张数 / 其中整图遮盖 / 图片链路耗时。
+                没有这一行时，用户只能拿 mask_ms 总量减去文本部分去猜“图片是不是卡了”——
+                2026-11-05 的「图片请求全被 503」 排查就卡在这一步。 */}
+            {(event.vision_masked ?? 0) > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {tf('detail.vision', {
+                  n: String(event.vision_masked ?? 0),
+                  cover: String(event.vision_covered ?? 0),
+                  ms: formatDuration(event.vision_ms),
+                })}
+              </p>
+            )}
 
             {/* 流式信息（stream_actual 与 stream_mode 背离提示） */}
             {event.stream_mode && (

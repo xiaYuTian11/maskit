@@ -161,7 +161,7 @@ def _crop_png(img, rect, margin=VERIFY_MARGIN):
     return buf.getvalue()
 
 
-def verify_rect(img, rect, needle, recognize, *, deadline=None):
+def verify_rect(img, rect, needle, recognize, *, deadline=None, crop_cache=None):
     """裁图复认：`needle`（实体原文）是否完整落在这个框里。
 
     收紧成"去空白后包含"：OCR 复认常丢空格（实测 `Tax ID` → `TaxID`），
@@ -173,10 +173,15 @@ def verify_rect(img, rect, needle, recognize, *, deadline=None):
     payload = _crop_png(img, rect)
     if not payload:
         return False
-    try:
-        got = _norm(recognize(payload, deadline=deadline))
-    except Exception:
-        return False
+    if crop_cache is not None and payload in crop_cache:
+        got = crop_cache[payload]
+    else:
+        try:
+            got = _norm(recognize(payload, deadline=deadline))
+        except Exception:
+            return False
+        if crop_cache is not None:
+            crop_cache[payload] = got
     want = _norm(needle)
     if not want:
         return False
@@ -196,6 +201,7 @@ def locate(blocks, mask_fn, *, img, recognize, min_score=0.5,
     """
     rects = []
     stats = {"entities": 0, "verified": 0, "line_fallback": 0, "failed": 0, "low_conf": 0}
+    crop_cache = {}
     for block in blocks:
         text = (block.text or "").strip()
         if not text:
@@ -224,12 +230,17 @@ def locate(blocks, mask_fn, *, img, recognize, min_score=0.5,
             stats["entities"] += 1
             bx1, bx2 = char_x(block.quad, text, start, end, pad_em=pad_em)
             rect = (bx1, vy1, bx2, vy2)
-            if verify_rect(img, rect, needle, recognize, deadline=deadline):
+            # 整块快路径：整块即实体且分数高（>=0.85），无需字符切分，det 原生真框已足额覆盖
+            if start == 0 and end == len(text) and block.score >= 0.85:
+                stats["verified"] += 1
+                rects.append(EntityRect(padded_line, (start, end), label, True, ""))
+                continue
+            if verify_rect(img, rect, needle, recognize, deadline=deadline, crop_cache=crop_cache):
                 stats["verified"] += 1
                 rects.append(EntityRect(rect, (start, end), label, True, ""))
                 continue
             # 退一：整行框
-            if verify_rect(img, padded_line, needle, recognize, deadline=deadline):
+            if verify_rect(img, padded_line, needle, recognize, deadline=deadline, crop_cache=crop_cache):
                 stats["line_fallback"] += 1
                 rects.append(EntityRect(padded_line, (start, end), label, False, "line"))
                 continue

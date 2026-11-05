@@ -6176,17 +6176,56 @@ def _leaf_cache_gen():
     """缓存代号：**任何**能改变脱敏输出的进程内配置都要在它里面。
 
     漏一项 = 那个配置改了之后旧结果继续命中（静默给错文本）。三道保险：
-      · `_LEAF_CACHE_GEN`：配置热重载、词表执行计划重建、显式清空时自增；
+      · `_LEAF_CACHE_GEN`：配置热重载（`_maybe_reload` 在设置真正变化时
+        `_leaf_cache_bump()`，覆盖三态动作 / 值白名单 / 规则开关 / 标签禁用）、
+        词表执行计划重建、跨进程清空映射、显式清空；
       · `NER_ENABLED`：语义识别开关（它直接改变输出）；
-      · `id(BUILTIN_RULES)`：规则开关表是**整体换对象**发布的，换对象即换代
-        （测试里直接赋值也能被抓住；原地改 key 不会被抓，生产路径不存在这种写法）。
+      · `BUILTIN_RULES`：**内容**进代号，不只比对象身份。规则表在生产路径上
+        是整体换对象发布的（`_maybe_reload`），但直接改 key 也能改变输出，
+        而 `id()` 看不见原地修改 —— 2026-11 实测（`test_idcard_single_switch`）：
+        关掉 IDCARD 后旧结果仍被命中，因为缓存从不命中时这个洞被掩盖了。
+        代价是每个叶子多一次 30 项排序（实测远低于一次正则扫描）。
     """
-    return (_LEAF_CACHE_GEN[0], bool(NER_ENABLED), id(BUILTIN_RULES))
+    return (_LEAF_CACHE_GEN[0], bool(NER_ENABLED),
+            tuple(sorted(BUILTIN_RULES.items())))
 
 
 def _leaf_cache_bump():
     """配置/词表换代：代号一变，旧条目在下次查找时整体作废。"""
     _LEAF_CACHE_GEN[0] += 1
+
+
+def _leaf_cache_stats():
+    """叶子结果缓存的命中/容量快照（`engine-runtime.json` 出口，面板与自检读）。
+
+    为什么必须外发：2026-11 排查发现这个缓存因校验源用错（会话表而非复用表）
+    而长期空转 —— 每个请求都是新会话、历史叶子全部 miss —— 但计数从未导出，
+    只能靠人肉比对事件库的两条 `mask_ms` 反推。命中率是判断「长会话是否仍在
+    整段重算」的唯一直接指标；`verify`/`poison` 外发则让抽样自检的结论可见
+    （`poison>0` 意味着缓存因不一致已被整体关闭）。
+
+    不含原文，只有计数与容量（与 `ner_engine.cache_stats()` 同口径）。
+    """
+    with _LEAF_CACHE_LOCK:
+        stats = dict(_LEAF_CACHE_STATS)
+        size = len(_LEAF_CACHE)
+        chars = _LEAF_CACHE_CHARS
+    enabled = bool(_LEAF_CACHE_OK[0])
+    hit = int(stats.get("hit", 0))
+    miss = int(stats.get("miss", 0))
+    total = hit + miss
+    return {
+        "enabled": enabled,
+        "hit": hit,
+        "miss": miss,
+        "hit_rate": round(hit / total, 4) if total else None,
+        "size": size,
+        "chars": chars,
+        "max": _LEAF_CACHE_MAX,
+        "chars_max": _LEAF_CACHE_MAX_CHARS,
+        "verify": int(stats.get("verify", 0)),
+        "poison": int(stats.get("poison", 0)),
+    }
 
 
 def _leaf_cache_clear():
@@ -6196,17 +6235,27 @@ def _leaf_cache_clear():
         _LEAF_CACHE_CHARS = 0
 
 
-def _leaf_cache_lookup(text, fwd, rev):
+def _leaf_cache_lookup(text, sid):
     """查缓存；命中返回 `(脱敏文本, [(占位符, 标签)])`，未命中返回 None。
 
-    代号不符、长度不符、或任一个占位符在当前会话里**对不上原文**，都算未命中。
-    校验必须真的查一遍映射，不能只看代号 —— 占位符是**会话级**的，同一段文本
-    在不同会话/被淘汰后指向的占位符不同，拿旧文本直接返回会把 A 会话的占位符
-    发给 B 会话。
+    校验对象是**跨请求的复用表**（`_tables()`），不是当前会话表 —— 这是本缓存
+    能否真正生效的关键。
 
-    三道校验缺一不可：`rev[tok]` 存在、`fwd[rev[tok]] == tok`、且
-    `_orig_digest(rev[tok])` 等于存缓存时那个原文的摘要。前两道只证明「这个代号
-    在当前会话里指向某个原文」，第三道才证明「指向的就是当初那个原文」。
+    为什么不能用会话表（2026-11 真机实测）：客户端每轮把整段历史**以原文重发**
+    （响应侧已还原，客户端手里没有占位符），而 `_new_session()` 的 `fwd`/`rev`
+    是空的，`_seed_known()` 也只在文本里出现占位符时才回灌。于是每个请求都是
+    全新会话、每条历史叶子全部 miss，缓存从未真正命中过：3MB 请求体 p50 脱敏
+    10~14 秒，其中约 4 秒是整段历史重跑 20~50 遍正则。9055 个 sid 每个只对应
+    1 条 MASK，是该形态的直接证据。
+
+    改用复用表后，命中时必须由调用方 `_hit()` 把 token 回灌进本会话（`rev` 与
+    `_KNOWN` 索引），否则响应侧还原不了、同请求其它位置的裸出现也遮不住。
+    回灌是安全的：`_remember` 从复用表拿**同一个** token，`_hit` 幂等，
+    重放口径与冷跑一致。
+
+    四道校验缺一不可：`rev[tok]` 存在、未过 TTL、`fwd[orig]` 仍指向该 tok、
+    `_orig_digest(orig)` 等于存缓存时那个原文的摘要。TTL 那条不能省：过期映射
+    会让 `_hit` 重签新 token，缓存文本与重建结果就此分叉。
     """
     global _LEAF_CACHE_CHARS
     key = _leaf_cache_key(text)
@@ -6220,15 +6269,36 @@ def _leaf_cache_lookup(text, fwd, rev):
             _LEAF_CACHE_CHARS -= ent[1]
             _LEAF_CACHE_STATS["miss"] += 1
             return None
+        if ent[4] and ent[5] != sid:
+            # 「依赖会话既有值」的条目只在创建它的会话内复用。同一段文本在陌生
+            # 会话里可能走另一条判定（典型：短词无语境时按误报降噪，不遮），
+            # 跨会话复用会把这个差异抹平，把不该遮的词遮了
+            # （`test_bare_reoccurrence_of_known_value_is_masked` 锁这条）。
+            _LEAF_CACHE_STATS["miss"] += 1
+            return None
         _LEAF_CACHE.move_to_end(key)
+    tables = _tables()
+    ttl = _recent_ttl()
+    now = time.time()
+    ok = True
     with _STATE_LOCK:
+        g_fwd = tables.fwd
+        g_rev = tables.rev
         for token, _label, want in ent[3]:
-            orig = rev.get(token)
-            if orig is None or fwd.get(orig) != token or _orig_digest(orig) != want:
-                with _LEAF_CACHE_LOCK:
-                    _LEAF_CACHE_STATS["miss"] += 1
-                return None
+            rec = g_rev.get(token)
+            if rec is None or now - rec[2] > ttl:
+                ok = False
+                break
+            orig = rec[0]
+            fwd_rec = g_fwd.get(orig)
+            if (fwd_rec is None or fwd_rec[0] != token
+                    or _orig_digest(orig) != want):
+                ok = False
+                break
     with _LEAF_CACHE_LOCK:
+        if not ok:
+            _LEAF_CACHE_STATS["miss"] += 1
+            return None
         _LEAF_CACHE_STATS["hit"] += 1
     return ent[2], ent[3]
 
@@ -6250,8 +6320,15 @@ def _leaf_cache_verify(expect, masked):
     _log("[transparent] 叶子缓存自检发现不一致，已整体关闭叶子缓存")
 
 
-def _leaf_cache_store(text, masked, tokens):
-    """存一条结果（调用方负责先跑 `_leaf_cache_verify`）。"""
+def _leaf_cache_store(text, masked, tokens, dependent=False, owner_sid=None):
+    """存一条结果（调用方负责先跑 `_leaf_cache_verify`）。
+
+    `dependent`：本次结果里有命中来自「会话既有值」而非本次新增。这类结果
+    **只在同一会话内复用** —— 同一段文本在陌生会话里可能走另一条判定
+    （典型：短词无语境时按误报降噪），跨会话复用会把不该遮的词遮掉。
+    冷跑的条目一律 `dependent=False`（会话 `fwd` 是空的，命中全是本次新增），
+    所以「客户端每轮重发整段原文历史」的主场景不受限制。
+    """
     global _LEAF_CACHE_CHARS
     if not _LEAF_CACHE_OK[0]:
         return
@@ -6263,7 +6340,8 @@ def _leaf_cache_store(text, masked, tokens):
         old = _LEAF_CACHE.pop(key, None)
         if old is not None:
             _LEAF_CACHE_CHARS -= old[1]
-        _LEAF_CACHE[key] = (_leaf_cache_gen(), size, masked, tokens)
+        _LEAF_CACHE[key] = (_leaf_cache_gen(), size, masked, tokens,
+                            bool(dependent), owner_sid)
         _LEAF_CACHE_CHARS += size
         while _LEAF_CACHE and (_LEAF_CACHE_CHARS > _LEAF_CACHE_MAX_CHARS
                                or len(_LEAF_CACHE) > _LEAF_CACHE_MAX):
@@ -6400,16 +6478,21 @@ def _mask_text(text, sid):
         # 计数**取模回绕**：这是个永不重置的进程级计数器，没必要把它加到无穷
         # （大整数求模会随位数变慢，长期运行下纯属无谓开销）。
         _LEAF_CACHE_TICK[0] = (_LEAF_CACHE_TICK[0] + 1) % _LEAF_CACHE_VERIFY_EVERY
-        _probe = _leaf_cache_lookup(text, fwd, rev)
+        _probe = _leaf_cache_lookup(text, sid)
         if _probe is not None:
             if _LEAF_CACHE_TICK[0] == 0:
                 _lc_expect = _probe[0]
             else:
+                # 命中来自**跨请求**的复用表，这些 token 还没进本会话：逐条
+                # `_hit()` 回灌（会话 `rev` 决定响应侧能否还原，`_KNOWN` 决定
+                # 本请求其它位置的裸出现是否仍被遮）。`_hit` 幂等（走
+                # `_remember` 从复用表取同一个 token），重放口径与冷跑一致。
                 with _STATE_LOCK:
+                    _g_rev = _tables().rev
                     for _tok, _lbl, _ in _probe[1]:
-                        _orig = rev.get(_tok)
-                        if _orig is not None:
-                            _hit(_orig, _lbl)
+                        _rec = _g_rev.get(_tok)
+                        if _rec is not None:
+                            _hit(_rec[0], _lbl)
                 s.setdefault("last_hits", set()).update(hit_orig)
                 s.setdefault("new_orig", set()).update(new_orig)
                 return _probe[0]
@@ -6804,7 +6887,12 @@ def _mask_text(text, sid):
         # 只有「完整跑完」的结果才入库：NER 降级时这条叶子是残缺的，存进去等于把漏检
         # 永久固化。代价是 NER 开启时命中率取决于预算是否充足，方向是保守的。
         if _ner_clean:
-            _leaf_cache_store(original, text, [(t, l, d) for t, (l, d) in hit_tokens.items()])
+            # `hit_orig - new_orig` 非空 = 本次有命中来自会话既有值（不是本次新增），
+            # 说明这条结果依赖会话状态 → 只在同会话复用。
+            _leaf_cache_store(
+                original, text,
+                [(t, l, d) for t, (l, d) in hit_tokens.items()],
+                dependent=bool(hit_orig - new_orig), owner_sid=sid)
     return text
 
 
@@ -8209,9 +8297,18 @@ def _take_media_skips(sid):
 # 图片 OCR 脱敏（多模态）：媒体 data URL 的像素级脱敏
 # ---------------------------------------------------------------------------
 
-# 单请求总预算（秒）。为什么是 10s：一张截图的本地 OCR 约 0.5~1.5s，10s 足够盖住
-# 一次请求里 5~8 张图；超出就阻断，因为“剩下的图没扫过就上行”比失败更糟。
-_VISION_BUDGET_S = 25.0
+# 单请求图片总预算（秒）：一次请求里的**所有**图片共用这一个 deadline。
+#
+# 为什么是 60s（2026-11-05 实测重定）：
+#   · 普通网页/IDE 截图（1440×1000、39 个文本块）det+rec 约 2.5s，5 块的小图 1.2s；
+#   · 密集表格图（`scripts/eval_ocr.py` 的 dense_table 用例，10 个实体）单张 **10.1s**，
+#     同一批用例 P95 = 4.4s；
+#   · 实际请求里 3 张图的 `mask_ms` 落在 23.8~25.5s（含文本脱敏）。
+# 旧值 25s 已经**没有余量**——同一张图 10:04 刚好过、10:05 就 ocr_timeout，
+# 客户端重试 5 次全灭（8 分 44 秒）。60s 能覆盖「3 张密集图（30s）+ 图片复认 +
+# 大 payload 文本脱敏」，仍远低于 `_ENGINE_DEADLINE_S`（120s）端到端预算。
+# 超预算仍阻断，因为“剩下的图没扫过就上行”比失败更糟（AGENTS §3.2 fail-closed）。
+_VISION_BUDGET_S = 60.0
 # 预算放 thread-local 而不是会话：会话是**跨请求**的长生命周期对象，写进去会让
 # 下一个请求继承一个快过期的 deadline（表现为“什么都没干就超预算”）。
 _VISION_TLS = threading.local()
@@ -8262,6 +8359,7 @@ def _vision_mask_media(value, sid):
     if deadline is None:
         deadline = time.monotonic() + _VISION_BUDGET_S
     vstats = {}
+    _v_t0 = time.perf_counter()
     try:
         out, hits, status = vr.mask_data_url(
             value, sid, _VISION_SHIM, deadline=deadline, stats_out=vstats,
@@ -8274,37 +8372,61 @@ def _vision_mask_media(value, sid):
         raise
     except Exception:
         raise _VisionBlocked("vision_error")
-    if status == vr.ST_MASKED:
-        _note_vision_mask(sid, hits, vstats.get("verified", 0), vstats.get("line_fallback", 0))
-        return out, "masked"
+    _v_ms = (time.perf_counter() - _v_t0) * 1000.0
     if status == vr.ST_CLEAN:
         return value, "clean"
     if status == vr.ST_NOT_APPLICABLE:
         return value, "not_applicable"
+    # 成功判定必须走 `is_ok_status`，不能只认 ST_MASKED。
+    # 整图遮盖（`full_cover_unlocalized`）返回的是**已经涂好的新图**：像素零保留，
+    # 安全目标已达成，语义上就是成功。旧实现只认 ST_MASKED、其余一律
+    # `raise _VisionBlocked(status)`，于是 2026-11-03「定位失败改整图遮盖」这条修复
+    # 在代理链路上等于没生效——图已经涂了，请求仍被 503 打死（实测 2026-11-05
+    # 10:06 / 10:08 / 10:09 / 10:10 / 10:11 连续 5 次
+    # `vision:full_cover_unlocalized`，用户看到的是「网关坏了」）。
+    # 判据用 is_ok_status 而不是白名单：将来新增「已处理」状态时不会再被静默判失败。
+    # @guard G501 已遮盖（COVER）是成功路径，不得当失败招 _VisionBlocked
+    if vr.is_ok_status(status):
+        _note_vision_mask(sid, hits, vstats.get("verified", 0),
+                          vstats.get("line_fallback", 0),
+                          covered=status in (vr.ST_COVER_UNLOCALIZED, vr.ST_COVER_UNSUPPORTED),
+                          ms=_v_ms)
+        return out, "masked"
+    # @guard G502 非 OK 状态必须阻断（fail-closed，不得改成原图上行）
     raise _VisionBlocked(status)
 
 
-def _note_vision_mask(sid, hits=1, verified=0, line_fallback=0):
+def _note_vision_mask(sid, hits=1, verified=0, line_fallback=0, covered=False, ms=0.0):
     """记一次「图片像素已被打码」（本轮计数）。
 
     它既不是豁免（图确实被扫了）也不是占位符命中，所以单独计，并在 MASK 事件里
     以 `vision_masked` 暴露——否则用户在统计里看到 hits=0，会以为这张图没被处理。
+
+    `covered`：这张图是**整图遮盖**（定位不全但已确认敏感），不是精确打码；
+    `ms`：这张图的耗时。两者都进 MASK 事件，否则下次「图片请求为什么 503」
+    只能靠 `mask_ms` 总量倒推（2026-11-05 排查就卡在这一步）。
     """
     s = _session_get(sid)
     if isinstance(s, dict):
         s["vision_masked"] = int(s.get("vision_masked") or 0) + max(1, int(hits or 1))
         s["vision_verified"] = int(s.get("vision_verified") or 0) + max(0, int(verified or 0))
         s["vision_lines_masked"] = int(s.get("vision_lines_masked") or 0) + max(0, int(line_fallback or 0))
+        if covered:
+            s["vision_covered"] = int(s.get("vision_covered") or 0) + 1
+        if ms and ms > 0:
+            s["vision_ms"] = float(s.get("vision_ms") or 0.0) + float(ms)
 
 
 def _take_vision_masks(sid):
-    """取走本轮图片打码计数（含自校验/退整行），返回 `(masked, verified, lines)`。"""
+    """取走本轮图片打码计数，返回 `(masked, verified, lines, covered, ms)`。"""
     s = _session_get(sid) if sid else None
     if not isinstance(s, dict):
-        return 0, 0, 0
+        return 0, 0, 0, 0, 0.0
     return (int(s.pop("vision_masked", 0) or 0),
             int(s.pop("vision_verified", 0) or 0),
-            int(s.pop("vision_lines_masked", 0) or 0))
+            int(s.pop("vision_lines_masked", 0) or 0),
+            int(s.pop("vision_covered", 0) or 0),
+            round(float(s.pop("vision_ms", 0.0) or 0.0), 1))
 
 
 def _note_definition_skip(sid):
@@ -9923,6 +10045,9 @@ def _write_runtime_metrics(force=False):
         # 内存映射规模（§D3.3「清空内存映射」按钮旁边要显示“现在有多少东西可清”）。
         # 引擎是代理链路的真值源，面板只能看到它自己那份（扩展桥接）。
         payload["mappings"] = mapping_stats()
+        # 叶子结果缓存：跨请求复用的真值。命中率掉下去就等于「每轮整段重算」，
+        # 是长会话变慢的第一个可观测信号（见 `_leaf_cache_stats` 的注释）。
+        payload["leaf_cache"] = _leaf_cache_stats()
         try:
             import ner_engine
             payload["ner"] = {
@@ -11296,7 +11421,17 @@ async def _request_impl(flow: http.HTTPFlow):
         pass
     _s_signed = _take_signed_skips(sid)
     _media_skipped = _take_media_skips(sid)
-    _vision_masked, _vision_verified, _vision_lines = _take_vision_masks(sid)
+    _vision_masked, _vision_verified, _vision_lines, _vision_covered, _vision_ms = \
+        _take_vision_masks(sid)
+    # @guard G503 图片张数/遮盖数/耗时写回会话：详情弹窗回源的是 RESTORE
+    # （见前端 `_detailSeq`），只挂 MASK 等于弹窗里永远看不到这张图发生了什么。
+    _vsess = _session_get(sid)
+    if isinstance(_vsess, dict) and _vision_masked:
+        _vsess["vision_masked"] = _vision_masked
+        if _vision_covered:
+            _vsess["vision_covered"] = _vision_covered
+        if _vision_ms:
+            _vsess["vision_ms"] = _vision_ms
     # 严格模式闸门（§B3）必须在**请求出网前**生效：此时脱敏已完成（命中/占位符已定），
     # 只差回写与放行。判据用 inspection 的类别表：exempt（签名块按契约不扫）与 info
     # （取消/直通）不阻断，只有「检测没跑完」类降级才阻断。
@@ -11389,6 +11524,10 @@ async def _request_impl(flow: http.HTTPFlow):
         # 自校验通过数应等于打码数；不等 = 定位退回了整行（用户能在日志里看到）
         **({"vision_verified": _vision_verified} if _vision_masked else {}),
         **({"vision_lines_masked": _vision_lines} if _vision_lines else {}),
+        # 其中整图遮盖的张数 + 图片总耗时：前者区分“精确打码”与“涂成灰块”，
+        # 后者是「请求为什么慢/为什么 503」的唯一直接证据（旧版只能拿 mask_ms 倒推）。
+        **({"vision_covered": _vision_covered} if _vision_covered else {}),
+        **({"vision_ms": _vision_ms} if _vision_ms else {}),
         # 统一检测口径（§B1）：处置结论 + 完整度 + 原因码，与扩展桥接同源。
         **inspection.report_for_mask(changed=bool(hit_count), ner_skips=ner_skips,
                                      signed_skipped=_s_signed,
@@ -13230,6 +13369,14 @@ def _emit_restore_summary(flow, sid, host, method, path, source, ok=True, stream
         # 治理器派生字段（与 MASK 同源，从会话带过来）：详情弹窗回源的正是本条 RESTORE，
         # 不带就永远渲染不出来（前端 EventDetailDialog 读 event.ner_global_throttled）。
         **{k: v for k, v in (s.get("ner_metrics") or {}).items() if k in _NER_EVENT_METRICS},
+        # @guard G503 图片打码从会话带过来：详情弹窗回源本条 RESTORE，
+        # 只挂 MASK 的话「图片几张 / 有没有整图遮盖 / 图片占了多久」在弹窗里全缺失。
+        **({"vision_masked": int(s.get("vision_masked") or 0)}
+           if s.get("vision_masked") else {}),
+        **({"vision_covered": int(s.get("vision_covered") or 0)}
+           if s.get("vision_covered") else {}),
+        **({"vision_ms": round(float(s.get("vision_ms") or 0), 1)}
+           if s.get("vision_ms") else {}),
         **source,
     )
     if prepare_only:
@@ -13762,6 +13909,12 @@ def _maybe_reload(force=False):
     # 计划缓存的键已含词表内容，本来就会自行失效，显式置空只为可读性。
     _CUSTOM_COMBINED_CACHE["plan"] = None
     _clear_word_table_issues()
+    # 三态动作 / 值白名单 / 规则开关 / 敏感标签禁用都直接改变脱敏输出，但它们
+    # 不进 `_leaf_cache_gen()`（那里只放对象身份，无法区分「内容变了」）。配置
+    # 真的变了就在这里统一换代：旧结果在下次查找时整体作废。漏这一步，扩大
+    # 命中面之后会静默沿用旧策略 —— 例如把某标签从 mask 改成 warn，历史叶子
+    # 仍被遮住，用户在面板上改了却看不到任何效果。
+    _leaf_cache_bump()
 
     br = dict(DEFAULT_BUILTIN_RULES)
     raw_br = s.get("builtin_rules") or {}

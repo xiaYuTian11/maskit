@@ -35,11 +35,15 @@
 """
 
 import base64
+import collections
+import concurrent.futures
+import hashlib
 import io
 import ipaddress
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -142,6 +146,52 @@ MAX_DATA_URL_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
+# 专职视觉线程池：将多模态 OCR 与图像重绘从主脱敏线程隔离
+# ---------------------------------------------------------------------------
+_VISION_POOL_WORKERS = max(1, min(4, (os.cpu_count() or 2) // 2))
+_VISION_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_VISION_POOL_WORKERS, thread_name_prefix="maskit-vision")
+
+
+# ---------------------------------------------------------------------------
+# 图片脱敏缓存（LRU）：基于图片 sha256 避免多轮会话重复 OCR 推理
+# ---------------------------------------------------------------------------
+_IMAGE_CACHE_MAX = max(16, int(os.environ.get("MASKIT_IMAGE_CACHE_SIZE", 128)))
+_IMAGE_CACHE = collections.OrderedDict()
+_IMAGE_CACHE_LOCK = threading.Lock()
+
+
+def _get_image_cache(key):
+    with _IMAGE_CACHE_LOCK:
+        if key in _IMAGE_CACHE:
+            res = _IMAGE_CACHE.pop(key)
+            _IMAGE_CACHE[key] = res
+            out = dict(res)
+            stats = dict(res.get("stats") or {})
+            stats["cached"] = True
+            out["stats"] = stats
+            return out
+    return None
+
+
+def _put_image_cache(key, res):
+    if not isinstance(res, dict) or res.get("mode") not in (MODE_REDACTED, MODE_CLEAN):
+        return
+    with _IMAGE_CACHE_LOCK:
+        if key in _IMAGE_CACHE:
+            _IMAGE_CACHE.pop(key)
+        elif len(_IMAGE_CACHE) >= _IMAGE_CACHE_MAX:
+            _IMAGE_CACHE.popitem(last=False)
+        _IMAGE_CACHE[key] = res
+
+
+def clear_cache():
+    """清空图片脱敏缓存（配置变更或测试重置时调用）。"""
+    with _IMAGE_CACHE_LOCK:
+        _IMAGE_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
 
@@ -153,6 +203,7 @@ def configure(ocr_endpoint=None, allow_remote=None, engine=None,
     路径与锁都不一样；让调用方把已归一化的值推进来，就不会有两份读盘逻辑慢慢漂开。
     """
     global _CONFIGURED_ENDPOINT, _ALLOW_REMOTE, _ENGINE_PREF, _COVER_ON_SCAN_FAIL
+    clear_cache()
     if ocr_endpoint is not None:
         _CONFIGURED_ENDPOINT = str(ocr_endpoint or "").strip()
     if allow_remote is not None:
@@ -441,15 +492,28 @@ class _Blocked(Exception):
 
 def detect_blocks(image_bytes, *, deadline=None, max_tokens=None):
     """按后端偏好产出 `(blocks, info)`。任何失败都抛 `_Blocked`。"""
+    if deadline is not None and deadline - time.monotonic() <= 0:
+        raise _Blocked(BLOCK_TIMEOUT)
     pref = engine_pref()
     import ocr_engine
     if pref in ("auto", "local"):
         ok, why = ocr_engine.available()
         if ok:
             try:
-                return _blocks_local(image_bytes, deadline)
+                fut = _VISION_POOL.submit(_blocks_local, image_bytes, deadline)
+                rem = (deadline - time.monotonic()) if deadline is not None else None
+                timeout = max(0.001, rem) if rem is not None else None
+                try:
+                    return fut.result(timeout=timeout)
+                except concurrent.futures.TimeoutError:
+                    fut.cancel()
+                    raise _Blocked(BLOCK_TIMEOUT)
             except ocr_engine.OcrError as e:
                 raise _Blocked(e.reason, e.detail)
+            except _Blocked:
+                raise
+            except Exception as e:
+                raise _Blocked(BLOCK_ENGINE_ERROR, type(e).__name__)
         if pref == "local":
             raise _Blocked(why or BLOCK_RUNTIME_MISSING)
     url, why = ocr_endpoint()
@@ -755,7 +819,26 @@ def _scan_fail_result(reason, cover, image_bytes, sid, tr, *, hint_name="", extr
 
 def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
                        max_tokens=None, allow_cover=False, cover_on_scan_fail=False):
-    """核心入口。返回 dict：
+    """核心入口。优先查验 LRU 脱敏缓存，未命中则执行完整脱敏管线。"""
+    if not image_bytes:
+        return {"mode": MODE_BLOCKED, "reason": BLOCK_DECODE, "stats": {},
+                "hit_count": 0, "bytes": b""}
+    cache_key = (hashlib.sha256(image_bytes).hexdigest(), bool(allow_cover), bool(cover_on_scan_fail))
+    cached = _get_image_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    res = _redact_image_bytes_uncached(image_bytes, sid, tr, deadline=deadline,
+                                       hint_name=hint_name, max_tokens=max_tokens,
+                                       allow_cover=allow_cover,
+                                       cover_on_scan_fail=cover_on_scan_fail)
+    _put_image_cache(cache_key, res)
+    return res
+
+
+def _redact_image_bytes_uncached(image_bytes, sid, tr, *, deadline=None, hint_name="",
+                                 max_tokens=None, allow_cover=False, cover_on_scan_fail=False):
+    """底层图像脱敏实现。返回 dict：
 
     - `mode`: `MODE_REDACTED` / `MODE_CLEAN` / `MODE_BLOCKED`
     - `bytes`: 新图（CLEAN 时为原字节，零触碰）

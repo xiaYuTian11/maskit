@@ -1,9 +1,9 @@
-import { ttf } from '@/lib/i18n'
+import { ttf, useI18n } from '@/lib/i18n'
 import { lazy, Suspense, useEffect } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { useAuthStore } from '@/stores/authStore'
-import { getShieldToken, getEngineState } from '@/lib/tauri'
+import { getShieldToken, getEngineState, setTrayLanguage } from '@/lib/tauri'
 import { isTauri, initEnginePort, readBrowserToken, saveBrowserToken } from '@/lib/shield-fetch'
 import { TokenGate } from '@/components/common/TokenGate'
 
@@ -19,6 +19,13 @@ const ExtensionPage = lazy(() => import('@/pages/Extension'))
 
 function App() {
   const { token, setToken, setEngineReady, setEngineError } = useAuthStore()
+  // 托盘菜单跟界面语言走：语言只存浏览器 localStorage，Rust 壳读不到，
+  // 必须由前端每次变化时下发（否则英文界面的用户看到的是中文托盘）。
+  const { lang } = useI18n()
+  useEffect(() => {
+    if (!isTauri()) return
+    void setTrayLanguage(lang).catch(() => {})
+  }, [lang])
 
   // 启动初始化：Tauri 下经 IPC 取 token + 引擎就绪状态（方案 §4.2/§4.7）
   useEffect(() => {

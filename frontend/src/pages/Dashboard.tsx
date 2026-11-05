@@ -412,7 +412,7 @@ export default function Dashboard() {
       fullValue: alertNum.full,
       isCompact: alertNum.isCompact,
       sub: [
-        { label: t('dash.blocked'), value: ((stats as Record<string, unknown> | undefined)?.by_type as Record<string, {events:number}> | undefined)?.BLOCK?.events ?? 0 },
+        { label: t('dash.blocked'), value: stats?.blocked ?? ((stats as Record<string, unknown> | undefined)?.by_type as Record<string, {events:number}> | undefined)?.BLOCK?.events ?? 0 },
         { label: t('dash.restoreFail'), value: stats?.restore_failed ?? 0, title: t('logs.unresolvedHint') },
         { label: t('dash.errors'), value: ((stats as Record<string, unknown> | undefined)?.by_type as Record<string, {events:number}> | undefined)?.ERR?.events ?? 0 },
         { label: t('dash.respWarn'), value: ((stats as Record<string, unknown> | undefined)?.by_type as Record<string, {events:number}> | undefined)?.SCAN_WARN?.events ?? 0 },

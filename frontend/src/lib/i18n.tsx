@@ -96,6 +96,7 @@ const zh: Record<string, string> = {
   'transport.executed': '上游可能已执行；不要据此盲目重试。',
   'transport.localPhase': '本地失败阶段',
   'detail.nerTiming': 'NER 观测（初始化 / 推理 / 预算等待）',
+  'detail.vision': '图片：已扫描 {n} 张 / 整图遮盖 {cover} 张 / 耗时 {ms}',
   'detail.transportObserved': '已观测 {n} 项',
   // 导航
   'nav.dashboard': '控制台',
@@ -1744,6 +1745,7 @@ const en: Record<string, string> = {
   'transport.executed': 'The upstream may have executed this request; do not blindly retry.',
   'transport.localPhase': 'Local failure phase',
   'detail.nerTiming': 'NER observations (initialization / inference / budget wait)',
+  'detail.vision': 'Images: {n} scanned / {cover} fully covered / {ms}',
   'detail.transportObserved': '{n} observed',
   'nav.dashboard': 'Dashboard',
   'nav.logs': 'Logs',

@@ -574,6 +574,11 @@ _SUMMARY_KEEP_FIELDS = frozenset({
     "egress_passed",
     # 耗时（毫秒）、前缀保真诊断、扫描范围计数
     "mask_ms", "upstream_ms", "first_byte_ms", "queue_wait_ms", "aux_wait_ms",
+    # 图片 OCR 脱敏（2026-11-05）：打码张数 / 自校验 / 退整行 / 整图遮盖 / 图片耗时。
+    # 全是计数与毫秒，不含图片内容；不进白名单的话默认上就是 summary 模式，
+    # 这些字段直接不落库——用户报「图片请求为什么被拦 / 为什么这么慢」时日志里什么都查不到。
+    "vision_masked", "vision_verified", "vision_lines_masked",
+    "vision_covered", "vision_ms",
     "body_rewritten", "first_diff_byte", "suffix_reused", "short_hits", "scan_scope",
     # 语义识别/审计阶段计数
     "ner_init_ms", "ner_infer_ms", "ner_budget_wait_ms", "ner_calls", "ner_windows",
@@ -2377,6 +2382,38 @@ def _audit_high_count(since_ts):
         return 0
 
 
+def _decision_counts(conn, since):
+    """BLOCK 事件按 `decision` 拆分：真阻断 vs 仅记录（flagged）。
+
+    为什么要拆：`by_type.BLOCK` 把两者混在一起，语义却相反 —— `blocked` 是
+    请求被拦下、没发出去；`flagged` 是出口复检抓到残留、但按「用户第一准则」
+    照常放行。面板此前直接拿 `BLOCK.events` 当「已阻断」展示，真机实测多日
+    879 条里只有 33 条是真阻断（虚高 26 倍）。
+
+    只扫 `type='BLOCK' AND ts >= since` 的行（当天几百条），不做全量当日扫描；
+    `decision` 缺失时按 `blocked` 计（写入侧对 `type=BLOCK` 缺省会补
+    `blocked=True`，两者口径一致）。
+    """
+    try:
+        rows = conn.execute(
+            "SELECT payload FROM events WHERE type='BLOCK' AND ts >= ?", (since,)
+        ).fetchall()
+    except Exception:
+        return 0, 0
+    blocked = flagged = 0
+    for row in rows:
+        payload = row[0] if row else None
+        try:
+            decision = json.loads(payload).get("decision") if payload else None
+        except Exception:
+            decision = None
+        if decision == "flagged":
+            flagged += 1
+        else:
+            blocked += 1
+    return blocked, flagged
+
+
 def today_stats(now=None):
     """按本地自然日聚合今日拦截统计（仪表盘数据源）。
 
@@ -2407,6 +2444,7 @@ def today_stats(now=None):
             "SELECT masks, rewritten, reused, diff_sum, diff_n FROM daily_prefix WHERE day=?",
             (day,),
         ).fetchone()
+        blocked, flagged = _decision_counts(conn, day_start)
     tokens = {}
     if token_row:
         tokens = {
@@ -2457,6 +2495,10 @@ def today_stats(now=None):
         "requests": requests,
         "alerts": alerts,
         "audit_high": audit_high,
+        # 真阻断与仅记录分开：混在一起会让「已阻断」虚高一个数量级
+        # （见 `_decision_counts`）。`by_type.BLOCK` 保留原口径不变。
+        "blocked": blocked,
+        "flagged": flagged,
         "tokens": tokens,
         "prefix": _prefix_payload(*(prefix_row or (0, 0, 0, 0, 0))),
         "by_type": by_type,
@@ -2508,6 +2550,7 @@ def stats_range(days=1, now=None):
             f"FROM daily_prefix WHERE day IN ({placeholders})",
             days_list,
         ).fetchone()
+        blocked, flagged = _decision_counts(conn, now - days * 86400)
     tokens = {
         "prompt": int(token_row[0] or 0),
         "completion": int(token_row[1] or 0),
@@ -2554,7 +2597,8 @@ def stats_range(days=1, now=None):
         "requests": requests,
         "alerts": alerts,
         "audit_high": audit_high,
-        "blocked": _ev("BLOCK"),
+        "blocked": blocked,
+        "flagged": flagged,
         "errs": _ev("ERR"),
         "scan_warns": _ev("SCAN_WARN"),
         "tokens": tokens,

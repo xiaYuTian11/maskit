@@ -441,6 +441,84 @@ class DataUrlTests(unittest.TestCase):
         self.assertEqual(status, vr.BLOCK_TIMEOUT)
 
 
+class ProxyVisionStatusTests(unittest.TestCase):
+    """代理层状态映射：**整图遮盖是成功**，扫描失败仍然是失败。
+
+    2026-11-05 事故：`transparent._vision_mask_media` 只认 `ST_MASKED`，其余一律
+    `raise _VisionBlocked(status)`。而「定位失败 → 整图遮盖」返回的是
+    `ST_COVER_UNLOCALIZED`（图已涂灰、像素零保留），于是图明明脱敏了，请求仍被
+    503 `mask_pipeline_failed` 打死——实测 10:06 / 10:08 / 10:09 / 10:10 / 10:11
+    连续 5 次，客户端重试 5 次全灭。
+
+    这里锁两层：① 已处理的 OK 状态不得被当成失败；② 真失败（OCR 超时）必须继续阻断。
+    """
+
+    def setUp(self):
+        tr._known_reset_for_tests()
+        # 必须用 `_new_session` 建会话：`mask_body` 依赖于 `fwd` 等键，空 dict 会让
+        # 判定抛 KeyError→MaskFailed，测试就变成在测另一条路径了。
+        tr._new_session(SID)
+        self.addCleanup(tr.sessions.clear)
+        self.addCleanup(vr.configure, "", False, "auto")
+
+    def _url(self, raw, mime="image/png"):
+        return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+
+    # Case G501 整体遮盖已在 _OK_STATUSES，不得抛 _VisionBlocked
+    def test_full_cover_is_success_not_block(self):
+        """定位失败 → 整图遮盖：必须放行，并在事件里与精确打码区分开。"""
+        _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),
+                                     text="手机：" + FAKE_PHONE, score=0.9)])
+        _patch_recognize(self, lambda payload, deadline=None: "")   # 复认永远失败
+        url = self._url(_png())
+        out, status = tr._vision_mask_media(url, SID)
+        self.assertEqual(status, "masked", "MASK_5031：整图遮盖必须放行（不得视为失败）")
+        self.assertNotEqual(out, url, "遮盖后的新图必须回写")
+        self.assertEqual(_pixel(base64.b64decode(out.split(",", 1)[1]), (200, 50)),
+                         vr._FILL, "整图必须是遮盖色")
+        masked, _verified, _lines, covered, ms = tr._take_vision_masks(SID)
+        self.assertEqual(masked, 1)
+        self.assertEqual(covered, 1, "整图遮盖要在 MASK 事件里区别于精确打码")
+        self.assertGreater(ms, 0.0, "图片耗时必须可见，否则只能拿 mask_ms 倒推")
+
+    # Case G501 精确打码不得被当成整图遮盖，否则日志里分不清两种处置
+    def test_precise_mask_is_not_counted_as_cover(self):
+        _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 300.0, 60.0),
+                                     text=FAKE_PHONE, score=0.9)])
+        _patch_recognize(self, _ok_recognize)
+        out, status = tr._vision_mask_media(self._url(_png()), SID)
+        self.assertEqual(status, "masked")
+        _masked, _verified, _lines, covered, _ms = tr._take_vision_masks(SID)
+        self.assertEqual(covered, 0, "精确打码不应计入整图遮盖")
+
+    # Case G502 非 OK 状态必须抛 _VisionBlocked（含 ocr_timeout）
+    def test_scan_failure_still_blocks(self):
+        """OCR 超时仍必须阻断（fail-closed 不得因为这次修复而放宽）。"""
+        def boom(image_bytes, *, deadline=None, max_tokens=None):
+            raise vr._Blocked(vr.BLOCK_TIMEOUT)
+
+        real = vr.detect_blocks
+        vr.detect_blocks = boom
+        self.addCleanup(setattr, vr, "detect_blocks", real)
+        with self.assertRaises(tr._VisionBlocked) as ctx:
+            tr._vision_mask_media(self._url(_png()), SID)
+        self.assertEqual(ctx.exception.reason, vr.BLOCK_TIMEOUT,
+                         "MASK_5032：扫描失败必须阻断（reason 精确为 ocr_timeout）")
+
+    # Case G503 summary 是默认日志模式，白名单漏了这几个键就等于查不到
+    def test_vision_fields_survive_summary_log_mode(self):
+        event_store.set_log_mode("summary")
+        self.addCleanup(event_store.set_log_mode, "detailed")
+        rec = {"type": "MASK", "ts": 1.0,
+               "vision_masked": 3, "vision_verified": 3, "vision_lines_masked": 0,
+               "vision_covered": 1, "vision_ms": 12345.6}
+        out = event_store.project_event_for_log(rec)
+        self.assertEqual(out.get("vision_masked"), 3, "MASK_5033：summary 模式丢了打码张数")
+        self.assertEqual(out.get("vision_covered"), 1, "MASK_5033：summary 模式丢了整图遮盖张数")
+        self.assertAlmostEqual(float(out.get("vision_ms") or 0.0), 12345.6,
+                               msg="summary 模式丢了图片耗时")
+
+
 class HttpBackendTests(unittest.TestCase):
     """HTTP 后端（兼容路径）：坐标来自 `<loc_*>` 标记，必须过覆盖率闸门。"""
 
@@ -956,7 +1034,10 @@ class ProxyPathTests(unittest.TestCase):
         self.assertNotEqual(self._leaf(out), self.url)
         self.assertTrue(self._leaf(out).startswith("data:image/png;base64,"))
         self.assertTrue(flag[0], "树变了却没置脏标记 → 请求体不会回写")
-        self.assertEqual(tr._take_vision_masks("ext:p1"), (1, 1, 0))
+        masked, verified, lines, covered, ms = tr._take_vision_masks("ext:p1")
+        self.assertEqual((masked, verified, lines, covered), (1, 1, 0, 0),
+                         "精确打码：1 张、自校验 1、无退整行、无整图遮盖")
+        self.assertGreater(ms, 0.0, "图片耗时必须随 MASK 事件上报")
 
     def test_clean_image_untouched(self):
         _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 120.0, 50.0),
@@ -981,6 +1062,38 @@ class ProxyPathTests(unittest.TestCase):
         out = tr._mask_tree(self.body, "ext:p4")
         self.assertEqual(self._leaf(out), self.url)
         self.assertEqual(calls, [])
+
+
+class ImageCacheTests(unittest.TestCase):
+    def setUp(self):
+        vr.clear_cache()
+        self.addCleanup(vr.clear_cache)
+
+    def test_image_cache_hit_bypasses_detection(self):
+        calls = _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 100.0, 40.0),
+                                            text="clean hello", score=0.9)])
+        raw = _png((200, 50))
+        res1 = vr.redact_image_bytes(raw, SID, tr)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(res1["mode"], vr.MODE_CLEAN)
+        self.assertFalse(res1.get("stats", {}).get("cached", False))
+
+        # 第二次请求相同图片：直接命中缓存，不调用 detect_blocks
+        res2 = vr.redact_image_bytes(raw, SID, tr)
+        self.assertEqual(len(calls), 1, "命中缓存必须跳过 detect_blocks")
+        self.assertEqual(res2["mode"], vr.MODE_CLEAN)
+        self.assertTrue(res2.get("stats", {}).get("cached", False))
+
+    def test_clear_cache_forces_recalculation(self):
+        calls = _patch_blocks(self, [E.Block(quad=(10.0, 10.0, 100.0, 40.0),
+                                            text="clean hello", score=0.9)])
+        raw = _png((200, 50))
+        vr.redact_image_bytes(raw, SID, tr)
+        self.assertEqual(len(calls), 1)
+
+        vr.clear_cache()
+        vr.redact_image_bytes(raw, SID, tr)
+        self.assertEqual(len(calls), 2, "清空缓存后必须重新计算")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,16 @@ export async function getShieldToken(): Promise<string> {
   return token || ''
 }
 
+/**
+ * 把当前界面语言下发给 Rust 壳，用于托盘菜单文案（zh / en）。
+ *
+ * 语言只存在浏览器 `localStorage('dm-lang')`，壳层自己读不到 —— 不主动下发的话，
+ * 界面切英文后托盘会一直是中文。失败不抛：托盘停在上一套文案远比阻塞启动好。
+ */
+export async function setTrayLanguage(lang: string): Promise<void> {
+  await invoke('set_tray_language', { lang })
+}
+
 export async function getEngineState(): Promise<EngineState> {
   return await invoke<EngineState>('engine_state')
 }

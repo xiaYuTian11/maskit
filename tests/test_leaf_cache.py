@@ -90,6 +90,80 @@ class _LeafCacheIsolation(unittest.TestCase):
         tr._leaf_cache_clear()
 
 
+class CrossRequestReuseTests(_LeafCacheIsolation):
+    """客户端每轮重发整段历史（新 sid、正文是原文）：缓存必须跨请求命中。
+
+    为什么单独立一组：`_new_session` 的 `fwd`/`rev` 是空的，而命中校验原先只查
+    会话表。客户端回传的是**原文**（响应已被还原），历史里没有占位符，
+    `_seed_known` 也就灌不进任何映射 —— 于是每个请求都是新会话、每条历史叶子
+    全部 miss，缓存形同不存在，整段历史每轮重跑 20~50 遍正则。
+
+    2026-11 真机数据：9055 个 sid 每个只对应 1 条 MASK，3MB 请求体 p50 脱敏
+    10~14 秒，慢请求的 NER 缓存未命中 p50 达 460 条。
+    """
+
+    def test_second_request_with_new_sid_hits(self):
+        text = "联系人手机 %s 的邮箱 %s" % (_phone(11), _fake_email())
+        first = tr.mask(text, "req-1")
+        self.assertGreater(len(tr._LEAF_CACHE), 0, "用例前提：第一条应当入库")
+        miss_before = tr._LEAF_CACHE_STATS["miss"]
+        hit_before = tr._LEAF_CACHE_STATS["hit"]
+        second = tr.mask(text, "req-2")          # 新 sid，客户端只带原文
+        self.assertEqual(second, first, "跨请求命中必须与冷跑逐字节一致")
+        self.assertEqual(tr._LEAF_CACHE_STATS["miss"], miss_before,
+                         "新请求没有命中缓存：历史叶子被整段重算")
+        self.assertGreater(tr._LEAF_CACHE_STATS["hit"], hit_before)
+
+    def test_cross_request_hit_is_restorable_in_new_session(self):
+        text = "联系人手机 %s" % _phone(12)
+        tr.mask(text, "req-a")
+        hit_before = tr._LEAF_CACHE_STATS["hit"]
+        again = tr.mask(text, "req-b")
+        self.assertGreater(tr._LEAF_CACHE_STATS["hit"], hit_before,
+                           "用例前提：第二个请求必须真的命中缓存（否则只是两条冷跑）")
+        self.assertEqual(tr.restore(again, "req-b"), text,
+                         "跨请求命中的占位符在新会话里还原不了")
+
+    def test_cross_request_hit_registers_token_and_known_index(self):
+        """命中只重建文本不够：会话 `rev` 与 `_KNOWN` 索引都要跟着登记。
+
+        前者决定响应侧能否还原，后者决定「同一值在本请求其它位置裸出现」是否
+        仍会被遮住 —— 少任一条，命中就成了漏码路径。
+        """
+        phone = _phone(13)
+        text = "联系人手机 %s" % phone
+        masked = tr.mask(text, "req-c")
+        tokens = tr._PLACEHOLDER_RX.findall(masked)
+        self.assertTrue(tokens, "用例前提：手机号应当被打码")
+
+        s = tr.sessions["req-d"] if "req-d" in tr.sessions else None
+        self.assertIsNone(s)
+        hit_before = tr._LEAF_CACHE_STATS["hit"]
+        again = tr.mask(text, "req-d")
+        self.assertGreater(tr._LEAF_CACHE_STATS["hit"], hit_before,
+                           "用例前提：第二个请求必须真的命中缓存")
+        s = tr.sessions["req-d"]
+        for tok in tr._PLACEHOLDER_RX.findall(again):
+            self.assertIn(tok, s["rev"], "命中后会话 rev 未登记该占位符")
+            self.assertEqual(s["rev"][tok], phone)
+
+    def test_stats_snapshot_exposes_hit_rate_without_plaintext(self):
+        """命中率必须能对外报出，且快照里不得出现原文。
+
+        `engine-runtime.json` 的 `leaf_cache` 段是判断「长会话是否仍在整段重算」
+        的唯一直接指标；它曾经只自增不导出，于是缓存空转了几个月没人看见。
+        """
+        phone = _phone(14)
+        tr.mask("联系人手机 %s" % phone, "stat-a")
+        tr.mask("联系人手机 %s" % phone, "stat-b")
+        snap = tr._leaf_cache_stats()
+        self.assertTrue(snap["enabled"])
+        self.assertGreater(snap["hit"], 0)
+        self.assertEqual(snap["hit_rate"],
+                         round(snap["hit"] / (snap["hit"] + snap["miss"]), 4))
+        self.assertNotIn(phone, json.dumps(snap, ensure_ascii=False))
+
+
 class CacheCorrectnessTests(_LeafCacheIsolation):
     def test_second_turn_is_byte_identical_and_hits(self):
         sid = "lc-turn"
@@ -271,7 +345,8 @@ class CacheSelfCheckTests(_LeafCacheIsolation):
         """塞一条**通过校验但内容错误**的条目，模拟「代号漏了一项」的失效逻辑缺陷。"""
         key = tr._leaf_cache_key(text)
         with tr._LEAF_CACHE_LOCK:
-            tr._LEAF_CACHE[key] = (tr._leaf_cache_gen(), len(text), wrong_text, [])
+            tr._LEAF_CACHE[key] = (tr._leaf_cache_gen(), len(text), wrong_text, [],
+                                   False, None)
         # 让下一次调用正好落在抽样点上
         tr._LEAF_CACHE_TICK[0] = tr._LEAF_CACHE_VERIFY_EVERY - 1
 

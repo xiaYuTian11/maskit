@@ -291,7 +291,10 @@ def _run_engine(engine, image_bytes, deadline):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise OcrError(REASON_TIMEOUT)
-        if not _SEM.acquire(timeout=min(QUEUE_WAIT_S, remaining)):
+        # 上层给了明确 deadline（如 _VISION_BUDGET_S 60s 预算）时，等待时间以 remaining 为准，
+        # 绝不用固定的 QUEUE_WAIT_S 盲目掐断上层预算；无 deadline 时仍保留 QUEUE_WAIT_S 防死挂。
+        wait_timeout = max(0.01, remaining)
+        if not _SEM.acquire(timeout=wait_timeout):
             raise OcrError(REASON_BUSY)
     else:
         if not _SEM.acquire(timeout=QUEUE_WAIT_S):

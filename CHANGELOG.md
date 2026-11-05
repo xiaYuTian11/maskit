@@ -9,6 +9,10 @@
 ### 更新摘要 / Summary
 - 对话里打码过的名字，换个位置再出现也会被打码，不再以原文发出去。
 - Names masked earlier in a conversation stay masked wherever they reappear, instead of going out as plaintext.
+- 长对话（尤其是编程助手类客户端）每轮不再把整段历史重新打码一遍，回复明显变快，打码与还原结果不变。
+- Long conversations with coding agents no longer re-mask the entire history every turn — replies get faster, masking and restoration unchanged.
+- 带图片的对话不再因为图片打码失败而整条发不出去，多图请求也放宽了处理时间。
+- Conversations with images no longer fail outright when image masking is slow, and multi-image requests get more time.
 
 ### 修复
 - 修复同一对话里已打码的值在无姓名语境的位置被当成误报放行、原文随请求发出的问题：已确认敏感的值在其后出现时直接沿用同一占位符，不再逐处重新判断；请求照常发出，不新增任何阻断。
@@ -19,6 +23,24 @@
 - Fixed several UI issues: auto-recovery time shown as 1970, stats load failures shown as empty data, silent copy failures in some environments, and the extension address copied with a fixed port; the tray no longer shows a switched state when toggling the proxy failed.
 - 关于页拉取更新说明增加超时与失败回退，网络不佳时不再长时间空白。
 - The About page now times out and falls back when fetching release notes instead of staying blank on poor networks.
+- 修复长对话每轮重复处理整段历史、大请求可慢到十几秒的问题：已处理过的历史直接复用上次结果，打码与还原逐字一致。
+- Fixed long conversations re-processing their entire history on every request, which could slow a large request to over ten seconds: processed history now reuses its previous result, with masking and restoration byte-identical.
+- 修复首页「已阻断」把仅记录的风险事件也算成拦截、数字虚高一个数量级的问题。
+- Fixed the home page's blocked count including flagged-only events and overstating blocks by an order of magnitude.
+- 修复用 IPv6 回环地址打开控制台时被拒绝的问题。
+- Fixed the console rejecting requests when opened through the IPv6 loopback address.
+- 修复界面切英文后托盘菜单仍是中文的问题。
+- Fixed the tray menu staying in Chinese after switching the interface to English.
+- 修复带图片的对话里，图片已经涂掉却整条请求报错失败的问题：现在照常发出，多图请求也放宽了处理时间，不再因为超时被拦。
+- Fixed image-bearing conversations failing with an error even though the images had already been covered: the request now goes through, and multi-image requests get more processing time instead of being blocked by a timeout.
+
+### 优化
+- 运行指标新增缓存命中率，自检与面板能直接看出长对话是否还在重复处理历史。
+- Runtime metrics now include the cache hit rate, so self-check and the panel can show whether long conversations are still being re-processed.
+- 升级响应解压组件到修复版本，并给诊断日志加上时间，排查时能定位到具体时刻。
+- Upgraded the response decompression component to a patched release and added timestamps to diagnostic logs.
+- 面板端口设成桌面端不支持的取值时，界面直接说明原因和替代做法，不再只是连不上。
+- When the panel port is set to a value the desktop app cannot use, it now explains why and how to work around it instead of just failing to connect.
 
 ## [0.15.1] - 2026-11-04
 

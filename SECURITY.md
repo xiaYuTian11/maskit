@@ -192,6 +192,7 @@ Data Maskit 是一个**本地脱敏代理**：拦截本机 LLM API 请求，敏�
 | `MASKIT_OCR_MODEL` | `xiaomi-ocr-0` | OCR 请求里的模型名（走兼容端点/自建网关时换成视觉模型 id） | 与端点/密钥同属一组部署事实；只从环境变量读 |
 | `MASKIT_OCR_API_KEY` | 无 | OCR 服务的 Bearer 密钥（自建网关 / 兼容端点需要时） | **只从环境变量读**：不进 config.json、不进 `/api/config`、不进事件库（与上游 API key 同级） |
 | `MASKIT_OCR_ENDPOINT` | `http://127.0.0.1:8082/v1/chat/completions` | 覆盖配置项 `ocr_endpoint`（图片/文档/PDF 脱敏用的本机 OCR 地址），优先级高于 config.json | **只接受环回地址**（`localhost` / `127.0.0.0/8` / `::1`）；填远端主机时该能力被整体禁用——这个请求的载荷是**图片原件**，允许外发等于开一条绕开脱敏管线的通道 |
+| `MASKIT_IMAGE_CACHE_SIZE` | `128` | 图片脱敏结果 LRU 缓存条数上限（基于图片 SHA-256 避免多轮会话重复 OCR 推理） | 缓存键为图像 SHA-256 与遮盖参数，仅保留脱敏后的安全图像字节，0ms 秒级命中，防多模态历史会话雪崩 |
 | `MASKIT_ACCESS_LOG` | `0` | 打开 werkzeug 逐请求访问日志 | 默认关闭：面板每 2.5s 轮询一次，开启后 `engine-stdout.log` 会快速增长 |
 | `MASKIT_DIAG_LOG` | 打包态开启；源码态/测试关闭 | 把 `[panel]` / `[engine]` / `[proxy]` 诊断行追加到数据目录 `engine.log`（超 2MB 轮转一份 `.1`）。存在的理由：引擎被壳层 `taskkill /F /T` 强杀，`engine-stdout.log` 的块缓冲来不及 flush，启动失败现场会整片消失 | SHIELD 事件行（含 `req_preview` / `original` 明文）**永不落盘**，只收诊断前缀；诊断包会带走这个文件，改口径时需同步隐私声明 |
 | `MASKIT_START_READY_TIMEOUT` | `60` | 代理冷启动就绪等待上限（秒） | 只影响启动判定 |
@@ -371,7 +372,7 @@ NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的固定�
 | 引擎缺 Pillow / `visual_redactor` / `pdf_redactor` | 同上，`pillow_missing` / `visual_redactor_unavailable` / `pdf_dependency_missing` |
 | 单张图超过 8MB 或 16MP（含解压炸弹，解码前即拦），或文档内嵌图超单次预算（40s）、PDF 超页数/像素/预算（120s） | 同上，`image_too_large` / `ocr_budget_exhausted` / `pdf_too_many_pages` / `pdf_pixel_budget` |
 | 本机 OCR 组件未安装/损坏、推理期崩溃、排队超时（≤`min(4, CPU/2)` 个并发，排队上限 10s） | 同上，`ocr_runtime_missing` / `ocr_engine_error` / `ocr_busy`。组件崩溃只阻断当前请求，不影响引擎与文本脱敏 |
-| 认识文字但拿不到坐标 | 独立图片与文档内嵌图阻断（`geometry_unavailable`）；仅 PDF 页退化为**整页遮盖**并计数（整份文档阻断的代价更高） |
+| 认识文字但拿不到坐标（裁图复认失败） | 代理链路与扩展上传的**独立图片**、PDF 页：**整图遮盖**（像素零保留）并计数 `vision_covered`，请求照常放行；**文档内嵌图例外**（`mask_embedded_image_bytes` 不传 `allow_cover`）→ 仍阻断 `geometry_unavailable`（换位图会破坏文档结构，遮盖语义另定）。已确认图里有敏感内容、只是画不准框，遮整图比阻断更彻底（2026-11-03 定案；2026-11-05 修正代理链路把“已遮盖”当失败的错误） |
 | 矢量图（EMF/WMF/SVG）/ GIF / 损坏图片 | 文档内嵌图换成占位图（像素零保留、结构不坏）；独立图片与代理解析阻断。均计数，不静默跳过 |
 
 **本地 OCR 引擎（默认路径，零出网）**
@@ -381,7 +382,7 @@ NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的固定�
 
 **打码粒度与"不误伤"**
 
-只涂**敏感子串本身**（实体级），不是整行：实测整行遮会把"手机："标签一起盖掉。定位靠「东亚宽度加权 + 0.5em pad + 裁图复认」，复认失败退整行框（计数 `vision_lines_masked`），再失败**阻断**（不再有整图遮盖这条默认退路）。实测在 1200×760 的客户列表截图上，遮住的面积占 **3.59%**，表头/姓名/部门仍完整可读。
+只涂**敏感子串本身**（实体级），不是整行：实测整行遮会把"手机："标签一起盖掉。定位靠「东亚宽度加权 + 0.5em pad + 裁图复认」，复认失败退整行框（计数 `vision_lines_masked`），再失败**整图遮盖**（计数 `vision_covered`，请求照常放行；文档内嵌图仍阻断）——**扫描本身失败**（OCR 超时/未就绪/解码失败）才是阻断，两者不要混为一谈。实测在 1200×760 的客户列表截图上，遮住的面积占 **3.59%**，表头/姓名/部门仍完整可读。
 
 **自建网关例外（`ocr_allow_remote`，默认 `false`）**
 
@@ -402,9 +403,11 @@ NER 是概率模型，`客户陈建国` 这类「角色词 + 姓名」的固定�
 
 **实测参考（2026-10-31，900×380 合成图 / 1000×900 密集 14 行图）**：`deepseek-v4-flash` 约 6s / 8.3s（满页 4096 token 输出规整）；`gemini-3.8-flash` 约 6~14s 但标记不全；`auto` 与 `gemini-4-argon` 在该网关上分别 502 / 403。单图超时 20s、PDF 页预算 6144 token 即按这些实测值定的。
 
-**可观测性**：代理链路每轮打码的张数进 MASK 事件 `vision_masked`；扩展链路的内嵌图进 `dialog`
-的「内嵌图 N 张：打码 X / 遮盖 Y」，PDF 进「PDF 已逐页扫描」；所有阻断进 `BLOCK` 事件
+**可观测性**：代理链路每轮的图片数进 MASK 事件 `vision_masked`、其中整图遮盖的张数 `vision_covered`、图片链路总耗时 `vision_ms`（毫秒，与 `mask_ms` 区分：后者含文本脱敏）——「这次请求为什么慢 / 为什么被拦」靠这三个字段直接定位，不必再拿总量倒推；扩展链路的内嵌图进 `dialog`
+的「内嵌图 N 张：打码 X / 遮盖 Y」（同样带 `vision_covered` / `vision_ms`），PDF 进「PDF 已逐页扫描」；所有阻断进 `BLOCK` 事件
 （`block_source=ocr`）。扫描过且干净的图片**不**计入 `media_skipped`（那不是豁免）。
+
+**预算**：代理链路里一次请求的**所有**图片共用 60s 预算（2026-11-05 由 25s 上调：实测 3 张 1440×1000 网页截图 `mask_ms` 落在 23.8~25.5s，密集表格图单张 10.1s、同一批用例 P95 4.4s，旧值已无余量、逐次在成功与 `ocr_timeout` 之间抖动）；单张图另受 20s 单次调用与 32s（含一次重试）约束。超预算仍阻断，不放行未扫过的字节。
 
 **依赖**：`pillow`（像素操作）、`pypdfium2`（PDF 渲染，Apache-2.0 / PDFium BSD）、
 `pypdf`（PDF 合并，BSD-3）——三者都是宽松许可；**不允许**引入 AGPL 渲染器。

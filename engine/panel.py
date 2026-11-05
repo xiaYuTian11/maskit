@@ -484,12 +484,35 @@ def _api_error_handler(e):
     return e
 
 
+def _host_allowed(raw):
+    """Host 头是否属于本机回环白名单（纯函数，不碰 request，便于单测）。
+
+    IPv6 字面量在 Host 头里是带方括号的：`[::1]:5801`。直接 `split(":", 1)`
+    会得到 `[`，于是用 `http://[::1]:5801` 访问面板的请求全部 403
+    （用户视角就是「IPv6 回环打不开，IPv4 正常」）。
+    只放行 `::1`（与 127.0.0.1 等价的回环），不扩大白名单。
+    """
+    host = (raw or "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        if end < 0:
+            return False
+        # 方括号后只允许空或 `:port`：`[::1]extra` 这种拼接不是合法 Host，
+        # 若只取方括号内会被截成 `::1` 而误放行。
+        rest = host[end + 1:]
+        if rest and not rest.startswith(":"):
+            return False
+        host = host[1:end]
+    else:
+        host = host.split(":", 1)[0]
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def _host_ok():
     # 远程模式（Docker）下 Host 是服务器 IP/域名，无法枚举白名单，交给 token 把关
     if REMOTE_MODE:
         return True
-    host = (request.host or "").split(":", 1)[0].lower()
-    return host in {"127.0.0.1", "localhost"}
+    return _host_allowed(request.host)
 
 
 def _trust_proxy_enabled():
@@ -833,7 +856,11 @@ def _persist_diag_line(line):
             except Exception:
                 pass
             with open(path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+                # 时间戳必须写在落盘行首：这条日志是「隔几天回来查发生了什么」的
+                # 唯一现场，而此前只有内容没有时刻（实测 12KB 日志无法定位到分钟）。
+                # 只加在文件层，内存 `log_buf` / `/api/logs` 的响应不变，
+                # 前端解析与 tail 通道都不受影响。
+                f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), line))
     except Exception:
         pass
 
@@ -7073,6 +7100,12 @@ _EXPORT_KEEP_FIELDS = {
     # 媒体/内联二进制整块豁免计数（2026-10-29）：与 signed_blocks_skipped 同理，
     # 豁免是漏检路径，导出里必须看得见。
     "media_skipped",
+    # 图片 OCR 脱敏（2026-11-05）：张数 / 自校验 / 退整行 / 整图遮盖 / 图片耗时。
+    # 与 media_skipped 同理：图片处置结论是“这条到底遮了没”的一部分，
+    # 拿导出复盘时缺了它，就只能看到命中 0 条而看不出“图里扫过或整图涂了”。
+    # 全是计数与毫秒，不含图片内容与任何原文。
+    "vision_masked", "vision_verified", "vision_lines_masked",
+    "vision_covered", "vision_ms",
     # ---- 审计结果（计数/枚举，不含正文）----
     # `audit_scan_truncated` 是审计结论本身（“没扫完整包”），与 NER 的 truncated 同理。
     "audit_ms", "audit_scan_bytes", "audit_scan_truncated",
@@ -7597,7 +7630,8 @@ def api_ext_mask():
             _media = tr._take_media_skips(sid)
             # 图片像素打码张数：扩展的文本请求里也可能带 data URL 图片（_mask_tree 同一个钩子），
             # 必须一并取走——否则它会留在会话里，串到下一次代理请求的计数上。
-            _vision, _vision_verified, _vision_lines = tr._take_vision_masks(sid)
+            _vision, _vision_verified, _vision_lines, _vision_covered, _vision_ms = \
+                tr._take_vision_masks(sid)
         hit_count = len(s.get("last_hits") or set())
         # 统一检测口径（§B4）：扩展链路与代理路径**同源**，否则扩展用户永远只看到“0 命中”
         _report = inspection.report_for_mask(changed=bool(hit_count) or _vision > 0,
@@ -7632,8 +7666,12 @@ def api_ext_mask():
                      **(({"signed_blocks_skipped": _signed} if _signed else {})),
                      # 媒体整块豁免计数（与代理链路同字段名）：扩展链路也要看得见
                      **(({"media_skipped": _media} if _media else {})),
-                     # 图片像素打码张数（与代理链路同字段名）
+                     # 图片像素打码张数（与代理链路同字段名）。
+                     # `vision_covered` = 其中整图遮盖的张数（定位不全但已涂灰），
+                     # `vision_ms` = 图片总耗时：扩展用户排障时不能只看 mask_ms 总量。
                      **(({"vision_masked": _vision} if _vision else {})),
+                     **(({"vision_covered": _vision_covered} if _vision_covered else {})),
+                     **(({"vision_ms": _vision_ms} if _vision_ms else {})),
                      # warn 三态（B-4）：与代理链路同口径，取走即清
                      **(({"warned": _warned_n, "warned_labels": _warned_labels}
                         if _warned_n else {})),
@@ -8337,7 +8375,12 @@ def api_ext_mask_image():
                      req_preview="Uploaded image: %s (%d bytes)" % (mode, len(raw_bytes)),
                      mask_ms=round((time.perf_counter() - t0) * 1000, 1),
                      # 自校验/退整行/后端：用户看到一张被涂的图时，要能查到"涂得准不准"。
-                     **({"vision_verified": vstats.get("verified", 0),
+                     # 张数与遮盖数用与代理链路同名字段：扩展上传的单图也要进同一套统计，
+                     # 否则「已脱敏图片」只算代理链路，扩展用户看到的是 0。
+                     **({"vision_masked": 1,
+                         "vision_covered": 1 if vstats.get("covered") else 0,
+                         "vision_ms": round((time.perf_counter() - t0) * 1000, 1),
+                         "vision_verified": vstats.get("verified", 0),
                          "vision_lines_masked": vstats.get("line_fallback", 0),
                          "vision_backend": vstats.get("backend", "")}
                         if vstats else {}))
@@ -10015,6 +10058,21 @@ def _project_engine_metrics(eng):
     }
     if eng.get("ner_error"):
         out["ner_error"] = _scrub_text(eng["ner_error"], 120)
+    # 叶子结果缓存：命中率是「长会话是否仍在整段重算」的唯一直接指标。
+    # 只放计数与容量，无自由文本（与 `ner.cache` 同口径，不需要 `_scrub_text`）。
+    lc = eng.get("leaf_cache")
+    if isinstance(lc, dict):
+        out["leaf_cache"] = {
+            "enabled": bool(lc.get("enabled")),
+            "hit": int(lc.get("hit") or 0),
+            "miss": int(lc.get("miss") or 0),
+            "hit_rate": lc.get("hit_rate"),
+            "size": int(lc.get("size") or 0),
+            "chars": int(lc.get("chars") or 0),
+            "max": int(lc.get("max") or 0),
+            "chars_max": int(lc.get("chars_max") or 0),
+            "poison": int(lc.get("poison") or 0),
+        }
     return out
 
 
