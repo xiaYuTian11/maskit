@@ -12,7 +12,14 @@ import inspect
 from importlib.metadata import PackageNotFoundError, version
 import weakref
 
-SUPPORTED_VERSION = "12.2.3"
+# 已通过「接口签名探测 + 真驱动取消测试」双重验证的版本。新版本接入步骤：
+# ① 跑 transport_capabilities 的签名探测（下方 observation/stream_cancellation）；
+# ② 跑 tests/test_stream_cancellation.py 与 tests/test_native_work_cancellation.py
+#   （真实 HttpLayer/HttpStream 驱动，无 dispatch mock）；
+# ③ 全绿后才能加进集合。12.3.1 于 2026-11-05 按此流程验证：五个接口签名与
+#   ErrorCode 枚举值（1/6/8/10/11）均与 12.2.3 逐项一致，两个测试文件全绿。
+# @guard G602 版本门只放行双验证过的版本，不得改成无条件放行
+SUPPORTED_VERSIONS = frozenset({"12.2.3", "12.3.1"})
 _CONTROL_REASON = (
     "Transport control unavailable: context/pending connection isolation and "
     "targeted tunnel cancellation have not passed the compatibility gate."
@@ -32,7 +39,7 @@ def transport_capabilities() -> dict:
     except PackageNotFoundError:
         installed = "unavailable"
     observation = stream_cancellation = False
-    if installed == SUPPORTED_VERSION:
+    if installed in SUPPORTED_VERSIONS:
         try:
             from mitmproxy.proxy.layers.http import HttpLayer, HttpStream, RequestProtocolError, ErrorCode
             observation = (
@@ -59,10 +66,10 @@ def transport_capabilities() -> dict:
         "deadlines": False,
         "http1_reuse_policy": False,
         "observation": observation,
-        "observation_reason": None if observation else "Requires mitmproxy 12.2.3 observation interfaces.",
+        "observation_reason": None if observation else "Requires mitmproxy 12.2.3/12.3.1 observation interfaces.",
         "stream_cancellation": stream_cancellation,
         "stream_cancellation_reason": None if stream_cancellation else (
-            "Requires mitmproxy 12.2.3 HttpStream cancellation interfaces; public hooks "
+            "Requires mitmproxy 12.2.3/12.3.1 HttpStream cancellation interfaces; public hooks "
             "alone are incomplete while hooks are paused or the response hook has run."
         ),
     }
@@ -130,7 +137,7 @@ def install(observer) -> bool:
     original_child = HttpLayer.event_to_child
     original_stream = HttpStream.handle_event
     local_stream = HttpStream.__dict__.get("handle_event", _INHERITED)
-    # In 12.2.3 H2 resets other than CANCEL/HTTP_1_1_REQUIRED, GOAWAY, and
+    # In 12.2.3/12.3.1 H2 resets other than CANCEL/HTTP_1_1_REQUIRED, GOAWAY, and
     # connection loss use GENERIC_CLIENT_ERROR. Do not parse their remote message.
     # EOM/END_STREAM and PASSTHROUGH_CLOSE are normal half-close, not cancellation.
     cancellation_codes = {

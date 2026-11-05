@@ -33,6 +33,8 @@
 - Fixed the tray menu staying in Chinese after switching the interface to English.
 - 修复带图片的对话里，图片已经涂掉却整条请求报错失败的问题：现在照常发出，多图请求也放宽了处理时间，不再因为超时被拦。
 - Fixed image-bearing conversations failing with an error even though the images had already been covered: the request now goes through, and multi-image requests get more processing time instead of being blocked by a timeout.
+- 损坏或不完整的压缩响应不再被部分放行，而是按失败处理并记录原因；同时升级代理内核修复安全漏洞。
+- Corrupt or truncated compressed responses now fail outright instead of being partially accepted; the proxy core was upgraded to patch a security issue.
 
 ### 优化
 - 运行指标新增缓存命中率，自检与面板能直接看出长对话是否还在重复处理历史。

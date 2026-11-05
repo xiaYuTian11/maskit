@@ -1,4 +1,4 @@
-"""12.2.3 real HttpLayer/HttpStream cancellation; no sockets or mocks of dispatch."""
+"""12.2.3/12.3.1 real HttpLayer/HttpStream cancellation; no sockets or mocks of dispatch."""
 import asyncio
 import unittest
 from types import SimpleNamespace
@@ -84,7 +84,7 @@ class HTTPDriver:
         return output
 
 
-@unittest.skipUnless(adapter.transport_capabilities()["stream_cancellation"], "requires mitmproxy 12.2.3")
+@unittest.skipUnless(adapter.transport_capabilities()["stream_cancellation"], "requires mitmproxy 12.2.3/12.3.1")
 class StreamCancellationTests(unittest.TestCase):
     def setUp(self):
         self.signals = []
@@ -239,7 +239,7 @@ class StreamCancellationTests(unittest.TestCase):
         self.assertIsInstance(driver.layer.streams[1]._paused_event_queue[0], RequestProtocolError)
 
 
-@unittest.skipUnless(adapter.transport_capabilities()["stream_cancellation"], "requires mitmproxy 12.2.3")
+@unittest.skipUnless(adapter.transport_capabilities()["stream_cancellation"], "requires mitmproxy 12.2.3/12.3.1")
 class AsyncHookCompletionTests(unittest.IsolatedAsyncioTestCase):
     async def test_woken_request_hook_returns_normally_then_framework_completes(self):
         wake = asyncio.Event()

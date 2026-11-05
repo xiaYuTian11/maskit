@@ -43,7 +43,7 @@ from tests.test_stream_cancellation import HTTPDriver  # noqa: E402
 
 REQUIRES_STREAM_CANCELLATION = unittest.skipUnless(
     cp.transport_capabilities()["stream_cancellation"],
-    "requires mitmproxy 12.2.3 HttpStream cancellation interfaces",
+    "requires mitmproxy 12.2.3/12.3.1 HttpStream cancellation interfaces",
 )
 
 
@@ -203,7 +203,7 @@ class UpstreamIdleAttributionTests(unittest.TestCase):
 
     实测依据（2026-10-09 本机事件库）：当天 6 例 605~676 s 的 `client_disconnected`
     只收到 1~9 个数据块（最少 569 字节），即上游首包后彻底静默；mitmproxy 的
-    `tcp_timeout`（12.2.3 默认 600 s）取消的是**客户端**读任务，文案与真断开完全
+    `tcp_timeout`（12.2.3/12.3.1 默认 600 s）取消的是**客户端**读任务，文案与真断开完全
     相同，于是旧口径把责任判给了没做错任何事的客户端。另有 4 例 646~1066 s 是
     195~876 块的真·长生成，那种确实是客户端先放弃，仍判 client。
     """

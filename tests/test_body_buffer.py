@@ -45,6 +45,7 @@ class BodyBufferTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 decode_body(b"not a compressed body", kind, 1024)
 
+    # Case G601 解码语义与 mitmproxy 同源：截断/尾随垃圾/拼接帧的处置必须逐项一致
     def test_first_frame_trailing_and_truncated_semantics_match_mitmproxy(self):
         # These differences between codecs are intentional mitmproxy semantics:
         # gzip is lenient / first-member only; deflate requires EOF; br is strict;
@@ -58,7 +59,8 @@ class BodyBufferTests(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             decode_body(data, kind, 100)
                     else:
-                        self.assertEqual(decode_body(data, kind, 100), expected)
+                        self.assertEqual(decode_body(data, kind, 100), expected,
+                                         "MASK_5041：decode_body 与 mitmproxy 语义分叉")
 
     def test_zstd_unknown_size_and_concatenated_frames_are_limited(self):
         compressor = zstandard.ZstdCompressor(write_content_size=False)

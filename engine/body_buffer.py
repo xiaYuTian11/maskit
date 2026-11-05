@@ -3,14 +3,16 @@
 Only supported HTTP content codings are accepted. No fallback invokes an unbounded
 codec. Callers bound wire input separately and run this helper off the event loop.
 Returned output is at most ``limit``; transient output is at most two such buffers
-plus Brotli's <=64 KiB native output-chunk slack. Zstandard's native window is
-capped at 32 MiB (Brotli's standard maximum is 16 MiB).
+plus Brotli's <=64 KiB native output-chunk slack. The zstd codec decodes via
+backports.zstd (mitmproxy 12.3.1's own zstd backend, so codec semantics stay
+identical to the proxy's), with its native window capped at 32 MiB (Brotli's
+standard maximum is 16 MiB).
 """
 import io
 import zlib
 
 import brotli
-import zstandard
+from backports import zstd
 
 
 MAX_WINDOW_BYTES = 32 * 1024 * 1024
@@ -58,11 +60,18 @@ def decode_body(raw: bytes, content_encoding: str, limit: int) -> bytes:
             except zlib.error:
                 return _inflate(raw, limit, -zlib.MAX_WBITS, complete=True)
         if kind == "zstd":
-            decoder = zstandard.ZstdDecompressor(max_window_size=MAX_WINDOW_BYTES)
-            with decoder.stream_reader(io.BytesIO(raw), read_across_frames=True) as reader:
-                # read(size), unlike read()/decompress(), bounds output even for
-                # frames with no declared content size and concatenated frames.
-                return _check(reader.read(limit + 1), limit)
+            # @guard G601 与 mitmproxy 12.3.1 同库（backports.zstd）同语义：截断流与
+            # 尾随垃圾必须报错（zstandard 的 stream_reader 会宽容收下部分输出），
+            # 拼接帧完整穿越。旧 zstandard 实现对这些边界与 mitmproxy 12.3.1 分叉，
+            # 语义对齐测试（test_body_buffer）已抓过这个漂移。
+            # read(limit+1) 是流式部分读：输出超限时只产出 limit+1 字节即停，
+            # 不是先解压完再截断（无声明 content-size 的帧同样有界）；
+            # window_log_max 由 MAX_WINDOW_BYTES 推导（bit_length-1 = log2），
+            # 保留大窗口炸弹防线，与旧实现的 max_window_size 等价。
+            _opts = {zstd.DecompressionParameter.window_log_max:
+                     MAX_WINDOW_BYTES.bit_length() - 1}
+            with zstd.open(io.BytesIO(raw), "rb", options=_opts) as _zreader:
+                return _check(_zreader.read(limit + 1), limit)
         decoder = brotli.Decompressor()
         if not hasattr(decoder, "can_accept_more_data"):
             raise ValueError("Brotli 1.2 output-limited decoder required")

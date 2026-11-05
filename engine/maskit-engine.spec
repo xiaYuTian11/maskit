@@ -51,6 +51,10 @@ hiddenimports = (
         # 而不是报错（分析器的运气不能当保证）。tests/test_engine_packaging.py 锁这条。
         'selfcheck',
         'body_buffer',
+        # body_buffer 顶层 `from backports import zstd`（与 mitmproxy 12.3.1 同库
+        # 同语义）：`backports` 是命名空间包，PyInstaller 对命名空间包内模块的
+        # 静态分析历来靠不住（与 selfcheck 同类「分析器运气」问题），显式列出。
+        'backports.zstd',
         # 图片多模态脱敏：panel 在函数内懒加载 `import visual_redactor`，
         # 缺它时表现是「开关开了但图片一律阻断」（pillow_missing/unavailable），
         # 而不是崩——和 selfcheck 同一类“分析器运气”问题，所以显式列出。

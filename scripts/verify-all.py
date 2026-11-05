@@ -181,6 +181,16 @@ def _child_env(python: str) -> dict:
     resolved_dir = str(py_path.resolve().parent)
     if resolved_dir not in bindirs:
         bindirs.append(resolved_dir)
+    # Windows 全局安装的 pip 把控制台脚本（mitmdump.exe 等）放在 <解释器>/Scripts，
+    # 而虚拟环境把它们放在 bin/（即 parent 本身，上面的 bindirs 已覆盖）。两个布局
+    # 都得前置，否则全局解释器下 smoke_*.py 的 `shutil.which("mitmdump")` 解析不到
+    # （2026-11-05 实测：mitmproxy 从用户级 site 迁到系统级 site 后，
+    # Roaming\...\Scripts 不再有 mitmdump.exe，四个冒烟门禁全 FileNotFoundError）。
+    # 目录不存在时跳过，不影响 Linux 布局。
+    for base in (py_path.parent, py_path.resolve().parent):
+        scripts_dir = str(base / "Scripts")
+        if pathlib.Path(scripts_dir).is_dir() and scripts_dir not in bindirs:
+            bindirs.append(scripts_dir)
     env["PATH"] = os.pathsep.join(bindirs) + os.pathsep + env.get("PATH", "")
     # WorkBuddy/CI 注入的 PYTHONPATH 会把 vendor shim 的 sitecustomize 拉进来，
     # 其 safe-delete 守卫会让部分用例在 finally 里 SystemExit。门禁必须干净。

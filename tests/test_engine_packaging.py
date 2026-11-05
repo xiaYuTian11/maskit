@@ -159,6 +159,18 @@ class EngineSpecCoverageTests(unittest.TestCase):
                          "release.yml 断言这些文件必须在包里，但 spec 的 datas 产不出它们："
                          "%s（本地门禁看不出来，发版那步会直接红）" % missing)
 
+    def test_backports_zstd_is_explicitly_listed(self):
+        """`backports.zstd` 必须显式在 hiddenimports 里（命名空间包，2026-11-05）。
+
+        body_buffer 顶层 `from backports import zstd`（与 mitmproxy 12.3.1 同库同
+        语义），而 `backports` 是命名空间包：PyInstaller 对命名空间包内模块的
+        静态分析靠不住（与 selfcheck 同类的「分析器运气」问题）。打包态缺了它，
+        表现是**所有压缩响应解码失败**而不是启动报错 —— 静默失灵，比崩溃难查。
+        """
+        src = self._spec_source()
+        self.assertIn("'backports.zstd'", src,
+                      "hiddenimports 里没有 'backports.zstd'（打包态压缩响应解码会整条失效）")
+
     def test_selfcheck_is_explicitly_listed(self):
         """`selfcheck` 必须**显式**在 hiddenimports 里（0.6.0 漏过一次）。
 

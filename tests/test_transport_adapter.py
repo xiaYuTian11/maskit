@@ -4,8 +4,10 @@ No production socket/config/process is touched. Counterexamples use fake local
 transport objects, not unreachable public endpoints or timing-sensitive networks.
 """
 import asyncio
+import re
 import unittest
 from collections import defaultdict
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -32,7 +34,7 @@ class Stream:
         yield from ()
 
 
-@unittest.skipUnless(adapter.transport_capabilities()["observation"], "requires mitmproxy 12.2.3")
+@unittest.skipUnless(adapter.transport_capabilities()["observation"], "requires mitmproxy 12.2.3/12.3.1")
 class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.g = ConnectionGovernance()
@@ -348,7 +350,7 @@ class ProbeHandler(ConnectionHandler):
         self.seen.append(event)
 
 
-@unittest.skipUnless(adapter.transport_capabilities()["version"] == "12.2.3", "12.2.3 cancellation contract")
+@unittest.skipUnless(adapter.transport_capabilities()["version"] in adapter.SUPPORTED_VERSIONS, "12.2.3/12.3.1 cancellation contract")
 class CancellationFeasibilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_semaphore_wait_does_not_unblock_open_waiter(self):
         handler = ProbeHandler()
@@ -385,6 +387,40 @@ class CancellationFeasibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(isinstance(e, events.OpenConnectionCompleted) for e in handler.seen))
         self.assertFalse(any(isinstance(h, server_hooks.ServerDisconnectedHook) for h in handler.hooks))
         writer.close()  # Explicit cleanup of our fake, not production code.
+
+
+class RequirementsDriftTests(unittest.TestCase):
+    """G602/G603：requirements 锁定的 mitmproxy 版本必须已过适配器版本门。
+
+    2026-11-05 事故链：Brotli==1.2.1（CVE 修复）与 mitmproxy 12.2.3 的 <=1.2.0
+    互斥，本地 venv 共存态掩盖冲突，推送后 CI 装依赖直接红。这条测试防的是
+    另一半：requirements 升了 mitmproxy、适配器的 SUPPORTED_VERSIONS 没跟上
+    —— 干净安装能过、单测也绿，但 transport_capabilities() 全 False，连接
+    观测与流取消整体哑火（降级不崩，没人会立刻发现）。
+    """
+
+    def _requirements(self):
+        return (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(encoding="utf-8")
+
+    # Case G602 requirements 锁定的 mitmproxy 版本必须已过适配器版本门（SUPPORTED_VERSIONS）
+    def test_pinned_mitmproxy_is_gate_verified(self):
+        m = re.search(r"^mitmproxy==(\S+)", self._requirements(), re.MULTILINE)
+        self.assertIsNotNone(
+            m, "MASK_5043：requirements.txt 必须精确锁定 mitmproxy（浮动范围配不上版本门）")
+        self.assertIn(
+            m.group(1), adapter.SUPPORTED_VERSIONS,
+            "MASK_5042：requirements 锁定 %s 未过适配器版本门；先跑签名探测与真驱动"
+            "取消测试再扩 SUPPORTED_VERSIONS" % m.group(1))
+
+    # Case G603 直接 import 的第三方库必须在 requirements 里显式声明（干净安装可解析）
+    def test_direct_imports_are_explicitly_declared(self):
+        reqs = self._requirements()
+        self.assertRegex(
+            reqs, r"(?m)^backports\.zstd==",
+            "MASK_5043：body_buffer 直接 import backports.zstd，必须显式声明")
+        self.assertRegex(
+            reqs, r"(?m)^Brotli==",
+            "MASK_5043：Brotli 必须显式声明（不再由 mitmproxy 12.3.1 传递约束兼容）")
 
 
 if __name__ == "__main__":

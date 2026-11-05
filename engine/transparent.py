@@ -209,7 +209,7 @@ _DNS_FAILURE_HINTS = ("getaddrinfo", "name or service not known",
 _FAILURE_OWNERS = frozenset({"client", "dns", "proxy", "engine", "upstream"})
 
 # 上游静默在本机只有一个兜底：mitmproxy 的连接空闲看门狗 `tcp_timeout`
-# （12.2.3 默认 600 s，mitmproxy/options.py 的 add_option）。它 `on_timeout` 里
+# （12.2.3/12.3.1 默认 600 s，mitmproxy/options.py 的 add_option）。它 `on_timeout` 里
 # 取消的是**客户端**读任务（proxy/server.py:344-354），随后 mitmproxy 把这条
 # 连接上的失败写成 `Client disconnected.` —— 也就是说「上游首包后彻底没声」和
 # 「客户端主动挂断」在现场证据上一模一样，`_CLIENT_FAILURE_HINTS` 会把责任判给
@@ -9703,7 +9703,7 @@ _MASK_TIMEOUTS = {"count": 0, "peak_wait_ms": 0.0}
 # （被最外层 fail-closed 兜成 503 mask_pipeline_failed）—— 都是"整个网关不可用"的配置事故，
 # 由环境变量误写触发，所以在这里夹住（其余旋钮如 NER 预算同样有下限）。
 _ENGINE_DEADLINE_S = max(5.0, float(_env_float("MASKIT_ENGINE_DEADLINE_S", 120.0)))
-# 上游建连 / TLS 握手的**预算**（秒）。mitmproxy 12.2.3 在 `proxy/server.py:212` 直接
+# 上游建连 / TLS 握手的**预算**（秒）。mitmproxy 12.2.3/12.3.1 在 `proxy/server.py:212` 直接
 # `await asyncio.open_connection(...)`，既没有 timeout 也没有 wait_for，所以一条被丢包的
 # 握手会一路走到内核 SYN 重传梯（实测 ≈127 s），而客户端在 180 s 整放弃 —— 用户看到的是
 # 一句无信息量的 `Request timed out.`。addon 侧也拦不住它：`flow.kill()` 与写

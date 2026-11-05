@@ -1,7 +1,16 @@
 flask>=3.1,<3.2
-mitmproxy==12.2.3
-# body_buffer.py 直接 import brotli / zstandard 做有界解码；zstandard 目前由
-# mitmproxy 传递提供，显式声明避免哪天传递依赖收紧后打包态才炸。
+# @guard G603 本文件必须保持干净可解析：改依赖后跑 `pip install --dry-run -r
+# requirements.txt`，退出码非 0 禁止提交（2026-11-05 事故：Brotli==1.2.1 与
+# mitmproxy 12.2.3 的 <=1.2.0 互斥，本地 venv 共存态掩盖冲突，推送后 CI
+# 装依赖直接红）。12.3.1 为修 CVE-2026-111497（Brotli 解码器）把约束收紧到
+# ==1.2.1，与下面显式行同值；升级 mitmproxy 前先过 dry-run 再动代码。
+mitmproxy==12.3.1
+backports.zstd==1.7.0
+# body_buffer.py 直接 import brotli / backports.zstd 做有界解码。两者虽由
+# mitmproxy 传递提供（backports.zstd 带 python_version<"3.14" 环境标记），
+# 显式声明避免哪天传递依赖收紧后打包态才炸。zstandard 自 mitmproxy 12.3.1
+# 起不再是其依赖，仅测试夹具（tests/test_body_buffer.py 直接压缩造流）使用，
+# 同样必须显式保留，否则干净环境下单测直接 ImportError。
 Brotli==1.2.1
 zstandard>=0.25,<0.26
 onnxruntime>=1.20,<2.0
