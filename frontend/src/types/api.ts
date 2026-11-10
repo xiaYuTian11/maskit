@@ -272,6 +272,14 @@ export interface ShieldEvent {
    * 现在分开：已脱敏 / 已扫描未命中 / 主动阻断 / 明确直通（未脱敏）。
    */
   decision?: 'masked' | 'scanned_clean' | 'blocked' | 'flagged' | 'passthrough'
+  /**
+   * 出口前复检（`egress_verify`）命中的残留项，仅 `decision=flagged` 的 BLOCK 事件才有。
+   * 引擎的 `_leaked_values` 只给 label / 长度 / 次数 / 掩码预览，**不含原文**；
+   * 详情弹窗按这四项渲染，用户才知道「残留的到底是哪个值」——
+   * 只报结论不报证据时，用户无法区分真漏扫与口径差（2026-11-10 实测：47 条 flagged
+   * 全部是同一个 NER 误判值，因为看不到明细而只能回放事件库）。
+   */
+  leaked?: Array<{ label: string; length: number; count: number; preview: string }>
   /** 所配置的检测执行到什么程度；complete 只表示「已执行完」，不保证现实无漏检。 */
   completeness?: 'complete' | 'partial' | 'failed' | 'not_applicable' | 'unknown'
   /** 原因码计数（NER 降级 / 协议契约豁免 / 阻断原因），键见 EventDetailDialog 的标签表。 */
@@ -282,6 +290,7 @@ export interface ShieldEvent {
    * （签名/密文思考块，改写会让上游逐字校验失败）。属漏检/漏还原路径，故必须可见。
    */
   signed_blocks_skipped?: number
+  // @guard G603 键名与引擎 `_leaked_values` 输出逐一对应，改名 = 详情那一列恒显 undefined
   items: SlimItem[] | EventItem[]
   dialog?: string
   dialog_req?: string

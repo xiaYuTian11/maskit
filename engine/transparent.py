@@ -2524,12 +2524,60 @@ _RECENT_REV = {}   # token -> [orig, label, ts]
 # 实体——2000 条几小时就洗一遍，早前对话的映射被挤出后：① 模型在思考块里回显旧
 # token 时还原不了（页面上就是「偶尔还原不了」的直接形态）；② 同一原文重签新
 # token，同一实体在上下文里出现两个身份，模型当成两个人。
-# 提升到 8000 的代价核算：每条约 700B（fwd+rev+后缀索引），峰值 ~5.6MB 内存；
-# `_prune_recent` 全表扫 2000 条实测 154µs、8000 条约 0.6ms，且已被 1s 节流窗口
-# 限频；后缀空间 19^6≈4700 万，8000 条活跃时新 token 撞车率 ~1.7e-4（撞车也有
-# `_SUFFIX_AMBIGUOUS` 拒答兑底，不会错值）。安全边界不变：仍受 TTL 与 LRU 双重
-# 淘汰，凭据类仍不落盘不预热。
-_RECENT_MAX = 8000
+# 2026-11-10 由 8000 提升：真机长会话实测「一轮新签 200~290 个 token」（MASK 事件的
+# `new_count`），8000 条只够 28~40 轮。更重的是**叶子缓存连带失效**：一条映射没了，
+# 引用它的叶子全部整叶重算（同日实测同一会话 0.58 s 与 27.6 s 交替出现）。
+# 代价核算：每条约 700B~1KB，峰值 ~25~32MB；全表扫 32768 条约 2.5ms（8000 条实测
+# 0.6ms），且已被 1s 节流窗口限频；后缀撞车率 32768/19^6 ≈ 7e-4，有
+# `_SUFFIX_AMBIGUOUS` 拒答兜底。安全边界不变：仍受 TTL 与 LRU 双重淘汰。
+# 「本次请求正在用的 token」——容量淘汰时的保护名单。
+#
+# 为什么需要它（2026-11-10 实测，容量压到 120、历史 100 条 + 每轮新增 60 条）：
+#   重发第 1 轮 hit 100 / miss 0；插入新增后 fwd=129；重发第 2 轮 **hit 0 / miss 100**
+#   （`miss_token_gone=100`），整段历史重扫 + 重跑 NER（真机 19~28 s）。
+# 根因：请求里「历史在前、新增在后」，历史叶子的时间戳必然早于同一请求里新增的叶子；
+# 按 ts 淘汰时历史永远排最前，续期也救不了（续期只解决 TTL）。
+#
+# 判据：一个请求里真正被替换/复用的 token 就是它当前在用的映射，容量淘汰不该动它们。
+# 生命周期跟着**请求**（`_mask_pipeline_worker` 进出各清一次），不是进程级 ——
+# 进程级集合等于永不淘汰，那正是 §G612 禁止的「事实无界」。
+# 用 threading.local：脱敏跑在 `_MASK_POOL` 的 worker 线程里，并发请求互不污染。
+_RECENT_IN_USE = threading.local()
+# 兜底上界：非 worker 链（扩展/面板直调 `mask()`）不会清上下文，防单线程无限累积。
+_RECENT_IN_USE_MAX = 20000
+
+
+def _recent_in_use():
+    """本线程本请求正在用的 token 集合（懒建）。"""
+    s = getattr(_RECENT_IN_USE, "tokens", None)
+    if s is None:
+        s = _RECENT_IN_USE.tokens = set()
+    return s
+
+
+def _recent_in_use_add(token):
+    """登记一个「本请求用到」的 token（`_hit` 是唯一入口）。"""
+    if not token:
+        return
+    try:
+        s = _recent_in_use()
+        if len(s) >= _RECENT_IN_USE_MAX:
+            s.clear()
+        s.add(token)
+    except Exception:
+        pass
+
+
+def _recent_in_use_clear():
+    """请求边界清空（`_mask_pipeline_worker` 的入口与 finally 各一次）。"""
+    _RECENT_IN_USE.tokens = set()
+
+
+# @guard G612 容量与 TTL 是两道独立上界，只许按最近使用时间淘汰：`_prune_recent_locked`
+# 的超容量判据是 `len(evictable) - _RECENT_MAX > 0`、排序键是 ts；`_recent_ttl()`
+# 仍是 `max(RECENT_TTL, SESSION_TTL)`。为「不再失效」删 TTL 或改无穷 = 把原文驻留
+# 窗口变成事实无界，那是 SECURITY.md 写明的契约。
+_RECENT_MAX = 32768
 
 # ===================== 已知值正向打码（known）=====================
 #
@@ -3685,8 +3733,37 @@ def _prune_recent_locked(now=None):
         # _RECENT_MAX 时，刚签发的普通占位符会被当场淘汰（复用与后缀容错一起失效）。
         over = len(evictable) - _RECENT_MAX
         if over > 0:
-            oldest = sorted(evictable, key=lambda kv: kv[1][2])
-            for k, v in oldest[:over]:
+            # @guard G612 先放过「正在用的」：只按 ts 排会把历史永远排在最前。
+            #
+            # 为什么（2026-11-10 脚本对照实测）：请求里「历史在前、新增在后」，
+            # 历史叶子的续期 ts 必然早于同一请求里新增的叶子 —— 即使它们在
+            # `_leaf_cache_lookup` 里被续期，下一次容量淘汰仍先删它们。
+            # 实测（容量 120 / 历史 100 / 每轮新增 60）：重发第 2 轮 hit 0 miss 100，
+            # `miss_token_gone=100`，整段历史重扫 + 重跑 NER（真机 19~28 s）。
+            #
+            # 判据：活跃会话 `rev` 里出现的 token = 本机正在用的映射，容量淘汰时
+            # 不该动它们；只有「能被压回上限的余量不够」时才回退到按 ts 淘汰被引用的。
+            # 现算而不是维护引用计数：引用计数要在会话销毁/清空/淘汰三处成对减，
+            # 漏一处就是内存泄漏或误删；这里每 1s 至多算一次（`_prune_recent_throttled`
+            # 节流），成本 ≈ 会话数 × 每会话 token 数（几百 × 几百 = 十万级 dict 查找）。
+            # 谁算「正在用」= **本次请求里真的被替换/复用的 token**（`_recent_in_use()`），
+            # 不是「任何会话的 fwd」：每条新签发的 token 也躺在它自己的会话 fwd 里，
+            # 按会话收等于没有区分度，淘汰仍退化成纯 ts（2026-11-10 脚本实测：
+            # 会话 pin 版本重发第 2 轮照样 hit 0 / miss 100）。
+            # 请求级集合才有区分度：历史叶子在本请求里被 `_hit()` 登记，新增叶子也在，
+            # 但**淘汰发生在新增把表顶爆的瞬间**，此时历史早已登记、新增还没轮到 ——
+            # 先删的自然是「本请求还没用过且最老」的那批。
+            pinned = _recent_in_use()
+            free = [kv for kv in evictable if kv[1][0] not in pinned]
+            free.sort(key=lambda kv: kv[1][2])
+            victims = free[:over]
+            if len(victims) < over:
+                # 保底：全部都在用也必须压回上限，否则表无界增长（内存与清理成本双爆）。
+                taken = {k for k, _v in victims}
+                rest = [kv for kv in evictable if kv[0] not in taken]
+                rest.sort(key=lambda kv: kv[1][2])
+                victims += rest[:over - len(victims)]
+            for k, v in victims:
                 tables.fwd.pop(k, None)
                 tables.rev.pop(v[0], None)
                 _suffix_index_del(v[0])
@@ -6279,7 +6356,17 @@ _LEAF_UNCHANGED = object()
 _LEAF_CACHE = collections.OrderedDict()   # 摘要 -> (代号, 原长, 脱敏文本, [(占位符, 标签, 原文摘要)])
 _LEAF_CACHE_CHARS = 0
 _LEAF_CACHE_LOCK = threading.Lock()
-_LEAF_CACHE_STATS = {"hit": 0, "miss": 0, "verify": 0, "poison": 0}
+_LEAF_CACHE_STATS = {
+    "hit": 0, "miss": 0, "verify": 0, "poison": 0,
+    # miss 归因（四类互斥，之和 ≤ miss；miss 还含「从未缓存过」）。
+    # 为什么拆开：2026-11 排查「同一会话有时 0.58 s、有时 27.6 s」时，只看 miss 总数
+    # 完全看不出成因 —— token 被淘汰、FWD 指向变了、配置换代、不能跨会话复用，
+    # 四种修法完全不同（前两者调续期/容量，后两者是正确性语义）。
+    "miss_token_gone": 0,   # token 不在 REV 里，或已超 TTL
+    "miss_identity": 0,      # FWD 不再指向该 token，或原文摘要不符
+    "miss_gen": 0,           # 代号换代（配置/词表热重载）或文本长度不符
+    "miss_scope": 0,         # 条目带会话依赖，当前 sid 不是创建者
+}
 _LEAF_CACHE_GEN = [0]
 
 
@@ -6407,6 +6494,14 @@ def _leaf_cache_stats():
         # recheck 长期为 0 说明扫描面没扩张，突然飙升则说明有值在反复被重新认识。
         "sent_pending": sent_pending,
         "sent_recheck": int(_SENT_STATS.get("recheck", 0)),
+        # @guard G613 miss 归因（四类互斥，之和 ≤ miss）：长会话变慢时先看这四个值 ——
+        # `miss_token_gone` 高 = 映射被淘汰/过期（调续期与容量），
+        # `miss_identity` 高 = 同一原文被重签了别的 token，
+        # `miss_gen` 高 = 配置/词表在频繁换代，`miss_scope` 高 = 条目带了会话依赖。
+        "miss_token_gone": int(stats.get("miss_token_gone", 0)),
+        "miss_identity": int(stats.get("miss_identity", 0)),
+        "miss_gen": int(stats.get("miss_gen", 0)),
+        "miss_scope": int(stats.get("miss_scope", 0)),
     }
 
 
@@ -6445,12 +6540,14 @@ def _leaf_cache_lookup(text, sid):
     with _LEAF_CACHE_LOCK:
         ent = _LEAF_CACHE.get(key)
         if ent is None:
+            # 从未缓存过：不是「失效」，不计入 miss 归因（四类之和 ≤ miss）。
             _LEAF_CACHE_STATS["miss"] += 1
             return None
         if ent[0] != _leaf_cache_gen() or ent[1] != len(text):
             _LEAF_CACHE.pop(key, None)
             _LEAF_CACHE_CHARS -= ent[1]
             _LEAF_CACHE_STATS["miss"] += 1
+            _LEAF_CACHE_STATS["miss_gen"] += 1
             return None
         if ent[4] and ent[5] != sid:
             # 「依赖会话既有值」的条目只在创建它的会话内复用。同一段文本在陌生
@@ -6458,12 +6555,14 @@ def _leaf_cache_lookup(text, sid):
             # 跨会话复用会把这个差异抹平，把不该遮的词遮了
             # （`test_bare_reoccurrence_of_known_value_is_masked` 锁这条）。
             _LEAF_CACHE_STATS["miss"] += 1
+            _LEAF_CACHE_STATS["miss_scope"] += 1
             return None
         _LEAF_CACHE.move_to_end(key)
     tables = _tables()
     ttl = _recent_ttl()
     now = time.time()
     ok = True
+    reason = ""
     with _STATE_LOCK:
         g_fwd = tables.fwd
         g_rev = tables.rev
@@ -6471,16 +6570,40 @@ def _leaf_cache_lookup(text, sid):
             rec = g_rev.get(token)
             if rec is None or now - rec[2] > ttl:
                 ok = False
+                reason = "miss_token_gone"
                 break
             orig = rec[0]
             fwd_rec = g_fwd.get(orig)
             if (fwd_rec is None or fwd_rec[0] != token
                     or _orig_digest(orig) != want):
                 ok = False
+                reason = "miss_identity"
                 break
+        # @guard G611 命中即续期：两个方向都要刷 —— `_prune_recent_locked` 是按 FWD 的
+        # ts 排序淘汰、TTL 判定也用同一个 ts，只刷 REV 照样被连带删（2026-10 在
+        # restore 侧踩过同一条）。续期只在校验**全部通过之后**做：校验失败的条目
+        # 一旦续期，就会成一条永不过期的失效映射。
+        # 为什么必须有这一步：叶子缓存命中时不会走 `_recall_token`，于是「每轮都在用、
+        # 但每轮都命中缓存」的 token 时间戳停在最后一次冷跑，被同会话新签的几百个
+        # token 推开；一条映射没了，引用它的叶子全部整叶重算 + 重跑 NER
+        # （2026-11-10 实测同一会话 0.58 s 与 27.6 s 交替出现）。
+        if ok:
+            for token, _label, _want in ent[3]:
+                rec = g_rev.get(token)
+                if rec is None:
+                    continue
+                rec[2] = now
+                fwd_rec = g_fwd.get(rec[0])
+                if fwd_rec is not None and fwd_rec[0] == token:
+                    fwd_rec[2] = now
     with _LEAF_CACHE_LOCK:
         if not ok:
+            # @guard G613 四类 miss 分开计数：只看总数完全看不出成因（token 被淘汰 /
+            # FWD 指向变了 / 配置换代 / 不能跨会话复用），四种修法完全不同。
+            # 计数只发生在「已经返回 None」的分支，不改变返回文本。
             _LEAF_CACHE_STATS["miss"] += 1
+            if reason:
+                _LEAF_CACHE_STATS[reason] += 1
             return None
         _LEAF_CACHE_STATS["hit"] += 1
     return ent[2], ent[3]
@@ -6617,16 +6740,26 @@ def _mask_text(text, sid):
         if _action == "block":
             s["rule_blocked"] = True
             s.setdefault("rule_blocked_labels", set()).add(label)
+        reused = orig in fwd
         if orig not in fwd:
             new_orig.add(orig)
             if _remember(fwd, labels, orig, label):
                 s["suffix_reused"] = True
+                reused = True
             # rev 增量维护：只有新增才补一条，避免每次 mask 全量重建（长会话 fwd 数千条）
             rev[fwd[orig]] = orig
         hit_orig.add(orig)
         tok = fwd.get(orig)
         if tok is not None:
             hit_tokens.setdefault(tok, (label, _orig_digest(orig)))
+            # @guard G612 只把**复用的**映射放进保护名单。
+            #
+            # 为什么不能连新签发的也放（2026-11-10 实测）：请求里历史先命中、新增后签发，
+            # 两类全进名单等于没有区分度，淘汰仍退化成纯 ts，重发第 2 轮 hit 0 / miss 100。
+            # 而「复用」正好就是「这段文本我在之前的轮次里已经遮过」——重新签发会让
+            # 同一实体在上下文里出现两个占位符，代价远高于丢掉一个刚见过的新值。
+            if reused:
+                _recent_in_use_add(tok)
 
     # ── 已发送字节固化（sent）+ 已知值正向打码（known）────────────────────
     #
@@ -9783,6 +9916,9 @@ _NER_REQ_BUDGET_PER_MB_S = 120.0
 # 代价是大 body 会更多降级（提前出现 budget_exhausted），这是「用可接受的漏码换
 # 响应时间」的明确产品取舍（已与所有者确认），且降级**写进事件**不会静默。
 # 想换回宽裕口径：面板设置页 `ner_req_budget_s`，或环境变量硬覆盖（容器/CI 用）。
+# 默认上限 **10s**，不得随意调大：`tests/test_regressions.py::test_ner_budget_is_capped_for_the_client_timeout`
+# 锁着这条（2026-09-28 事故：脱敏 58.5s + 上游等待 >120s → 客户端 180s 解包超时、resp=0）。
+# 2026-11-10 复核：想提到 30s 被该用例当场拦下，方向正确 —— 预算越大，冷缓存那一轮越容易撞窗口。
 _NER_REQ_BUDGET_MAX_DEFAULT_S = 10.0
 # 硬上限：上限本身也得有上限，否则一个手改的 config.json 就能把引擎拉回 0.6.0
 # 的形态（32MB 请求体全量 NER 约 6 分钟）。
@@ -10834,6 +10970,9 @@ def _mask_pipeline_worker(body, sid, raw_content, enum_changed, has_dup_keys,
     # 孤儿 worker 仍在跑，若由调用方归还，B-4 的并发上界就成了事后失真的数字。
     old_control = getattr(_MASK_WORK_CONTEXT, "control", None)
     _MASK_WORK_CONTEXT.control = (deadline, cancel_event)
+    # @guard G612 请求级保护名单的生命周期：进入清空（上一个请求的残留不能保护本轮），
+    # finally 释放（否则 worker 线程上的集合跨请求累积，等于永不淘汰）。
+    _recent_in_use_clear()
     try:
         masked_bytes = None
         first_diff_byte = -1
@@ -10945,6 +11084,7 @@ def _mask_pipeline_worker(body, sid, raw_content, enum_changed, has_dup_keys,
         )
     finally:
         _MASK_WORK_CONTEXT.control = old_control
+        _recent_in_use_clear()
         _mask_release(len(raw_content))
 
 

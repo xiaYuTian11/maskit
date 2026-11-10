@@ -98,12 +98,18 @@ const NER_SKIP_LABELS: Record<string, string> = {
   no_reverse_route: 'reason.noReverseRoute',
 }
 
-/** 处置结论 → i18n 键（批次 2 统一口径，见引擎 `inspection.DECISION_*`）。 */
+/** 处置结论 → i18n 键（批次 2 统一口径，见引擎 `inspection.DECISION_*`）。
+ *
+ * 键集合必须与 `types/api.ts` 的 `decision` 联合类型逐一相等（G601）：漏一个就回退成
+ * 英文裸词（`t(...) || event.decision`），用户看到的是 `flagged` 而不是「有残留（已放行）」。
+ */
+// @guard G601
 const DECISION_LABELS: Record<string, string> = {
   masked: 'detail.decisionMasked',
   scanned_clean: 'detail.decisionScannedClean',
   blocked: 'detail.decisionBlocked',
   passthrough: 'detail.decisionPassthrough',
+  flagged: 'detail.decisionFlagged',
 }
 
 /** 完整度 → i18n 键（`complete` 只表示“所配置的检测已执行完”，不保证现实无漏检）。 */
@@ -222,6 +228,20 @@ export function EventDetailDialog({
     () => ((event?.items ?? []) as { original?: string }[])
       .map((i) => i.original)
       .filter((s): s is string => typeof s === 'string' && s.length > 0),
+    [event],
+  )
+
+  // @guard G602：`flagged` 的残留明细。只读引擎已给的四个字段（label / 长度 / 次数 / 掩码预览），
+  // 绝不渲染原文 —— 事件 payload 本身不带 original，`items` 里也没有它。
+  // 为什么必须有：出口复检只报「有残留」时，用户无法判断是规则真漏扫，还是 NER 口径差
+  // 造的噪音（2026-11-10 实测 47 条全是同一个 20 字符值在长会话里重复出现）。
+  const leaked = useMemo(
+    () => (event?.leaked ?? []).map((x) => ({
+      label: x.label || '—',
+      length: x.length,
+      count: x.count,
+      preview: x.preview || '',
+    })),
     [event],
   )
 
@@ -361,6 +381,8 @@ export function EventDetailDialog({
               <MetaItem k={t('detail.duration')} v={formatDuration(event.total_ms ?? event.upstream_ms ?? event.first_byte_ms)} />
             </div>
 
+            {/* @guard G632 无观测时要说明「仅异常采集」，不能退回「未知 / 未观测」——
+                该字段只在 CANCEL/ERR 终态写，正常请求恒为空，写「未知」会被读成故障。 */}
             {/* 连接观测：默认折叠。这一块 10 个字段在一次普通反向代理请求里
                 通常全是「未知 / 未观测」（没走隧道、没复连、没 TLS 耗时采样），
                 展开时会把半屏让给 12 个并列的「未知」，真正的结论（脱敏了哪些、
@@ -371,7 +393,7 @@ export function EventDetailDialog({
                 <span className="ml-auto text-2xs font-normal text-muted-foreground">
                   {transportRows.length > 0
                     ? tf('detail.transportObserved', { n: transportRows.length })
-                    : t('transport.unknown')}
+                    : t('detail.transportUncollected')}
                 </span>
                 <ChevronRight className="chev h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
               </summary>
@@ -555,6 +577,24 @@ export function EventDetailDialog({
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* G602：残留明细。只在有残留项时渲染，避免每条 flagged 详情多一张空卡片。 */}
+            {leaked.length > 0 && (
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs leading-relaxed">
+                <div className="font-semibold text-warning-ink">{t('detail.leakedTitle')}</div>
+                <div className="mt-1 text-muted-foreground">{t('detail.leakedHint')}</div>
+                <ul className="mt-2 space-y-1">
+                  {leaked.map((row) => (
+                    <li
+                      key={`${row.label}-${row.length}-${row.preview}`}
+                      className="break-all font-mono text-2xs text-warning-ink"
+                    >
+                      {tf('detail.leakedItem', row)}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 

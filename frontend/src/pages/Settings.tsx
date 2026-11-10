@@ -2742,6 +2742,14 @@ export default function SettingsPage({ embeddedTab }: { embeddedTab?: string } =
                 }}
               />
               <span className="text-2xs text-muted-foreground">{t('settings.advanced.retentionHint')}</span>
+              {/* @guard G633 占用与「留几天」是同一件事的两面：放一起，用户调天数时
+                  立刻看到代价。数值只能来自 /api/status 的 db_size_mib（引擎侧已
+                  round 到一位小数），前端不估算、不写死。 */}
+              <span className="text-2xs text-muted-foreground">
+                {tf('settings.advanced.storageUsed', {
+                  mb: status?.db_size_mib == null ? '—' : Number(status.db_size_mib).toFixed(1),
+                })}
+              </span>
           </Section>
 
           {/* 内存映射（§D3.3）：清日志/清统计/清映射是三个独立动作，不合并成

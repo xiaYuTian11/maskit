@@ -4,13 +4,15 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
-## [Unreleased]
+## [0.16.1] - 2026-11-10
 
 ### 更新摘要 / Summary
 - 以前漏发出去的内容，下一轮会补上打码：已确认敏感的值，即使在更早的对话里没被认出来，也会在历史重发时遮住。
 - Content that slipped through earlier is now masked on the next turn: confirmed values get masked even in older parts of the conversation that missed them.
-- 对话里遮过一次的名字，换个请求也会继续被遮，不再看它是不是恰好排在带称呼的那句之后。
-- Once a name has been masked, later requests keep masking it instead of depending on where it happened to appear.
+- 长对话有时候会突然慢上十几二十秒，现在不会再反复重算同一段历史了。
+- Long conversations no longer slow down for tens of seconds by re-processing the same history.
+- 日志里那条「有残留（已放行）」现在能点开看到残留的是哪个值、属于什么类型、出现了几次。
+- The "residual (forwarded)" log entry now shows which value was left over, its label, and how many times it appeared.
 
 ### 修复
 - 修复已发送的历史文本沿用旧结果、导致其后才确认的敏感值继续以原文重发的问题：只在文本真的含该值时重算一次，之后恢复字节稳定。
@@ -19,12 +21,18 @@
 - Fixed short names being inconsistent across requests: a name that appeared bare in earlier messages used to be skipped as an ordinary word in every request.
 - 修复两处缓存口径问题：带已知值的文本一直命中不了结果缓存；模型从不可用变为可用后旧结果不再失效。
 - Fixed two cache-key issues: text that went through known-value replacement could never hit the result cache, and cached results stayed valid after the model became available.
+- 修复长对话偶发整段重扫、单次请求慢到十几二十秒的问题：映射表满时优先淘汰本轮没用到的条目，正在复用的历史不再被顶掉。
+- Fixed long conversations occasionally re-scanning the whole history and taking tens of seconds: when the mapping table is full, entries this round did not reuse are evicted first, so history in active use is no longer pushed out.
+- 修复事件详情把处置结论显示成英文裸词 `flagged` 的问题，并补上出口复检的残留明细（标签 / 长度 / 出现次数 / 掩码预览），不再只报结论不报证据。
+- Fixed the event detail rendering the bare English word `flagged` as the verdict, and added the egress re-check residual details (label / length / occurrences / masked preview) instead of a verdict without evidence.
 
 ### 优化
 - 缓存里不再保留没有命中任何敏感词的整段文本副本，内存占用与说明口径一致。
 - The cache no longer keeps a copy of text that had nothing to mask, so memory use matches what the documentation claims.
 - 运行指标新增「待复核的新值」与「定向重算次数」，面板能看出这条兜底是否在干活。
 - Runtime metrics now show pending newly-confirmed values and how often a targeted recompute ran.
+- 自检页能看出缓存为什么没命中，设置页会显示日志库当前占多大，方便判断该不该缩短保留天数。
+- The self-check page now explains why cached entries were missed, and settings show how much space the log database takes, so you can decide whether to shorten retention.
 
 ## [0.16.0] - 2026-11-05
 

@@ -7,7 +7,12 @@
 param(
     [string]$Version = "",
     [switch]$BuildOnly,
-    [switch]$Yes
+    [switch]$Yes,
+    # 附加到发版提交说明（追加在标题行之后）。按项目约定，模型版本核验结论必须
+    # 带日期锚点进 commit message（形如「模型核验 2026-11-10：上游无更新」）——
+    # 核验是人对上游发布的事实判断，仓库里没有别的痕迹可复核。
+    # 不传时行为与改动前完全一致（只有标题行）。
+    [string]$Note = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -199,6 +204,7 @@ foreach ($f in $newFiles) {
 $staged = @(git diff --cached --name-only)
 if ($staged.Count -gt 0) {
   $commitMsg = "chore(release): 发布 v$targetVer"
+  if ($Note) { $commitMsg = $commitMsg + "`n`n" + $Note }
   git commit -m $commitMsg
   Assert-LastExit "git commit"
   Write-Host "已提交: $commitMsg" -ForegroundColor Green

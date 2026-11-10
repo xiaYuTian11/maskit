@@ -15,7 +15,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.16.0'
+__version__ = '0.16.1'
 import json
 import codecs
 import copy
@@ -10076,6 +10076,14 @@ def _project_engine_metrics(eng):
             # 个数，`sent_recheck` 是因它触发重算的叶子次数。只放计数，无自由文本。
             "sent_pending": int(lc.get("sent_pending") or 0),
             "sent_recheck": int(lc.get("sent_recheck") or 0),
+            # @guard G631 miss 归因四类：引擎侧 `_leaf_cache_stats` 早就在算，
+            # 但本投影是**显式白名单** —— 不补在这里，自检页与面板永远看不到，
+            # 排查「长会话为什么慢」只能去翻 engine-runtime.json（2026-11-10 实测）。
+            # 四者互斥且之和 ≤ miss（miss 还含「从未缓存过」）。
+            "miss_token_gone": int(lc.get("miss_token_gone") or 0),
+            "miss_identity": int(lc.get("miss_identity") or 0),
+            "miss_gen": int(lc.get("miss_gen") or 0),
+            "miss_scope": int(lc.get("miss_scope") or 0),
         }
     return out
 
