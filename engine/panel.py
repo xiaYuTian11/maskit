@@ -10085,6 +10085,16 @@ def _project_engine_metrics(eng):
             "miss_gen": int(lc.get("miss_gen") or 0),
             "miss_scope": int(lc.get("miss_scope") or 0),
         }
+    # 还原侧诊断（2026-11-12，G616）：本投影是**显式白名单**，不补这里就永远看不到。
+    # 只透计数，无自由文本：pov_frames（p/o/v 增量帧）、pov_buffered（扣住了半截的帧）、
+    # unknown_envelope_frames（无槽位且非 p/o/v，整树兜底的帧）。
+    rs = eng.get("restore")
+    if isinstance(rs, dict):
+        out["restore"] = {
+            "pov_frames": int(rs.get("pov_frames") or 0),
+            "pov_buffered": int(rs.get("pov_buffered") or 0),
+            "unknown_envelope_frames": int(rs.get("unknown_envelope_frames") or 0),
+        }
     return out
 
 

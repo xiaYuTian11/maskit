@@ -1658,6 +1658,10 @@ def _new_session(sid, source=None):
         "resp_ts": None,
         "first_byte_ms": None,
         "ext_frames": {},
+        # p/o/v 私有信封（豆包 / DeepSeek 网页端）的粘性状态，**按流分桶**：
+        # {stream_key: {"op": ..., "path": ...}}。客户端每请求一个新解析器，
+        # 而扩展会跨请求复用 sid，所以不能挂成会话级单值（见 `_pov_sticky`）。
+        "pov_sticky": {},
         "ts": time.time(),
         "source": source or {},
     }
@@ -10403,6 +10407,10 @@ def _write_runtime_metrics(force=False):
         # 叶子结果缓存：跨请求复用的真值。命中率掉下去就等于「每轮整段重算」，
         # 是长会话变慢的第一个可观测信号（见 `_leaf_cache_stats` 的注释）。
         payload["leaf_cache"] = _leaf_cache_stats()
+        # 还原侧诊断（2026-11-12）：无槽位帧走了多少次整树兜底、p/o/v 增量帧有多少、
+        # 其中多少帧真的扣住了半截占位符。issue #50 之所以只能靠翻前端 bundle 才定位，
+        # 就是因为这条路径以前一个计数都没有——面板与自检从此能直接看到。
+        payload["restore"] = restore_runtime_stats()
         try:
             import ner_engine
             payload["ner"] = {
@@ -12486,8 +12494,184 @@ def _sse_terminal_prefixes(data):
                  if isinstance(c, dict) and c.get("finish_reason"))
 
 
-def _restore_sse_data(data, sid, final=False, final_prefixes=()):
-    """就地还原单个 SSE 事件的 JSON 负载。非 dict 负载（null/[]/"x"/123）直接原样返回。"""
+# ── p/o/v 私有信封（豆包 / DeepSeek 网页端）───────────────────────────────
+#
+# 事实来源（2026-11-12，取自 DeepSeek 前端 bundle `main.*.js`，端点 /api/v0/chat/completion）：
+#     {"p": <路径字符串>, "o": "SET" | "BATCH" | "APPEND", "v": <值>}
+# 客户端对 `o` 的处理是 `switch(op){case "SET": set(...); case "APPEND": append(...)}`，
+# 且 `p` 可省略（省略时沿用上一个路径）。
+#
+# **为什么必须专门认它**：`_sse_text_slots` 只认 OpenAI / Anthropic / Responses 三种形状，
+# 这种信封在它眼里是「无槽位」→ 走整树兜底 → `restore_final()`（final=True，不缓冲）→
+# 被上游切成两段的占位符两半各自原样下发，而且 `restored/degraded/unresolved` 三个计数
+# **全是 0**：事件库显示「已还原」，屏幕上却留着裸占位符（issue #50 的真机形态）。
+_POV_OPS = frozenset({"SET", "BATCH", "APPEND"})
+_POV_CHANNEL_PREFIX = "pov:"
+# 纯诊断计数，进 `engine-runtime.json` 的 restore 段（`_write_runtime_metrics`）。
+# 不进任何聚合、不触发告警：它只回答「这条流有多少帧走了整树兜底」。
+_POV_STICKY_MAX = 8          # 同一会话最多记多少条「流」的粘性状态（stream_id 由页面可控，必须封顶）
+_POV_BATCH_MAX_DEPTH = 4     # BATCH 嵌套上限：防畸形/恶意多层嵌套把递归打穿
+# 客户端的流式事件名（class xJ）：delta / ready / finish / close / title / toast。
+# 其中 finish / close 是**终态**：客户端在此收尾，之后追加的帧会被丢掉——
+# 所以滞留的半个占位符必须在这两帧**写出之前**补发。
+_POV_TERMINAL_EVENTS = frozenset({"finish", "close"})
+_RESTORE_POV_STATS = {"pov_frames": 0, "pov_buffered": 0, "unknown_envelope_frames": 0}
+
+
+def _pov_stat(key, n=1):
+    with _STATE_LOCK:
+        _RESTORE_POV_STATS[key] = int(_RESTORE_POV_STATS.get(key, 0)) + n
+
+
+def restore_runtime_stats():
+    """还原侧诊断计数快照（`engine-runtime.json` 的 `restore` 段；面板投影只透三个整数）。"""
+    with _STATE_LOCK:
+        return {k: int(v) for k, v in _RESTORE_POV_STATS.items()}
+
+
+def _pov_sticky(s, stream_key):
+    """取（必要时建）本**流**的粘性桶：`{"op": ..., "path": ...}`。
+
+    为什么按 stream 而不是按会话：客户端解析器实例是**每条请求一个**
+    （`deltaParser = new xY`），而扩展会按 tab+host 复用同一个 sid 长达 25 小时
+    ——挂在会话上会让相邻两轮对话互相继承路径与操作，半截拼进别的路径。
+    桶数有上限：`stream_id` 由页面可控，不封顶就能在 TTL 内把内存撑大。
+    """
+    buckets = s.get("pov_sticky")
+    if not isinstance(buckets, dict):
+        buckets = s["pov_sticky"] = {}
+    key = stream_key or ""
+    bucket = buckets.get(key)
+    if not isinstance(bucket, dict):
+        if len(buckets) >= _POV_STICKY_MAX:
+            buckets.pop(next(iter(buckets)), None)
+        bucket = buckets[key] = {}
+    return bucket
+
+
+def _pov_resolve(bucket, raw_op, raw_path):
+    """解出 (op, path)：显式值优先，缺省沿用本流上一个值（客户端粘性语义）。
+
+    `bucket` 是普通 dict（可能是本流的粘性桶，也可能是 BATCH 子解析器的临时桶）。
+    """
+    # @guard G617 op/path 缺省时只能沿用本流上一个值；都没有就交给调用方走兜底。
+    has_op = isinstance(raw_op, str) and raw_op in _POV_OPS
+    has_path = isinstance(raw_path, str) and bool(raw_path)
+    op = raw_op if has_op else bucket.get("op")
+    path = raw_path if has_path else bucket.get("path")
+    if not isinstance(op, str) or not isinstance(path, str) or not path:
+        return None, ""
+    if has_op:
+        bucket["op"] = raw_op
+    if has_path:
+        bucket["path"] = raw_path
+    return op, path
+
+
+def _pov_restore_value(item, sid, s, op, path, final):
+    """按 op 还原一个操作项的 `v`（BATCH 子项也走这里）。"""
+    channel = _POV_CHANNEL_PREFIX + path
+    if op == "APPEND" and isinstance(item.get("v"), str):
+        # @guard G614 增量：按路径分通道、非 final 缓冲，跨帧切半的占位符才能拼回。
+        restored = restore(item["v"], sid, channel=channel, final=final)
+        item["v"] = _cmd_process(restored, "v", sid, final=final)
+        if (s.get("pending") or {}).get(channel):
+            # @guard G615 收尾模板**规范化**成完整信封：不得克隆可能缺 p/o 的原始帧
+            # （缺就把补发帧解析不出来，或被写到客户端当前所在的别的路径上）。
+            s.setdefault("flush_tmpl", {})[channel] = json.dumps(
+                {"p": path, "o": "APPEND", "v": ""}, ensure_ascii=False)
+            _pov_stat("pov_buffered")
+        return True
+    # 快照（SET，或 final 语义下非字符串的 v）：先丢弃该路径滞留的半截（新值整体覆盖，
+    # 留着只会把残片拼进新值），再整段还原。key 传 "v" 与旧整树兜底同口径
+    # （命令拦截只对 tool/reason 通道生效，这里不受影响）。
+    pend = s.get("pending")
+    if isinstance(pend, dict):
+        pend.pop(channel, None)
+    tmpl = s.get("flush_tmpl")
+    if isinstance(tmpl, dict):
+        tmpl.pop(channel, None)
+    item["v"] = _restore_tree(item.get("v"), sid, "v")
+    return True
+
+
+def _pov_expand_batch(ops, sid, s, base_path, final, depth):
+    """展开 BATCH 子操作：每个 BATCH 用**全新**子解析器（粘性从空开始），
+    子 path 拼成 `父path + "/" + 子path`（与客户端 `(s ? s + "/" : "") + e.path` 一致）。
+    """
+    if depth > _POV_BATCH_MAX_DEPTH:
+        return False
+    # @guard G615 BATCH 的子解析器粘性从空开始：相邻子项的 p/o 可互相沿用，但不得继承父层。
+    sticky = {}
+    handled = False
+    for sub in ops:
+        if not isinstance(sub, dict):
+            continue
+        sub_op, sub_path = _pov_resolve(sticky, sub.get("o"), sub.get("p"))
+        if sub_op is None or not sub_path:
+            _pov_stat("unknown_envelope_frames")
+            continue
+        full = (base_path + "/" + sub_path) if base_path else sub_path
+        if sub_op == "BATCH":
+            if not _pov_expand_batch(sub.get("v"), sid, s, full, final, depth + 1):
+                _pov_stat("unknown_envelope_frames")
+            handled = True
+            continue
+        _pov_restore_value(sub, sid, s, sub_op, full, final)
+        handled = True
+    return handled
+
+
+def _restore_pov_envelope(data, sid, final=False, stream_key=""):
+    """还原一个 p/o/v 私有信封帧；返回 True 表示已处理（调用方不要再走整树兜底）。
+
+    协议事实见本段上方注释（`o`/`p` 皆 optional 且粘性；`BATCH` 的 `v` 是子操作数组）。
+    三条边界与理由：
+      · `APPEND` 是**增量**：按路径分通道、非 final 缓冲，否则跨帧切半的占位符拼不回；
+      · `SET`/`BATCH` 里的 `SET` 是**快照**（整值覆盖）：该路径先前滞留的半截属于旧值，
+        **必须先丢弃** —— 拼进新值会得到「半个占位符 + 新正文」的脏数据；
+      · 解不出 `(op, path)` 时**不缓冲**（退回整树兜底）：宁可露出半截，
+        也不能把 A 路径的半截拼进 B 路径（跨字段串字）。
+    """
+    if not isinstance(data, dict) or "v" not in data:
+        return False
+    s = _session_get(sid)
+    if not isinstance(s, dict):
+        return False          # 会话不存在：restore() 内部会按安全门原样返回并计数
+    raw_op, raw_path = data.get("o"), data.get("p")
+    buckets = s.get("pov_sticky")
+    if not isinstance(buckets, dict):
+        buckets = s["pov_sticky"] = {}
+    key = stream_key or ""
+    bucket = buckets.get(key)
+    fresh = not isinstance(bucket, dict)
+    if fresh:
+        bucket = {}          # 判不出来就不落桶：缺 op/path 的帧不该占粘性名额
+    op, path = _pov_resolve(bucket, raw_op, raw_path)
+    if op is None or not path:
+        # 不在这里计数：调用方的兜底分支每帧只计一次（两处都加会算成两个，Case G617 抓过）。
+        return False
+    if fresh:
+        if len(buckets) >= _POV_STICKY_MAX:
+            buckets.pop(next(iter(buckets)), None)
+        buckets[key] = bucket
+    _pov_stat("pov_frames")
+    if op == "BATCH":
+        v = data.get("v")
+        if not isinstance(v, list):
+            # 协议违例（客户端会抛 expect batch op with v array）：按快照处理，绝不抛异常。
+            return _pov_restore_value(data, sid, s, "SET", path, final)
+        if not _pov_expand_batch(v, sid, s, path, final, 1):
+            _pov_stat("unknown_envelope_frames")
+        return True
+    return _pov_restore_value(data, sid, s, op, path, final)
+
+
+def _restore_sse_data(data, sid, final=False, final_prefixes=(), stream_key=""):
+    """就地还原单个 SSE 事件的 JSON 负载。非 dict 负载（null/[]/"x"/123）直接原样返回。
+
+    stream_key 只用于 p/o/v 私有信封的粘性状态分桶（扩展链路传 stream_id，代理链路传空串）。
+    """
     if not isinstance(data, dict):
         return data
     slots = _sse_text_slots(data)
@@ -12510,7 +12694,13 @@ def _restore_sse_data(data, sid, final=False, final_prefixes=()):
             if pend.get(channel) or cmdp.get(channel):
                 s.setdefault("flush_tmpl", {})[channel] = json.dumps(data, ensure_ascii=False)
         return
-    # 非增量事件（message_start / content_block_start / response.completed …）是完整快照，整树还原
+    if _restore_pov_envelope(data, sid, final=final, stream_key=stream_key):
+        return
+    # 无槽位且不是 p/o/v 增量信封：整树还原（快照语义）。
+    # @guard G616 这条路径以前**一个计数都没有** —— issue #50 只能靠翻前端 bundle 才定位到，
+    # 就是因为它既不还原也不留痕。计的是「走了整树兜底的帧数」：含 Anthropic / Responses
+    # 的已知快照事件（它们本来就该走这里），所以它是「兜底流量」的度量，不是错误计数。
+    _pov_stat("unknown_envelope_frames")
     for k, v in list(data.items()):
         data[k] = _restore_tree(v, sid, k)
     # Responses .done payloads replace the full value, rather than extending
@@ -12564,6 +12754,12 @@ def _build_flush_event(tmpl_json, channel, leftover):
         elif isinstance(cnt, dict) and "text" in cnt:
             cnt["text"] = leftover
             hit = True
+    if not hit and isinstance(data, dict) and data.get("o") in _POV_OPS and "v" in data:
+        # p/o/v 信封（豆包 / DeepSeek 网页端）：残留文本回填到 `v`，且**必须改写成 APPEND**。
+        # 克隆原帧可能是 SET（整值覆盖），照抄会把客户端的整段正文换成这段残片。
+        data["v"] = leftover
+        data["o"] = "APPEND"
+        hit = True
     if not hit:
         return ""
     for c in _choices_of(data):
@@ -12779,7 +12975,7 @@ def _restore_ndjson_body(raw_bytes, sid):
     return "\n".join(out).encode("utf-8")
 
 
-def _restore_sse_event(block, sid, final=False, terminal=None):
+def _restore_sse_event(block, sid, final=False, terminal=None, stream_key=""):
     """还原一个 SSE 事件块（可能含多行）。返回还原后的文本块。
 
     按事件粒度处理是流式透传的前提：一个事件到手立刻还原、立刻下发，
@@ -12790,8 +12986,13 @@ def _restore_sse_event(block, sid, final=False, terminal=None):
     这里被认出来，而不是死等 body 结束（见 `_stream_owned` 的收尾分支）。
     """
     out_lines = []
+    evt_name = ""          # 本块内的 `event:` 名（客户端按它分派：delta/ready/finish/close…）
     for line in block.split("\n"):
         stripped = line.rstrip("\r")
+        if stripped.startswith("event:"):
+            evt_name = stripped[6:].strip().lower()
+            out_lines.append(line)
+            continue
         # 兼容 `data:`（无空格）与 `data: ` 两种 SSE 写法
         if stripped.startswith("data:"):
             payload = stripped[5:].lstrip(" ")
@@ -12828,12 +13029,20 @@ def _restore_sse_event(block, sid, final=False, terminal=None):
                 terminal.append("event")
             # A terminal chunk can contain the final text fragment. Restore it
             # before flushing, and leave other choices' partial tokens buffered.
-            _restore_sse_data(data, sid, final=final, final_prefixes=ending)
+            _restore_sse_data(data, sid, final=final, final_prefixes=ending, stream_key=stream_key)
             if ending is None or ending:
                 tail = _flush_pending(sid, channel_prefixes=ending)
                 if tail:
                     out_lines.append("")
                     out_lines.extend(tail.rstrip("\n").split("\n"))
+                    out_lines.append("")
+            # @guard G614 终态帧写出**之前**必须先补发 p/o/v 通道的残留：客户端把
+            # `finish` / `close` 当流结束，落到它们之后的补发帧会被直接丢掉（吞字）。
+            if evt_name in _POV_TERMINAL_EVENTS:
+                pov_tail = _flush_pending(sid, channel_prefixes=(_POV_CHANNEL_PREFIX,))
+                if pov_tail:
+                    out_lines.append("")
+                    out_lines.extend(pov_tail.rstrip("\n").split("\n"))
                     out_lines.append("")
             out_lines.append("data: " + json.dumps(data, ensure_ascii=False))
             continue
@@ -12856,7 +13065,8 @@ def _restore_ext_sse_event(block, sid, stream_id, final=False):
     def flush_rest():
         if not rest:
             return
-        out_lines.extend(_restore_sse_event("\n".join(rest), sid, final=final).split("\n"))
+        out_lines.extend(_restore_sse_event("\n".join(rest), sid, final=final,
+                                            stream_key=stream_id).split("\n"))
         rest.clear()
 
     for line in block.split("\n"):

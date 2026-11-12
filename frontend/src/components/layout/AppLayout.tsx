@@ -128,7 +128,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const hasCustomBg = Boolean(bgImage && bgOpacity > 0)
 
   const [checkingUpdate, setCheckingUpdate] = useState(false)
+  // 启停请求在飞时置 true（仍用于禁用按钮 / 转圈）。
+  // ⚠️ 它**不能**再用来推断方向：见 pendingAction。
   const [proxyBusy, setProxyBusy] = useState(false)
+  // 本次启停请求的方向。为什么必须有它：旧实现用 `proxyBusy && !isRunning` 反推
+  // 「正在启动」，但停代理时引擎会先置 proxy_running=false（panel 的 _stop_proxy_locked
+  // 杀掉进程树之后就置），再花几秒释放端口/挂兜底监听——这个窗口里「请求在飞 + 没在跑」
+  // 与「正在启动」完全同形，顶栏就把「停止中」显示成「启动中」（issue #51）。
+  // 方向是点击那一刻就确定的，不该事后从状态里猜。
+  const [pendingAction, setPendingAction] = useState<'start' | 'stop' | null>(null)
   const [originBlocked, setOriginBlocked] = useState(false)
   const [rescuingOrigin, setRescuingOrigin] = useState(false)
   // 首次引导的显式开关：undefined = 交给组件按「是否首次运行」自己决定，true = 用户手动要求重看
@@ -177,8 +185,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
   })
 
   const isRunning = status?.proxy_running ?? false
-  const isStarting = (status === undefined && !statusError) || !!status?.proxy_starting || (proxyBusy && !isRunning)
-  const isStopping = (proxyBusy && isRunning) || !!status?.proxy_stopping
+  const isStarting =
+    (status === undefined && !statusError) || !!status?.proxy_starting || pendingAction === 'start'
+  const isStopping = pendingAction === 'stop' || !!status?.proxy_stopping
 
   // 实时同步代理运行状态至桌面端系统托盘菜单（运行中显示「停止代理」，已停止显示「启动代理」）
   useEffect(() => {
@@ -283,6 +292,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const toggleProxy = async () => {
     if (proxyBusy) return
     setProxyBusy(true)
+    setPendingAction(isRunning ? 'stop' : 'start')
     try {
       if (isRunning) {
         await stopProxy()
@@ -300,6 +310,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       toast(tf('layout.opFail', { e: String(e) }), 'error')
     } finally {
       setProxyBusy(false)
+      setPendingAction(null)
     }
   }
 

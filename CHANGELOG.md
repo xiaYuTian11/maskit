@@ -4,6 +4,20 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.16.2] - 2026-11-12
+
+### 更新摘要 / Summary
+- 网页版 AI 的回复里不会再漏出占位符：上游把占位符拆成几段发送时，现在会先拼合再还原成真实内容。
+- Replies in web-based AI chats no longer show raw placeholders: when the upstream splits a placeholder into several parts, they are now joined back and restored.
+- 点击「停止代理」后，顶栏不会再短暂显示成「启动中」。
+- The top bar no longer briefly shows "Starting" after you click "Stop Proxy".
+
+### 修复
+- 修复网页版对话里偶发还原失败：上游把占位符拆成多段下发时，拼不回来的部分会原样留在页面上，而日志里却显示「已还原」；现在按路径分通道拼接后再还原，并把这部分漏还原如实计入诊断。
+- Fixed occasional restore failures in web-based chats: when the upstream split a placeholder across chunks, the fragments stayed on screen while the logs said "restored"; they are now joined per channel before restoration, and any leftover is reported honestly.
+- 修复点击「停止代理」后顶栏短暂显示成「启动中」的问题：启停方向改为按点击动作判定，不再从代理状态反推。
+- Fixed the top bar briefly showing "Starting" right after clicking "Stop Proxy": the direction now comes from the click itself instead of being inferred from the proxy state.
+
 ## [0.16.1] - 2026-11-10
 
 ### 更新摘要 / Summary
