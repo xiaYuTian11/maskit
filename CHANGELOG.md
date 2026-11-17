@@ -4,6 +4,18 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.16.3] - 2026-11-17
+
+### 更新摘要 / Summary
+- Windows 开机自启不再闪现主窗口或弹出黑框：后台静默启动时全程保持隐藏状态。
+- Windows autostart no longer flashes the main window or pops up console windows: silent background startup stays hidden throughout.
+
+### 修复
+- 修复桌面端以 `--minimized` 开机自启时主窗口先闪现再隐藏的问题：窗口默认保持隐藏，仅在非静默启动时显式显示。
+- Fixed the main window briefly flashing before hiding on `--minimized` autostart: the window now starts hidden by default and is shown explicitly on normal launch.
+- 修复 Windows 后台进程探测频繁拉起 `tasklist` 及 OCR 运行时检测缺少 `CREATE_NO_WINDOW` 导致的偶发黑框弹窗：改用原生 Win32 `OpenProcess` / `QueryFullProcessImageNameW` / `GetExitCodeProcess` 探测，并为子进程补齐无窗口标志，同时保持 Linux / macOS / Docker 端兼容。
+- Fixed occasional console window popups on Windows caused by `tasklist` polling and missing `CREATE_NO_WINDOW` in OCR runtime probing: switched process inspection to native Win32 APIs and added the no-window flag while preserving Linux / macOS / Docker behavior.
+
 ## [0.16.2] - 2026-11-12
 
 ### 更新摘要 / Summary

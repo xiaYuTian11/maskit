@@ -95,19 +95,58 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 fn engine_process_identity(pid: u32) -> Option<bool> {
     #[cfg(target_os = "windows")]
     fn image_name(pid: u32) -> Option<String> {
-        let out = no_window(&mut Command::new("tasklist"))
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        // 命令跑起来了就能判定（无匹配时输出 "INFO: ..." 行，同样不等于引擎名）
-        let txt = String::from_utf8_lossy(&out.stdout);
-        txt.lines()
-            .next()
-            .and_then(|line| line.split(',').next())
-            .map(|img| img.trim_matches('"').to_string())
+        use std::ffi::c_void;
+        type Handle = *mut c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_INVALID_PARAMETER: u32 = 87;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+            fn QueryFullProcessImageNameW(
+                process: Handle,
+                flags: u32,
+                exe_name: *mut u16,
+                size: *mut u32,
+            ) -> i32;
+            fn CloseHandle(object: Handle) -> i32;
+            fn GetLastError() -> u32;
+        }
+
+        struct HandleGuard(Handle);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { CloseHandle(self.0); }
+                }
+            }
+        }
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            let err = unsafe { GetLastError() };
+            return match err {
+                // 进程不存在（或 PID 无效）→ 明确非本产品
+                ERROR_INVALID_PARAMETER => Some(String::new()),
+                // 权限不足等无法确认状态 → 保守返回 None，绝不误杀
+                ERROR_ACCESS_DENIED | _ => None,
+            };
+        }
+        let _guard = HandleGuard(handle);
+        let mut buf = vec![0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) };
+        if ok == 0 || size == 0 {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buf[..size as usize]);
+        Some(
+            std::path::Path::new(&full)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(full),
+        )
     }
     #[cfg(not(target_os = "windows"))]
     fn image_name(pid: u32) -> Option<String> {
@@ -1961,10 +2000,13 @@ pub fn run() {
                     });
                 }
             } else if std::env::args().any(|a| a == "--minimized") {
-                // --minimized：仅在真实的开机自启/快捷方式启动时隐藏窗口
+                // --minimized：配合 tauri.conf.json 的 visible: false，开机自启全程不闪窗
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
+            } else if let Some(w) = app.get_webview_window("main") {
+                // 正常启动时再显式显示主窗口
+                show_and_focus(&w);
             }
 
             // 自启项指向的路径可能已过期（改名/换目录/指向构建树），每次启动校正一次。

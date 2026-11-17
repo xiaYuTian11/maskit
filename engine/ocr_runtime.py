@@ -188,12 +188,17 @@ def engine_probe(force=False):
         )
         # 引擎目录：`ocr_engine.py` 与本模块同目录（源码态即 engine/，打包态在 bundle 根）
         eng_dir = str(Path(__file__).resolve().parent)
-        proc = subprocess.run(
-            [_sys.executable, "-c", script, key],
-            cwd=eng_dir, capture_output=True, text=True, timeout=20,
-            env={**os.environ, "PYTHONPATH": eng_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                 "PYTHONUTF8": "1"},
-        )
+        run_kw = {
+            "cwd": eng_dir,
+            "capture_output": True,
+            "text": True,
+            "timeout": 20,
+            "env": {**os.environ, "PYTHONPATH": eng_dir + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                    "PYTHONUTF8": "1"},
+        }
+        if os.name == "nt":
+            run_kw["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run([_sys.executable, "-c", script, key], **run_kw)
         import json as _json
         for line in (proc.stdout or "").splitlines():
             line = line.strip()

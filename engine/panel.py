@@ -15,7 +15,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.16.2'
+__version__ = '0.16.3'
 import json
 import codecs
 import copy
@@ -2566,18 +2566,27 @@ def _process_exists(pid):
         except (FileNotFoundError, PermissionError, OSError):
             pass
         return True
-    # 校验可执行名，防 PID 复用误判（PID 已回收给别的进程时旧 PID 会被误认为"还在运行"）
+    # 优先使用 Win32 OpenProcess + GetExitCodeProcess 探测存活，避免每次拉起 tasklist 子进程
     try:
-        _rc, out = _run_console(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
-        return bool(out.strip())
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            try:
+                exit_code = ctypes.c_uint32(0)
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == 259  # STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
+        if kernel32.GetLastError() == 5:  # ERROR_ACCESS_DENIED：高权限进程存在
+            return True
+        return False
     except Exception:
         pass
     try:
-        import ctypes
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if handle:
-            ctypes.windll.kernel32.CloseHandle(handle)
-            return True
+        _rc, out = _run_console(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"])
+        return bool(out.strip())
     except Exception:
         pass
     return False
