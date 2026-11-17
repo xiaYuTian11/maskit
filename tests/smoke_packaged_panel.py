@@ -41,12 +41,17 @@ def main():
         panel_port, upstream_port = free_port(), free_port()
         while panel_port == upstream_port:
             upstream_port = free_port()
+        # meta 标记必须带上：panel.load_config 的一次性迁移
+        # （engine/panel.py 的 stop_mode_passthrough_default_v2 分支）在没有该标记时
+        # 会把 auto_start_proxy 强制改写成 True。那时引擎启动即拉起代理，
+        # 下面「启动时代理必须是关闭的」断言就只剩竞态窗口——快机器上必红。
         cfg = {
             "capture_mode": "reverse", "auto_start_proxy": False,
             "autostart": False, "stop_mode": "block", "price_sync_enabled": False,
             "upstreams": [{"name": "isolated", "port": upstream_port,
                            "target": "http://127.0.0.1:9", "paths": ["/v1"]}],
             "ner_enabled": False, "debug": False,
+            "meta": {"stop_mode_passthrough_default_v2": True},
         }
         (data / "config.json").write_text(json.dumps(cfg), encoding="utf-8")
         env = {k: v for k, v in os.environ.items()
