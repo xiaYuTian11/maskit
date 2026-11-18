@@ -42,7 +42,7 @@ from body_buffer import decode_body
 import inspection
 import onboarding
 import protocol_contracts as _contracts
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from shield_defaults import (
     DEFAULT_DOMAINS,
     DEFAULT_PATHS,
@@ -5425,6 +5425,7 @@ _SUFFIX_PAT = r"(?:[0-9a-f]{6}|[bcdfghjkmnpqrstvwxz]{6})"
 _LABEL_PAT = r"[A-Z0-9\u4e00-\u9fff]{1,12}"
 # 宽松修正遍额外允许小写与下划线（模型会改写大小写、把 IPPRIVATE 补成 IP_PRIVATE）
 _LABEL_PAT_LOOSE = r"[A-Za-z0-9_\u4e00-\u9fff]{1,12}"
+_LABEL_LOOSE_FULL_RX = re.compile(r"^" + _LABEL_PAT_LOOSE + r"$")
 
 # 完整占位符 / 行尾半截占位符（流式时可能被切在两个 chunk 之间）
 _PLACEHOLDER_RX = re.compile(r"\{\{" + _LABEL_PAT + r"_" + _SUFFIX_PAT + r"\}\}")
@@ -5480,15 +5481,29 @@ _LOOSE_PLACEHOLDER_RX = re.compile(
 # 比如「今天天气」）不会被扣住。
 _PARTIAL_RX = re.compile(
     r"(?:\\{0,3}\{){1,3}\s{0,4}[A-Za-z0-9_\u4e00-\u9fff]{0,20}\s{0,4}\\{0,3}\}?\\{0,3}$"
-    r"|\\{1,3}$")
+    r"|\\{1,3}$"
+    r"|%7[Bb]%7[Bb](?:%20|\s){0,4}(?:[A-Za-z0-9_\u4e00-\u9fff\s]|%(?!7[Dd])[0-9A-Fa-f]{2}){0,56}(?:%7[Dd](?:%7?)?|%[0-9A-Fa-f]?)?$"
+    r"|%7[Bb](?:%7?)?$"
+    r"|%7?$")
 # 扣留上限：必须 ≥ _PARTIAL_RX 能匹配出的最长片段，否则「扣不下」会退化成
 # 「就地处理半截占位符」——比如此前是 24，而二次转义的完整片段长 25，
 # 于是它总是不被扣留、还原后留下 `\\}` 残渣。
-# 反斜杠与空白都封顶后，模式的理论上限 = 3 单元×4 + 4 + 20 + 4 + (3+1+3) = 47，
-# 故放到 48。空白原是无界 `\s*`，那样「理论最长」根本无从计算，扣留上限也就
-# 失去依据（`{{` 后跟 40+ 空白的半截块扣不下，退化成留残渣）。
+# 反斜杠与空白都封顶后，转义分支的理论上限 = 47；URL 编码分支（12 字中文标签
+# 经 UTF-8 编码约 36 个 `%XX`，加上前后 `%7B%7B` / `%20` / `_后缀` / `%7D%7`）
+# 理论上限 = 6 + 12 + 56×3 + 5 = 191，故放到 192。
 # 保持小而具体：只是「一段疑似半截占位符」，不是缓冲任意文本。
-_PARTIAL_MAX = 48
+_PARTIAL_MAX = 192
+# URL 百分号编码形态：`%7B%7B%E7%BC%96%E5%8F%B7_vrsmgp%7D%7D`（Markdown `file:///` 链接等）。
+# 模型生成文件/网页链接时常把 `{{...}}` 与中文标签一起 percent-encode；若不还原，
+# 不仅链接失效，UTF-8 编码末字节（如 `%B7`）还会与 `_后缀` 拼出 `B7_vrsmgp` 被
+# `_LOOSE_PLACEHOLDER_RX` 误吃并报出大量 unresolved（2026-11-18 实测）。
+# `[A-Za-z0-9_\u4e00-\u9fff]` 与 `%(?!7[Dd])[0-9A-Fa-f]{2}` 首字符完全不相交，线性匹配。
+_URL_PLACEHOLDER_RX = re.compile(
+    r"%7[Bb]%7[Bb](?:%20|\s){0,4}"
+    r"((?:[A-Za-z0-9_\u4e00-\u9fff]|%(?!7[Dd])[0-9A-Fa-f]{2}){1,48}?)"
+    r"(?:_|%5[Ff])(" + _SUFFIX_PAT + r")"
+    r"(?:%20|\s){0,4}%7[Dd]%7[Dd]"
+)
 # 从完整占位符里拆出 label 与后缀。多处要用，别再各写各的正则——
 # 0.1.12 就有三处各自写死 [0-9a-f]{6}，改格式时漏一处就是静默失效。
 _PLACEHOLDER_PARTS_RX = re.compile(r"^\{\{(" + _LABEL_PAT + r")_(" + _SUFFIX_PAT + r")\}\}$")
@@ -7387,17 +7402,15 @@ def restore(text, sid, channel="", escape=False, final=False):
     if not confirmed:
         return ""
 
-    def _sub(m):
-        whole = m.group(0)
-        lab_raw = m.group(1)
-        suffix = m.group(2)
+    def _resolve_braced(whole, lab_raw, suffix):
         canon = "{{%s_%s}}" % (lab_raw.upper(), suffix.lower())
         orig = _lookup(canon, sid)
         via_suffix = False
         real_token = canon if orig is not None else None
         if orig is None:
             # 标签被模型改写（补回下划线 / 全小写 / 变异）时按后缀反查。
-            # 这里是双花括号形态，由 _BRACED_PLACEHOLDER_RX 保证带花括号，可以安全走后缀索引。
+            # 这里是双花括号形态，由 _BRACED_PLACEHOLDER_RX / _URL_PLACEHOLDER_RX
+            # 保证带花括号语义，可以安全走后缀索引。
             real = _suffix_real_token(canon)
             if real is not None:
                 orig = _lookup(real, sid)
@@ -7425,7 +7438,7 @@ def restore(text, sid, channel="", escape=False, final=False):
             # 后缀是 6 位 hex 或 6 位纯辅音，普通文本不会自然出现 `{{ word_abcdfg }}`。
             with _STATE_LOCK:      # B-1a ②
                 _note_unresolved_token(s, whole, suffix)
-            return whole
+            return None
         with _STATE_LOCK:          # B-1a ②：计数 + 集合去重追加必须一起进锁
             s["restored"] = s.get("restored", 0) + 1
             s["restored_tokens"].add(real_token or canon)
@@ -7434,6 +7447,11 @@ def restore(text, sid, channel="", escape=False, final=False):
                 # 靠空格容错或改写容错救回来的，计入 degraded
                 s["degraded"] = s.get("degraded", 0) + 1
         return json.dumps(orig, ensure_ascii=False)[1:-1] if escape else orig
+
+    def _sub(m):
+        whole = m.group(0)
+        res = _resolve_braced(whole, m.group(1), m.group(2))
+        return whole if res is None else res
 
     out = _BRACED_PLACEHOLDER_RX.sub(_sub, confirmed)
 
@@ -7473,8 +7491,27 @@ def restore(text, sid, channel="", escape=False, final=False):
             return json.dumps(orig, ensure_ascii=False)[1:-1] if escape else orig
         out = _ESCAPED_PLACEHOLDER_RX.sub(_esc_sub, out)
 
-    # 第三遍：捞回被模型剥了花括号 / 只剩单花括号的占位符。
-    # 只在前面两遍之后跑，且只认「查得到原文」的 token——查不到就原样放回，绝不猜。
+    # 第三遍：URL 百分号编码形态 `%7B%7B...%7D%7D`（Markdown file:/// 链接等）。
+    # 必须跑在宽松遍之前：否则未还原的 `%E7%BC%96%E5%8F%B7_vrsmgp` 末字节 `%B7`
+    # 会与 `_vrsmgp` 拼成 `B7_vrsmgp` 被宽松遍误吃并刷出大量 unresolved；
+    # 若该项确实查不到映射，记录其区间供宽松遍跳过，避免重复计数。
+    had_url_unresolved = False
+    if "%" in out:
+        def _url_sub(m):
+            nonlocal had_url_unresolved
+            whole = m.group(0)
+            lab_decoded = unquote(m.group(1)).strip()
+            if not _LABEL_LOOSE_FULL_RX.match(lab_decoded):
+                return whole
+            res = _resolve_braced(whole, lab_decoded, m.group(2))
+            if res is None:
+                had_url_unresolved = True
+                return whole
+            return res
+        out = _URL_PLACEHOLDER_RX.sub(_url_sub, out)
+
+    # 第四遍：捞回被模型剥了花括号 / 只剩单花括号的占位符。
+    # 只在前面三遍之后跑，且只认「查得到原文」的 token——查不到就原样放回，绝不猜。
     # **这一遍不走后缀索引**：裸 token 可能只是被 chunk 切开的残片，按后缀命中
     # 就会把残片替换成明文（见 _RECENT_SUFFIX 注释）。
     # degraded 计数进 RESTORE 事件（`degraded=` 参数，见 _restore_emit），
@@ -7482,8 +7519,16 @@ def restore(text, sid, channel="", escape=False, final=False):
     # 参数——计数只加在会话 dict 里，从没发出去过，于是这条信息永远查不到。
     # 实测生产库 8805 条 RESTORE 里该字段一条都不存在，正是因此。0.1.14 补上。
     if "_" in out:
+        url_skip_spans = (
+            [(um.start(), um.end()) for um in _URL_PLACEHOLDER_RX.finditer(out)
+             if _LABEL_LOOSE_FULL_RX.match(unquote(um.group(1)).strip())]
+            if had_url_unresolved else ()
+        )
+
         def _loose_sub(m):
             whole = m.group(0)
+            if url_skip_spans and any(a <= m.start() < b for a, b in url_skip_spans):
+                return whole
             if whole.startswith("{{") and whole.endswith("}}"):
                 return whole  # 双花括号形态第一遍已处理
             tok_body = (m.group(1) or m.group(2) or "").strip()
@@ -8092,9 +8137,9 @@ def _count_orphans_without_session(sid, text):
         samples = []
         foreign = 0
         foreign_samples = []
-        for m in _BRACED_PLACEHOLDER_RX.finditer(text):
-            whole = m.group(0)
-            if _issued_suffix(m.group(2)):
+        def _collect_orphan(whole, suffix):
+            nonlocal n, foreign
+            if _issued_suffix(suffix):
                 n += 1
                 if len(samples) < _UNRESOLVED_SAMPLES_MAX:
                     samples.append(whole)
@@ -8102,6 +8147,13 @@ def _count_orphans_without_session(sid, text):
                 foreign += 1
                 if len(foreign_samples) < _FOREIGN_SAMPLES_MAX:
                     foreign_samples.append(whole)
+
+        for m in _BRACED_PLACEHOLDER_RX.finditer(text):
+            _collect_orphan(m.group(0), m.group(2))
+        if "%" in text:
+            for m in _URL_PLACEHOLDER_RX.finditer(text):
+                if _LABEL_LOOSE_FULL_RX.match(unquote(m.group(1)).strip()):
+                    _collect_orphan(m.group(0), m.group(2))
         if n <= 0 and foreign <= 0:
             return
         if sid not in _NO_SESSION_ORPHANS and len(_NO_SESSION_ORPHANS) >= _NO_SESSION_ORPHANS_MAX:
