@@ -244,3 +244,148 @@ export async function updateTrayProxyStatus(running: boolean): Promise<void> {
   }
 }
 
+// ========== 桌面窗口样式与控制（非 Tauri / Docker Web 端全部静默跳过） ==========
+
+export type WindowChromeMode = 'custom' | 'native'
+
+export interface DesktopWindowState {
+  maximized: boolean
+  focused: boolean
+}
+
+let chromeModePromise: Promise<WindowChromeMode> | null = null
+
+/** 同步首帧提示值，避免桌面自定义标题栏在 IPC 返回前发生顶栏布局跳动。
+ *  权威真值仍以 Rust `get_window_chrome_mode` 为准，非 Tauri 恒为 `'native'`。 */
+export function getInitialWindowChromeMode(): WindowChromeMode {
+  if (!isTauri() || typeof navigator === 'undefined') return 'native'
+  return /Windows/i.test(navigator.userAgent) ? 'custom' : 'native'
+}
+
+/** 从 Rust 壳层读取窗口装饰模式真值；Web / Docker 环境固定返回 `'native'`。 */
+export function getWindowChromeMode(): Promise<WindowChromeMode> {
+  if (!isTauri()) return Promise.resolve('native')
+  if (!chromeModePromise) {
+    chromeModePromise = invoke<string>('get_window_chrome_mode')
+      .then((m): WindowChromeMode => (m === 'custom' ? 'custom' : 'native'))
+      .catch(() => getInitialWindowChromeMode())
+  }
+  return chromeModePromise
+}
+
+/** 同步桌面原生窗口深/浅色主题（WebView2 滚动条、菜单与原生边框）。 */
+export async function syncWindowTheme(theme: 'dark' | 'light'): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().setTheme(theme)
+  } catch {
+    // 浏览器调试或不支持 setTheme 的环境静默忽略
+  }
+}
+
+export async function windowMinimize(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().minimize()
+  } catch {}
+}
+
+export async function windowToggleMaximize(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().toggleMaximize()
+  } catch {}
+}
+
+export async function windowClose(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().close()
+  } catch {}
+}
+
+/** 订阅窗口最大化与失焦状态（对高频 onResized 做 100ms 防抖合并）。 */
+export async function subscribeWindowState(
+  cb: (state: DesktopWindowState) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {}
+  let disposed = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const current: DesktopWindowState = {
+    maximized: false,
+    focused: typeof document !== 'undefined' ? document.hasFocus() : true,
+  }
+  const emit = () => {
+    if (!disposed) cb({ ...current })
+  }
+
+  let unlistenResize: (() => void) | null = null
+  let unlistenFocus: (() => void) | null = null
+  const onWinFocus = () => {
+    if (!current.focused) {
+      current.focused = true
+      emit()
+    }
+  }
+  const onWinBlur = () => {
+    if (current.focused) {
+      current.focused = false
+      emit()
+    }
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', onWinFocus)
+    window.addEventListener('blur', onWinBlur)
+  }
+
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    try {
+      current.maximized = await win.isMaximized()
+    } catch {}
+    emit()
+
+    unlistenResize = await win.onResized(() => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(async () => {
+        if (disposed) return
+        try {
+          const nextMax = await win.isMaximized()
+          if (nextMax !== current.maximized) {
+            current.maximized = nextMax
+            emit()
+          }
+        } catch {}
+      }, 100)
+    })
+
+    try {
+      unlistenFocus = await win.onFocusChanged(({ payload }) => {
+        if (payload !== current.focused) {
+          current.focused = payload
+          emit()
+        }
+      })
+    } catch {
+      // 权限或平台不支持时回退上面的 DOM focus/blur
+    }
+  } catch {}
+
+  return () => {
+    disposed = true
+    if (timer) clearTimeout(timer)
+    unlistenResize?.()
+    unlistenFocus?.()
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', onWinFocus)
+      window.removeEventListener('blur', onWinBlur)
+    }
+  }
+}
+
+

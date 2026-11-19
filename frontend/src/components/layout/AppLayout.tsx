@@ -3,6 +3,7 @@
  * 视觉：shadcn/ui token + Tailwind，暗色优先（data-theme 切换）
  */
 import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { NavLink } from 'react-router-dom'
 import { useVisibility } from '@/lib/useVisibility'
 import {
@@ -50,7 +51,18 @@ function GithubIcon({ className }: { className?: string }) {
 }
 import { useI18n } from '@/lib/i18n'
 import { isTauri } from '@/lib/shield-fetch'
-import { checkUpdate, getShellVersion, updateTrayProxyStatus } from '@/lib/tauri'
+import {
+  checkUpdate,
+  getInitialWindowChromeMode,
+  getShellVersion,
+  getWindowChromeMode,
+  subscribeWindowState,
+  syncWindowTheme,
+  updateTrayProxyStatus,
+  type DesktopWindowState,
+  type WindowChromeMode,
+} from '@/lib/tauri'
+import { WindowControls } from '@/components/layout/WindowControls'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { getStoredWallpaperConfig } from '@/lib/wallpaper'
 
@@ -73,18 +85,23 @@ function useTheme() {
   const [dark, setDark] = useState(() => {
     return document.documentElement.getAttribute('data-theme') === 'dark'
   })
-  const toggle = () => {
-    setDark((prev) => {
-      const next = !prev
-      document.documentElement.setAttribute('data-theme', next ? 'dark' : 'light')
-      try {
-        localStorage.setItem('shield_theme', next ? 'dark' : 'light')
-      } catch {
-        // localStorage 不可用时仅内存态
-      }
-      return next
-    })
-  }
+
+  useEffect(() => {
+    const theme: 'dark' | 'light' = dark ? 'dark' : 'light'
+    document.documentElement.setAttribute('data-theme', theme)
+    const themeMeta = document.querySelector('meta[name="theme-color"]')
+    if (themeMeta) {
+      themeMeta.setAttribute('content', dark ? '#17171a' : '#eaeaed')
+    }
+    try {
+      localStorage.setItem('shield_theme', theme)
+    } catch {
+      // localStorage 不可用时仅内存态
+    }
+    void syncWindowTheme(theme)
+  }, [dark])
+
+  const toggle = () => setDark((prev) => !prev)
   return { dark, toggle }
 }
 
@@ -100,6 +117,43 @@ export function AppLayout({ children }: { children: ReactNode }) {
     }
   })
   const { dark, toggle } = useTheme()
+  const [chromeMode, setChromeMode] = useState<WindowChromeMode>(() => getInitialWindowChromeMode())
+  const [winState, setWinState] = useState<DesktopWindowState>({
+    maximized: false,
+    focused: typeof document !== 'undefined' ? document.hasFocus() : true,
+  })
+  const isCustomChrome = chromeMode === 'custom'
+
+  useEffect(() => {
+    let active = true
+    void getWindowChromeMode().then((mode) => {
+      if (active) setChromeMode(mode)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    document.documentElement.dataset.windowChrome = isCustomChrome ? 'custom' : 'native'
+    if (!isCustomChrome) return
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    void subscribeWindowState((next) => {
+      if (!disposed) setWinState(next)
+    }).then((fn) => {
+      if (disposed) {
+        fn()
+      } else {
+        unlisten = fn
+      }
+    })
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [isCustomChrome])
+
   const queryClient = useQueryClient()
   const { engineReady, engineError } = useAuthStore()
   // 页面隐藏时停止所有轮询（WebView2 后台不再渲染/请求），可见时自动刷新
@@ -344,16 +398,30 @@ export function AppLayout({ children }: { children: ReactNode }) {
           collapsed ? 'w-[64px]' : 'w-[208px]',
         )}
       >
-        {/* Logo 区 */}
-        <div className={cn('flex h-14 shrink-0 items-center gap-2.5 border-b px-3', collapsed && 'justify-center px-0')}>
-          <Logo className="h-7 w-7 shrink-0" />
+        {/* Logo 区（Windows 自定义无边框模式下整个区域可拖拽窗口） */}
+        <div
+          data-tauri-drag-region={isCustomChrome || undefined}
+          className={cn(
+            'flex h-14 shrink-0 items-center gap-2.5 border-b px-3 transition-opacity duration-150',
+            collapsed && 'justify-center px-0',
+            isCustomChrome && 'select-none',
+            isCustomChrome && !winState.focused && 'opacity-75',
+          )}
+        >
+          <div className={cn('shrink-0', isCustomChrome && 'pointer-events-none')}>
+            <Logo className="h-7 w-7 shrink-0" />
+          </div>
           {!collapsed && (
-            <div className="min-w-0">
+            <div className={cn('min-w-0', isCustomChrome && 'pointer-events-none')}>
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-[13px] font-semibold leading-tight tracking-[-0.01em]">Data Maskit</span>
                 {(status?.version || shellVersion) && (
                   <span
-                    className="shrink-0 rounded bg-muted px-1 py-px font-mono text-[9.5px] leading-none text-muted-foreground"
+                    data-tauri-drag-region={isCustomChrome || undefined}
+                    className={cn(
+                      'shrink-0 rounded bg-muted px-1 py-px font-mono text-[9.5px] leading-none text-muted-foreground',
+                      isCustomChrome && 'pointer-events-auto',
+                    )}
                     title={status?.version ? undefined : t('common.versionFromShell')}
                   >
                     v{status?.version || shellVersion}
@@ -418,10 +486,22 @@ export function AppLayout({ children }: { children: ReactNode }) {
       {/* ===== 主区 ===== */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* 顶栏：毛玻璃 */}
-        <header className="vibrancy flex h-14 shrink-0 items-center gap-3 border-b px-5">
+        <header
+          className={cn(
+            'vibrancy flex h-14 shrink-0 items-center border-b',
+            isCustomChrome ? 'gap-2 pl-5 pr-3' : 'gap-3 px-5',
+          )}
+        >
           {/* 状态指示 */}
-          <div className="flex items-center gap-2.5">
-            <span className="relative flex h-2.5 w-2.5">
+          <div
+            data-tauri-drag-region={isCustomChrome || undefined}
+            className={cn(
+              'flex shrink-0 items-center gap-2.5 transition-opacity duration-150',
+              isCustomChrome && 'select-none',
+              isCustomChrome && !winState.focused && 'opacity-75',
+            )}
+          >
+            <span className={cn('relative flex h-2.5 w-2.5', isCustomChrome && 'pointer-events-none')}>
               {/* 去掉常驻 animate-ping：它每帧重绘合成层，是 WebView2 后台发热的主因之一。
                   运行态用静态圆点，异常/启动过渡态才用 pulse 提醒（少例不常驻）。
                   彩色光晕也一并去掉：零偏移光晕是装饰不是深度；状态由色相自己表达，
@@ -439,7 +519,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 )}
               />
             </span>
-            <span className="text-[13px] font-medium text-foreground">
+            <span className={cn('text-[13px] font-medium text-foreground', isCustomChrome && 'pointer-events-none')}>
               {showEngineError
                 ? t('layout.engineErr')
                 : isStarting
@@ -453,13 +533,34 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
 
           {/* 页面标题（从路由映射，填充顶栏空白） */}
-          <div className="ml-2 hidden items-baseline gap-2.5 sm:flex">
-            <h1 className="text-[15px] font-bold tracking-tight">{pageTitle}</h1>
+          <div
+            data-tauri-drag-region={isCustomChrome || undefined}
+            className={cn(
+              'ml-2 hidden min-w-0 items-baseline gap-2.5 transition-opacity duration-150 sm:flex',
+              isCustomChrome && 'select-none',
+              isCustomChrome && !winState.focused && 'opacity-75',
+            )}
+          >
+            <h1 className={cn('truncate text-[15px] font-bold tracking-tight', isCustomChrome && 'pointer-events-none')}>
+              {pageTitle}
+            </h1>
           </div>
 
           {/* fallback 徽章 */}
           {status && !isRunning && status.fallback_mode && (
-            <span className="rounded-full border border-warning/30 bg-warning/10 px-2.5 py-0.5 text-2xs font-medium text-warning-ink">
+            <span
+              className={cn(
+                'shrink-0 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-0.5 text-2xs font-medium text-warning-ink',
+                isCustomChrome && 'max-w-[140px] truncate lg:max-w-none',
+              )}
+              title={`${t('layout.fallbackPrefix')}${
+                status.fallback_mode === 'passthrough'
+                  ? t('layout.fallbackPass')
+                  : status.fallback_mode === 'error'
+                    ? t('layout.fallback503')
+                    : t('layout.fallbackBlock')
+              }`}
+            >
               {t('layout.fallbackPrefix')}
               {status.fallback_mode === 'passthrough'
                 ? t('layout.fallbackPass')
@@ -469,7 +570,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </span>
           )}
 
-          <div className="ml-auto flex items-center gap-2">
+          {/* 中间弹性拖拽区：任何宽度的空白处都可按住拖动/双击最大化 */}
+          <div
+            data-tauri-drag-region={isCustomChrome || undefined}
+            className={cn('h-full min-w-4 flex-1', isCustomChrome && 'select-none')}
+          />
+
+          <div className={cn('flex shrink-0 items-center', isCustomChrome ? 'gap-1 lg:gap-2' : 'gap-1.5 sm:gap-2')}>
             {/* 有新版时的入口：降为 ghost 小字（2026-10-29）。
                 旧版这里是实心主色按钮，与右侧「停止代理」并排两个高饱和控件，
                 而它其实是一个可以晚点再处理的事 —— 每屏都在抢注意力，真正的
@@ -480,13 +587,23 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 variant="ghost"
                 onClick={() => navigate(isTauri() ? '/settings?tab=about&install=1' : '/settings?tab=about')}
                 title={tf('layout.newVersionHint', { v: updateVersion ?? '' })}
-                className="h-8 gap-1.5 rounded-full px-3 text-xs font-medium text-primary-ink hover:text-primary-ink"
+                className={cn(
+                  'h-8 gap-1.5 rounded-full text-xs font-medium text-primary-ink hover:text-primary-ink',
+                  isCustomChrome ? 'px-2 lg:px-3' : 'px-3',
+                )}
               >
                 <ArrowUpCircle className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">{tf('layout.updateTo', { v: updateVersion ?? '' })}</span>
+                <span className={cn('hidden', isCustomChrome ? 'lg:inline' : 'sm:inline')}>{tf('layout.updateTo', { v: updateVersion ?? '' })}</span>
               </Button>
             ) : (
-              <Button size="sm" variant="ghost" onClick={checkForUpdate} title={t('common.checkUpdate')} className="gap-1.5 rounded-full px-3" disabled={checkingUpdate}>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={checkForUpdate}
+                title={t('common.checkUpdate')}
+                className={cn('gap-1.5 rounded-full', isCustomChrome ? 'px-2 lg:px-3' : 'px-3')}
+                disabled={checkingUpdate}
+              >
                 {checkingUpdate ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : upToDateNotice ? (
@@ -494,7 +611,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 ) : (
                   <RefreshCw className="h-3.5 w-3.5" />
                 )}
-                <span className={cn('hidden sm:inline', upToDateNotice && 'font-medium text-success-ink')}>
+                <span className={cn('hidden', isCustomChrome ? 'lg:inline' : 'sm:inline', upToDateNotice && 'font-medium text-success-ink')}>
                   {upToDateNotice ? t('layout.upToDate') : t('common.checkUpdate')}
                 </span>
               </Button>
@@ -510,7 +627,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
               variant="ghost"
               onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
               title={lang === 'zh' ? t('layout.switchToEnglish') : t('layout.switchToChinese')}
-              className="h-8 gap-1.5 rounded-full px-3 text-xs font-medium text-muted-foreground hover:text-foreground"
+              className={cn(
+                'h-8 gap-1.5 rounded-full text-xs font-medium text-muted-foreground hover:text-foreground',
+                isCustomChrome ? 'px-2 lg:px-3' : 'px-3',
+              )}
             >
               <Languages className="h-3.5 w-3.5" />
               <span>{lang === 'zh' ? 'EN' : '中'}</span>
@@ -569,6 +689,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
                     ? t('layout.stopProxy')
                     : t('layout.startProxy')}
             </Button>
+            {isCustomChrome && (
+              <>
+                <div className="mx-0.5 h-4 w-px shrink-0 bg-border/60" aria-hidden="true" />
+                {/* 与底部脱离 .vibrancy stacking context 的 fixed WindowControls 精确等宽占位 */}
+                <div className="w-[104px] shrink-0" aria-hidden="true" />
+              </>
+            )}
           </div>
         </header>
 
@@ -631,6 +758,26 @@ export function AppLayout({ children }: { children: ReactNode }) {
         onOpenChange={setOnboardingOpen}
         firstRun={status ? (status.upstreams?.length ?? 0) === 0 : undefined}
       />
+      {/* 必须 Portal 到 document.body：外层根节点带 isolate 会锁死层叠上下文，
+          不跳出的话 DialogPortal(z-50) 与拖拽拦截层(z-[55]) 会盖住三键导致弹窗期无法点击。 */}
+      {isCustomChrome && typeof document !== 'undefined' &&
+        createPortal(
+          <>
+            <div className="pointer-events-auto fixed right-3 top-3 z-[60] flex items-center gap-1">
+              <WindowControls maximized={winState.maximized} focused={winState.focused} />
+            </div>
+            {!winState.maximized && (
+              <div
+                aria-hidden="true"
+                className={cn(
+                  'pointer-events-none fixed inset-0 z-[70] ring-1 ring-inset',
+                  dark ? 'ring-white/10' : 'ring-black/10',
+                )}
+              />
+            )}
+          </>,
+          document.body,
+        )}
     </div>
   )
 }

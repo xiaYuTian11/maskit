@@ -1917,6 +1917,25 @@ fn set_tray_language(lang: String) {
     linux_tray::update_language();
 }
 
+/// 窗口装饰模式真值源：仅 Windows 使用 `tauri.windows.conf.json` 的无边框配置
+/// （前端据此渲染自绘标题栏三键与拖拽区）；macOS / Linux 保持原生窗口装饰。
+fn window_chrome_mode() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "custom"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "native"
+    }
+}
+
+/// 返回当前桌面端的窗口标题栏模式（`"custom"` | `"native"`）。
+#[tauri::command]
+fn get_window_chrome_mode() -> &'static str {
+    window_chrome_mode()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let manager = Arc::new(EngineManager::new());
@@ -1949,7 +1968,8 @@ pub fn run() {
             check_update,
             install_update,
             update_tray_proxy_status,
-            set_tray_language
+            set_tray_language,
+            get_window_chrome_mode
         ])
         .setup(|app| {
             // 日志插件 release 也注册。此前只在 debug 注册，导致壳层所有
@@ -2570,5 +2590,43 @@ mod engine_port_tests {
         for p in [5800u16, 5806, 6001, 9000] {
             assert!(!super::panel_port_supported(p), "{p} 超出 CSP 范围，不应被当作可用");
         }
+    }
+
+    #[test]
+    fn window_chrome_mode_matches_target_os() {
+        #[cfg(target_os = "windows")]
+        assert_eq!(super::window_chrome_mode(), "custom");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(super::window_chrome_mode(), "native");
+    }
+
+    /// Tauri v2 合并 `tauri.windows.conf.json` 走 RFC 7396 JSON Merge Patch，
+    /// `app.windows` 数组是整段替换而非按字段合并——缺任何基础字段都会把
+    /// Windows 窗口打回默认值（例如 `visible: false` 丢失导致开机自启闪窗）。
+    #[test]
+    fn windows_config_preserves_base_window_fields() {
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("parse tauri.conf.json");
+        let win: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json"))
+                .expect("parse tauri.windows.conf.json");
+        let base_w = base["app"]["windows"][0]
+            .as_object()
+            .expect("base windows[0] must be object");
+        let win_w = win["app"]["windows"][0]
+            .as_object()
+            .expect("windows windows[0] must be object");
+        for (k, v) in base_w {
+            assert_eq!(
+                win_w.get(k),
+                Some(v),
+                "tauri.windows.conf.json 遗漏或偏离基础窗口字段 `{k}`"
+            );
+        }
+        assert_eq!(
+            win_w.get("decorations").and_then(|v| v.as_bool()),
+            Some(false),
+            "Windows 窗口配置必须显式关闭原生边框"
+        );
     }
 }

@@ -13,6 +13,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Data Maskit",
         "width": 1200,
         "height": 800,
@@ -22,7 +23,9 @@
         "fullscreen": false,
         "center": true,
         "visible": false,
-        "devtools": false
+        "devtools": false,
+        "theme": "Dark",
+        "backgroundColor": "#17171A"
       }
     ],
     "security": {

@@ -55,7 +55,7 @@ export function HelpCenter({ onRestartTour }: { onRestartTour: () => void }) {
         className="h-8 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
       >
         <CircleHelp className="h-4 w-4" />
-        <span className="hidden md:inline">{t('help.open')}</span>
+        <span className="hidden lg:inline">{t('help.open')}</span>
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-2xl">

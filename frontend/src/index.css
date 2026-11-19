@@ -5,6 +5,7 @@
 @layer base {
   /* shadcn/ui 颜色变量（浅色）：背景 slate-50 与白卡拉开层次 */
   :root {
+    color-scheme: light;
     /* ===== macOS 浅色（Big Sur+ 语义色）=====
        窗口底 #EAEAED / 卡面纯白 / 标签 #1D1D1F（Apple labelColor）
        强调色 #007AFF（systemBlue），不是自选靛蓝 —— macOS 原生控件的辨识度
@@ -61,6 +62,7 @@
   }
 
   [data-theme='dark'] {
+    color-scheme: dark;
     /* ===== macOS 深色 =====
        窗口底 #17171A / 卡面 #222226 / 标签 #F5F5F7
        强调色 #0A84FF（systemBlue Dark）。 */

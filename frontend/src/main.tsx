@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 import { LanguageProvider } from '@/lib/i18n'
+import { getInitialWindowChromeMode, syncWindowTheme } from '@/lib/tauri'
 import './index.css'
 
 // ===== 主题初始化：render 前同步执行（暗色优先） =====
@@ -24,10 +25,14 @@ try {
 } catch {
   savedTheme = null
 }
-document.documentElement.setAttribute(
-  'data-theme',
-  savedTheme === 'light' ? 'light' : 'dark',
-)
+const initialTheme: 'dark' | 'light' = savedTheme === 'light' ? 'light' : 'dark'
+document.documentElement.setAttribute('data-theme', initialTheme)
+document.documentElement.dataset.windowChrome = getInitialWindowChromeMode()
+const themeMeta = document.querySelector('meta[name="theme-color"]')
+if (themeMeta) {
+  themeMeta.setAttribute('content', initialTheme === 'dark' ? '#17171a' : '#eaeaed')
+}
+void syncWindowTheme(initialTheme)
 
 // TanStack Query 全局配置（方案 §5：轮询/缓存/重试，不用裸 setInterval）
 const queryClient = new QueryClient({
@@ -49,7 +54,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <LanguageProvider>
       <QueryClientProvider client={queryClient}>
         <HashRouter>
-          <ErrorBoundary>
+          <ErrorBoundary root>
             <App />
           </ErrorBoundary>
         </HashRouter>
