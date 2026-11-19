@@ -4,6 +4,24 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.17.0] - 2026-11-19
+
+### 更新摘要 / Summary
+- Windows 桌面端全新升级无边框一体式顶栏，支持顶栏拖拽、双击最大化、圆角窗口控制三键以及深浅主题同步；macOS、Linux 与网页版保持原有体验。
+- 对话回复里带编码的链接占位符现在也能正常还原，不再在日志里误报未还原。
+- Redesigned the Windows desktop app with a frameless unified title bar, drag and double-click maximize, rounded window controls, and synced dark/light theme; macOS, Linux, and Web/Docker keep their native experience.
+- Placeholders inside encoded links in model replies are now restored properly without false unresolved warnings.
+
+### 新增与优化
+- Windows 桌面端启用无边框一体式毛玻璃顶栏：通过平台专属配置 `tauri.windows.conf.json` 仅对 Windows 生效，保留 macOS / Linux 原生边框与 Web / Docker 零入侵行为；补齐顶栏与 Logo 区拖拽穿透、双击最大化、圆角胶囊控制三键、失焦弱化、非最大化 1px 描边、弹窗期拖动与三键可点以及顶层错误边界兜底控制条。
+- Upgraded the Windows desktop client to a frameless unified frosted title bar via platform-specific `tauri.windows.conf.json` (keeping native frames on macOS/Linux and zero impact on Web/Docker), with drag regions, double-click maximize, rounded window controls, blur dimming, a 1px unmaximized border, modal-friendly titlebar controls, and a fallback control bar on root error boundaries.
+- 补齐深浅主题跨端同步：配置窗口初始暗色底色防启动闪白，补齐 CSS `color-scheme`、`theme-color` 与 WebView2 原生主题联动。
+- Synced dark/light theme across window startup background, CSS `color-scheme`, `theme-color`, and WebView2 native theme to avoid white flashes on launch.
+
+### 修复
+- 修复模型生成 `file:///` 等链接时对占位符及中文标签做 URL 百分号编码导致还原遗漏、且尾字节被误计为未还原（`unresolved`）的问题，并扩展流式切分扣留边界。
+- Fixed percent-encoded placeholders and CJK labels inside links (such as `file:///`) failing to restore and triggering false `unresolved` counts, with extended streaming holdback.
+
 ## [0.16.3] - 2026-11-17
 
 ### 更新摘要 / Summary
