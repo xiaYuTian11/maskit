@@ -1,3 +1,5 @@
+<!-- @guard G732 The top-level heading slots must match between README.md and README_EN.md one for one; editing a section means editing both files. -->
+<!-- @guard G734 Every <details> needs a matching </details>: an unclosed one swallows the rest of the page into the collapsed area and GitHub renders it without any error. -->
 <p align="center">
   <img src="frontend/public/favicon.svg" width="96" height="96" alt="Maskit Logo" />
 </p>
@@ -53,6 +55,65 @@ When using **Cursor, Claude Code, Codex, ChatGPT, or AI coding assistants**, con
 <p align="center">
   <img src="docs/screenshots/event-detail.png" alt="Real Masking & Restoration Details" width="85%" />
 </p>
+</details>
+
+---
+
+## 🚀 Download & Installation
+
+<!-- @guard G731 This section must directly follow "How It Works" and stay above "Key Highlights": visitors should see where to download on their first screen. -->
+<!-- @guard G733 None of the five integration paths or six screenshot references may be lost. -->
+
+> 📦 **Get it now**: download the installer for your platform from **[GitHub Releases](https://github.com/xiaYuTian11/maskit/releases/latest)**.
+
+| Platform | Artifact | Notes |
+| :--- | :--- | :--- |
+| **Windows** | `Maskit_<version>_x64-setup.exe` | Tray resident, Minisign-signed auto-updates |
+| **macOS (Apple Silicon)** | `Maskit_<version>_aarch64.dmg` | Drag to Applications |
+| **Linux** | `.deb` / `.AppImage` | x86_64 and aarch64 |
+| **Docker** | `ghcr.io/xiayutian11/maskit:latest` | amd64 / arm64, embedded Web Console |
+
+**macOS Gatekeeper notice**: if prompted about an unidentified developer, right-click and choose "Open", or run `xattr -cr /Applications/Maskit.app`.
+
+---
+
+### 🐳 Docker Private Gateway (Teams & NAS)
+
+```bash
+docker run -d --name maskit --restart unless-stopped \
+  -p 127.0.0.1:5801:5801 -p 127.0.0.1:18701:18701 \
+  -p 127.0.0.1:18702:18702 -p 127.0.0.1:18703:18703 \
+  -v maskit_data:/data ghcr.io/xiayutian11/maskit:latest
+```
+Open `http://127.0.0.1:5801` to access the management dashboard.
+
+<details>
+<summary><b>🔧 Click to expand: Build from Source & Local Development</b></summary>
+<br />
+
+#### Prerequisites
+- Python 3.13+
+- Node.js 20+
+- Rust 1.80+ (if compiling the desktop shell)
+
+#### Quick Run
+```bash
+git clone https://github.com/xiaYuTian11/maskit.git
+cd maskit
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..
+python engine/panel.py     # default port 5801
+```
+</details>
+
+<details>
+<summary><b>🛡️ Click to expand: Security Boundaries & Advanced Notes</b></summary>
+<br />
+
+1. **Reasoning Traces (Thinking Blocks)**: Anthropic signed thinking blocks are passed unmasked to preserve signature validity (preventing HTTP 400 conversation breaks); unsigned body and other model reasoning traces are masked and restored as usual;
+2. **Multimodal Masking Behavior**: Image redaction applies physical pixel coverage; external models cannot reconstruct masked secrets;
+3. **Command Interception Scope**: Acts as a secondary safety net inspecting plaintext high-risk shell commands (e.g. `rm -rf /`, `DROP DATABASE`), logged or blocked only when configured;
+4. **Log Privacy Levels**: Supports "Minimal (no plaintext stored)", "Local Detailed", and "15-minute diagnostic" modes; credentials are only ever stored as hash digests.
 </details>
 
 ---
@@ -139,77 +200,6 @@ Download `Maskit_<version>_extension.zip` from [Releases](https://github.com/xia
 | ![Logs](docs/screenshots/logs.png) | ![Words](docs/screenshots/words.png) |
 | **Stats & Token Costs** | **Security Audit Center** |
 | ![Stats](docs/screenshots/stats.png) | ![Audit](docs/screenshots/audit.png) |
-
----
-
-## 🚀 Download & Installation
-
-### Option A: Desktop App (Recommended for Personal Use)
-
-Download installers from **[GitHub Releases](https://github.com/xiaYuTian11/maskit/releases/latest)**:
-
-- **Windows**: Download `Maskit_<version>_x64-setup.exe` (tray resident, Minisign-signed auto-updates);
-- **macOS (Apple Silicon)**: Download `Maskit_<version>_aarch64.dmg` and drag to Applications.
-  > 💡 **macOS Gatekeeper notice**: If prompted about an unidentified developer, right-click and choose "Open", or run:
-  > `xattr -cr /Applications/Maskit.app`
-- **Linux**: `.deb` and `.AppImage` available for x86_64 and aarch64.
-
----
-
-### Option B: Docker Private Gateway (Recommended for Teams & NAS)
-
-Pull the official multi-arch image (supports `linux/amd64` and `linux/arm64`) with an embedded Web Console:
-
-```bash
-docker run -d \
-  --name maskit \
-  --restart unless-stopped \
-  -p 127.0.0.1:5801:5801 \
-  -p 127.0.0.1:18701:18701 \
-  -p 127.0.0.1:18702:18702 \
-  -p 127.0.0.1:18703:18703 \
-  -v maskit_data:/data \
-  ghcr.io/xiayutian11/maskit:latest
-```
-Open `http://127.0.0.1:5801` to access the management dashboard.
-
----
-
-<details>
-<summary><b>🔧 Click to expand: Build from Source & Local Development</b></summary>
-<br />
-
-#### Prerequisites
-- Python 3.13+
-- Node.js 20+
-- Rust 1.80+ (if compiling the desktop shell)
-
-#### Quick Run
-```bash
-# 1. Clone repo
-git clone https://github.com/xiaYuTian11/maskit.git
-cd maskit
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Build Web frontend
-cd frontend && npm install && npm run build && cd ..
-
-# 4. Launch engine service (default port 5801)
-python engine/panel.py
-```
-</details>
-
-<details>
-<summary><b>🛡️ Click to expand: Security Boundaries & Advanced Notes</b></summary>
-<br />
-
-1. **Reasoning Traces (Thinking Blocks)**: Anthropic signed thinking blocks are passed unmasked to preserve signature validity (preventing HTTP 400 conversation breaks); unsigned body and other model reasoning traces are masked and restored as usual;
-2. **Multimodal Masking Behavior**: Image redaction applies physical pixel coverage; external models cannot reconstruct masked secrets;
-3. **Command Interception Scope**: Acts as a secondary safety net inspecting plaintext high-risk shell commands (e.g. `rm -rf /`, `DROP DATABASE`), logged or blocked only when configured;
-4. **Log Privacy Levels**: Supports "Minimal (no plaintext stored)", "Local Detailed", and "15-minute diagnostic" modes; credentials are only ever stored as hash digests.
-</details>
 
 ---
 

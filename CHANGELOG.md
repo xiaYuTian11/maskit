@@ -4,6 +4,26 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [Unreleased]
+
+### 更新摘要 / Summary
+- 日志页现在把「脱敏成功」和「没发现敏感词」分开显示，不再满屏绿色「成功」分不清哪些请求真的被保护过。
+- 网页版 AI 里粘贴大段文本时，脱敏不会再提前放弃并把原文发出去，大段内容会等够处理时间。
+- 代理启动失败留下的故障快照现在带真正的启动报错，不再是一份空文件。
+- The logs page now tells "masked successfully" apart from "nothing to mask" instead of showing one green "success" for both.
+- Pasting long text into web AI no longer gives up early and sends the original through; large inputs now wait for processing to finish.
+- Crash snapshots from failed proxy startups now include the real startup error instead of being an empty file.
+
+### 修复
+- 网页版 AI 的文本脱敏改为按内容长度分档设置等待时间，并保证页面等待长于本地处理，避免大段内容在页面先放弃后被原样发出。
+- Text masking in the web extension now scales its wait time with input size and always waits longer than local processing, so large inputs are no longer forwarded unmasked.
+- 代理启动失败时，故障快照现在会带上子进程的启动输出，并且一次失败只留一份快照。
+- Failed proxy startups now record the child process output in the crash snapshot, and each failure leaves a single snapshot instead of two.
+
+### 优化
+- 日志筛选下拉删除了与相邻入口筛选重复的一项。
+- Removed a duplicate entry from the log filter dropdown that overlapped the adjacent source filter.
+
 ## [0.17.0] - 2026-11-19
 
 ### 更新摘要 / Summary

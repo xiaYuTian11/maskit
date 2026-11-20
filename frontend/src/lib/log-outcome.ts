@@ -23,6 +23,9 @@
 /** 结论：一次请求最终怎么了。与「事件类型」正交 —— 类型说明发生了什么，结论说明结果如何。 */
 export type OutcomeKey =
   | 'success'
+  /** 扫描通过但**一个敏感词都没命中**（引擎 `decision=scanned_clean`）：请求里没有可保护的东西。
+   * 与 `success` 分开是硬需求 —— 两者此前共用绿色「成功」，用户无法从列表判断脱敏到底生效没有。 */
+  | 'clean'
   | 'warn'
   | 'failed'
   | 'canceled'
@@ -32,11 +35,12 @@ export type OutcomeKey =
   | 'alert'
 
 /**
- * 下拉与图例的展示顺序：成功 → 需要注意 → 失败 → 未决 → 未处理 → 安全告警。
+ * 下拉与图例的展示顺序：成功 → 无敏感词 → 需要注意 → 失败 → 未决 → 未处理 → 安全告警。
  * 与 `OUTCOME_META`（展示层）共用同一份顺序，避免两处各排一遍而漂移。
  */
 export const OUTCOME_ORDER: readonly OutcomeKey[] = [
   'success',
+  'clean',
   'warn',
   'failed',
   'canceled',
@@ -49,6 +53,7 @@ export const OUTCOME_ORDER: readonly OutcomeKey[] = [
 /** 结论 → i18n 标签 key。 */
 export const OUTCOME_LABEL_KEY: Record<OutcomeKey, string> = {
   success: 'logs.outcome.success',
+  clean: 'logs.outcome.clean',
   warn: 'logs.outcome.warn',
   failed: 'logs.outcome.failed',
   canceled: 'logs.outcome.canceled',
@@ -61,6 +66,7 @@ export const OUTCOME_LABEL_KEY: Record<OutcomeKey, string> = {
 /** 结论 → i18n 提示 key（徽标悬停显示，解释「为什么是它」）。 */
 export const OUTCOME_HINT_KEY: Record<OutcomeKey, string> = {
   success: 'logs.outcomeHint.success',
+  clean: 'logs.outcomeHint.clean',
   warn: 'logs.outcomeHint.warn',
   failed: 'logs.outcomeHint.failed',
   canceled: 'logs.outcomeHint.canceled',
@@ -158,6 +164,12 @@ export function deriveOutcome(row: OutcomeInput, nowSec: number): OutcomeKey {
   if ((row.unresolved ?? 0) > 0) return 'warn'
   if ((row.degraded ?? 0) > 0) return 'warn'
   if (row.completeness === 'partial' || row.completeness === 'failed') return 'warn'
+  // @guard G701 上面四条告警判据必须先生效，`clean` 只能落在它们之后 ——
+  // 否则「未还原 / 兜底还原 / NER 截断 / HTTP 报错」的请求会被标成「无敏感词」。
+  // @guard G702 判据只能是引擎给的处置结论 `decision`，**不得**改用 `count === 0`：
+  // count 是派生量，NER 截断时它也可能是 0（那种情况 completeness=partial，已被上一行拦下）；
+  // 而历史行没有 decision 字段时用 count 判定会把既有门禁用例整体翻成 clean。
+  if (row.decision === 'scanned_clean') return 'clean'
   return 'success'
 }
 

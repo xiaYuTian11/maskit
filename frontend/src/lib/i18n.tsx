@@ -413,7 +413,9 @@ const zh: Record<string, string> = {
   // 列表原先的「结果」列渲染的是**事件类型**，而一次请求的 MASK 与 RESTORE 合并成一行、
   // 合并行保留 MASK 的类型，于是「脱敏成功」「客户端取消」「上游 502」长得一模一样。
   // 结论列回答的是「这次请求最终怎么了」，推导见 frontend/src/lib/log-outcome.ts。
-  'logs.outcome.success': '成功',
+  // @guard G613 新增结论键必须中英成对（`scripts/check-i18n.mjs` 同口径）。
+  'logs.outcome.success': '脱敏成功',
+  'logs.outcome.clean': '无敏感词',
   'logs.outcome.warn': '有告警',
   'logs.outcome.failed': '失败',
   'logs.outcome.canceled': '已取消',
@@ -421,7 +423,8 @@ const zh: Record<string, string> = {
   'logs.outcome.incomplete': '未完成',
   'logs.outcome.passthrough': '未处理',
   'logs.outcome.alert': '安全告警',
-  'logs.outcomeHint.success': '请求完成，响应已正常处理',
+  'logs.outcomeHint.success': '已命中敏感信息并完成脱敏，回复已正常还原',
+  'logs.outcomeHint.clean': '已扫描，未发现敏感信息，请求按原样转发',
   'logs.outcomeHint.warn': '请求完成，但有需要留意的项：未还原占位符 / 兜底还原 / 检测不完整',
   'logs.outcomeHint.failed': '请求失败：上游错误、网关熔断或阻断',
   'logs.outcomeHint.canceled': '请求被客户端或上游链路中断，没跑完（不是本机故障）',
@@ -2069,7 +2072,8 @@ const en: Record<string, string> = {
   // into one row that keeps MASK's type, so "masked ok", "client canceled" and "upstream 502"
   // all looked identical. The outcome column answers "how did this request end up" —
   // derivation lives in frontend/src/lib/log-outcome.ts.
-  'logs.outcome.success': 'Success',
+  'logs.outcome.success': 'Masked',
+  'logs.outcome.clean': 'Nothing to mask',
   'logs.outcome.warn': 'Warnings',
   'logs.outcome.failed': 'Failed',
   'logs.outcome.canceled': 'Canceled',
@@ -2077,7 +2081,8 @@ const en: Record<string, string> = {
   'logs.outcome.incomplete': 'Incomplete',
   'logs.outcome.passthrough': 'Not processed',
   'logs.outcome.alert': 'Security alert',
-  'logs.outcomeHint.success': 'Request completed and the response was handled normally',
+  'logs.outcomeHint.success': 'Sensitive data was masked and the response was restored normally',
+  'logs.outcomeHint.clean': 'Scanned and found no sensitive data; the request was forwarded as-is',
   'logs.outcomeHint.warn': 'Request completed, but something needs attention: unresolved placeholders, loose-matched restores, or an incomplete scan',
   'logs.outcomeHint.failed': 'Request failed: upstream error, fail-closed block, or engine fault',
   'logs.outcomeHint.canceled': 'Interrupted by the client or the upstream link before finishing (not a local fault)',

@@ -1038,15 +1038,11 @@ export default function LogsPage() {
                 </SelectItem>
               ))}
             </SelectGroup>
-            <SelectGroup>
-              <SelectLabel>{t('logs.filterByIngress')}</SelectLabel>
-              <SelectItem value="EXT_ALL" className="font-medium text-primary-ink">
-                <div className="flex items-center gap-1.5">
-                  <Globe className="h-3.5 w-3.5" />
-                  <span>{t('logs.filterExt')}</span>
-                </div>
-              </SelectItem>
-            </SelectGroup>
+            {/* @guard G704 入口维度只由紧邻的「入口」下拉承担。这里原有一个 `EXT_ALL` 项，
+                与右侧 ingress 下拉是**同一维度、同一个值**（都按 `e.ingress === 'ext'` 过滤），
+                重复占位且把首项下拉的选项数翻倍。
+                只删下拉项：`EXT_ALL` 常量与 `log-events.ts` 的过滤判据全部保留，
+                老书签 `?type=EXT_ALL` 回填后仍能正常过滤。 */}
             {/* 底层原语：排障时才需要，平时不占视线 */}
             <SelectGroup>
               <SelectLabel className="text-2xs text-muted-foreground">{t('logs.filterAdvanced')}</SelectLabel>

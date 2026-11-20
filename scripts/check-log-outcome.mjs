@@ -58,8 +58,11 @@ t('成功：MASK 折进 RESTORE 且 HTTP 2xx', () => {
   assert.equal(deriveOutcome(ev({ terminal: 'RESTORE', http_status: 200 }), NOW), 'success')
 })
 
-t('成功：只扫描未命中（decision=scanned_clean）也算成功', () => {
-  assert.equal(deriveOutcome(ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean' }), NOW), 'success')
+// 2026-11-20 变更：这条原为「也算成功」。真机痛点：用户贴几万字代码做分析时，日志页满屏
+// 绿色「成功」，但绝大多数是 0 命中（请求里压根没敏感词），无法区分「保护生效了」与
+// 「这次没东西可保护」。现在 scanned_clean 单列为 clean，success 只留给真正命中并脱敏的请求。
+t('无敏感词：只扫描未命中（decision=scanned_clean）不再混进成功', () => {
+  assert.equal(deriveOutcome(ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean' }), NOW), 'clean')
 })
 
 t('有告警：有未还原占位符（unresolved>0）', () => {
@@ -345,6 +348,67 @@ t('折叠行的详情回源：优先 RESTORE，其次失败归因事件', () => 
     { nowSec: NOW },
   )
   assert.equal(withCancel[0]._detailSeq, 33)
+})
+
+// ------------------------------------------------- G701 / G702 · 「无敏感词」结论
+//
+// `clean` 与 `success` 必须分开：前者是「扫描通过但一个敏感词都没命中」，后者是「真的命中并
+// 脱敏了」。判据只能是引擎的处置结论 `decision=scanned_clean`，**不能**用 `count===0` ——
+// count 是派生量，NER 截断时也可能是 0（那类请求 completeness=partial，应先被判 warn）。
+
+t('G702 无敏感词：decision=scanned_clean 且全部正常 → clean', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean' })
+  assert.equal(deriveOutcome(row, NOW), 'clean')
+})
+
+t('G702 判据不得是 count：count=0 但没有 decision → 仍是 success', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, count: 0 })
+  assert.equal(deriveOutcome(row, NOW), 'success')
+})
+
+t('G702 判据不得是 count：count=0 且 decision=masked → 仍是 success', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, count: 0, decision: 'masked' })
+  assert.equal(deriveOutcome(row, NOW), 'success')
+})
+
+t('G701 未还原优先：scanned_clean 但 unresolved>0 → warn', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean', unresolved: 2 })
+  assert.equal(deriveOutcome(row, NOW), 'warn')
+})
+
+t('G701 兜底还原优先：scanned_clean 但 degraded>0 → warn', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean', degraded: 1 })
+  assert.equal(deriveOutcome(row, NOW), 'warn')
+})
+
+t('G701 检测不完整优先：scanned_clean 但 completeness=partial → warn', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 200, decision: 'scanned_clean', completeness: 'partial' })
+  assert.equal(deriveOutcome(row, NOW), 'warn')
+})
+
+t('G701 HTTP 错误优先：scanned_clean 但 http_status=502 → failed', () => {
+  const row = ev({ terminal: 'RESTORE', http_status: 502, decision: 'scanned_clean' })
+  assert.equal(deriveOutcome(row, NOW), 'failed')
+})
+
+t('G704 clean 可筛出，且与 success 互不串', () => {
+  const events = [
+    ev({ seq: 1, sid: 'a', decision: 'masked', count: 3 }),
+    ev({ seq: 2, sid: 'a', type: 'RESTORE', http_status: 200 }),
+    ev({ seq: 3, sid: 'b', decision: 'scanned_clean', count: 0 }),
+    ev({ seq: 4, sid: 'b', type: 'RESTORE', http_status: 200 }),
+  ]
+  const clean = mergeMaskRestore(events, { nowSec: NOW, filterType: outcomeFilterValue('clean') })
+  assert.equal(clean.length, 1)
+  assert.equal(clean[0].sid, 'b')
+
+  const success = mergeMaskRestore(events, { nowSec: NOW, filterType: outcomeFilterValue('success') })
+  assert.equal(success.length, 1)
+  assert.equal(success[0].sid, 'a')
+})
+
+t('G704 大写回填：URL 整体 toUpperCase 后 OUTCOME:CLEAN 仍能解析', () => {
+  assert.equal(outcomeFromFilter('OUTCOME:CLEAN'), 'clean')
 })
 
 let failed = 0

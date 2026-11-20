@@ -77,25 +77,48 @@
   // （`sid` 为空 → 不包 wrapResponse）。restore 超时只是少还原几个字，代价完全不同。
   //
   // 3s 对 mask 太紧：引擎侧 `/api/ext/*` 走一把全局锁串行（`panel._EXT_LOCK`），
-  // 多标签页并发、或 NER 冷启动时，单次 mask 超过 3s 很正常。这里给 6s，并在失败时
-  // 重试一次。重试成功的第一个 sid 会在引擎侧成为孤儿会话，由会话 TTL 自然回收。
+  // 多标签页并发、或 NER 冷启动时，单次 mask 超过 3s 很正常。小文本档给 6s，
+  // 失败时重试一次。重试成功的第一个 sid 会在引擎侧成为孤儿会话，由会话 TTL 自然回收。
   const MASK_TIMEOUT_MS = 6000;
+  // 大文本档：引擎侧单请求 NER 总预算是 10s（`transparent.py` 的
+  // `_NER_REQ_BUDGET_MAX_DEFAULT_S`），加上正则扫描与排队，一轮跑完要 20~30s。
+  //
+  // 【为什么必须分档而不是一刀切抬到 30s】一次打字探针、一条几十字的短消息占请求量的
+  // 结大多数；一刀切会让它们最坏也等 30s 才拿到失败反馈，用户看到的是「卡住」。
+  //
+  // 【阈值为什么用字符数不用字节】算 UTF-8 字节要遍历整串，而这只用来决定「给多长
+  // 超时」，不需要精确值。4K 字符在中文≈12KB、英文≈4KB，都落在需要长超时的一侧。
+  const MASK_TIMEOUT_MS_LARGE = 30000;
+  const MASK_LARGE_CHARS = 4096;
+  // @guard G711 页↔SW 的超时**必须大于** SW→引擎那一道，两者同时挂在这个差值上。
+  // 如果外层先超时，`bridge.call` resolve(null)、调用方按「没换成」当直通 —— 而 SW 那边
+  // 其实还在跑，它的成败结果没人接。这条与下面文件/图片链路的 180s > 150s > 120s 同源。
+  const SW_MARGIN_MS = 3000;
   // 文件/图片类打码的页↔SW 超时。**必须大于** SW→引擎那一道（background.js 的
   // `HEAVY_CALL_TIMEOUT_MS = 150s`），否则引擎还在跑 OCR、页面这边已经超时收手：
   // `bridge.call` 超时 resolve(null)，调用方按“没换成”处理 → **原图/原文件上行**。
   // 这是一条静默漏脱敏路径：引擎那边本来会明确回 503 阻断，但前端先走了。
   // 层数：Office OCR 40s / PDF OCR 120s（引擎） < 150s（SW） < 180s（本超时）。
   const HEAVY_CALL_TIMEOUT_MS = 180000;
-  const maskOnce = (text) => bridge.call('mask', { text }, MASK_TIMEOUT_MS);
+  const isLargeText = (text) => typeof text === 'string' && text.length > MASK_LARGE_CHARS;
+  const maskOnce = (text) => {
+    const pageMs = isLargeText(text) ? MASK_TIMEOUT_MS_LARGE : MASK_TIMEOUT_MS;
+    // @guard G711 下发给 SW 的超时永远比页桥少 SW_MARGIN_MS，保证内层先出结果。
+    return bridge.call('mask', { text, timeoutMs: pageMs - SW_MARGIN_MS }, pageMs);
+  };
   const callMask = async (text) => {
     // ⚠️ `blocking`（引擎 413 超限 / 503 管线失败 / 400 参数错）是**确定性拒绝**，
     // **绝不重试**：重试只会拿同一份负载再打一次，既慢又白烧。它必须原样上抛给
     // 调用点去 `throw new TypeError('Failed to fetch')`，走 fail-closed
     // —— 宁可页面报网络错误，也绝不放行未脱敏明文出网。
+    // @guard G714 本分支必须在重试判断之前，且直接 return。
     const first = await maskOnce(text);
     if (first && first.blocking) return first;
     if (first) return first;
-    // 桥超时/失败 → 重试一次（覆盖引擎全局锁排队与 NER 冷启动的偶发超时）。
+    // @guard G713 大文本**不重试**：第一次的 SW 调用此时很可能还在引擎里排队，
+    // 重试只是拿同一份负载再打一次，两个请求争抢同一把全局锁、两头都拖到超时，
+    // 最坏两次都走明文。小文本保留一次重试（覆盖冷启动的偶发超时）。
+    if (isLargeText(text)) return null;
     return await maskOnce(text);
   };
   window.addEventListener('message', (e) => {

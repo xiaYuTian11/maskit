@@ -1,3 +1,5 @@
+<!-- @guard G732 中英两份的一级标题槽位必须逐一相等（README.md ↔ README_EN.md）；只改一份就会让两份从这一版开始漂移。 -->
+<!-- @guard G734 每个 <details> 都必须有 </details>：漏闭合会把同页后半篇整个吞进折叠区，且 GitHub 不报任何错。 -->
 <p align="center">
   <img src="frontend/public/favicon.svg" width="96" height="96" alt="Maskit Logo" />
 </p>
@@ -53,6 +55,65 @@
 <p align="center">
   <img src="docs/screenshots/event-detail.png" alt="真实脱敏与还原事件明细" width="85%" />
 </p>
+</details>
+
+---
+
+## 🚀 下载与安装
+
+<!-- @guard G731 本段必须紧跟「效果对比一览」、排在「核心亮点」之前：访客第一屏就要看到安装包在哪。 -->
+<!-- @guard G733 五种接入方式与六张截图引用不得因重排而丢失（本段只搬位置、只压缩代码块）。 -->
+
+> 📦 **一步到位**：前往 **[GitHub Releases 最新发布页](https://github.com/xiaYuTian11/maskit/releases/latest)** 下载对应平台安装包。
+
+| 平台 | 产物 | 说明 |
+| :--- | :--- | :--- |
+| **Windows** | `Maskit_<版本>_x64-setup.exe` | 托盘常驻，全自动无缝更新 |
+| **macOS (Apple Silicon)** | `Maskit_<版本>_aarch64.dmg` | 拖入「应用程序」即可 |
+| **Linux** | `.deb` / `.AppImage` | x86_64 与 aarch64 |
+| **Docker** | `ghcr.io/xiayutian11/maskit:latest` | amd64 / arm64，内嵌 Web 控制台 |
+
+**macOS 首次打开**若提示未验证：右键点击 Maskit → 打开，或终端执行 `xattr -cr /Applications/Maskit.app`。
+
+---
+
+### 🐳 Docker 私有网关（团队 / 服务器 / NAS）
+
+```bash
+docker run -d --name maskit --restart unless-stopped \
+  -p 127.0.0.1:5801:5801 -p 127.0.0.1:18701:18701 \
+  -p 127.0.0.1:18702:18702 -p 127.0.0.1:18703:18703 \
+  -v maskit_data:/data ghcr.io/xiayutian11/maskit:latest
+```
+浏览器打开 `http://127.0.0.1:5801` 进入管理控制台。
+
+<details>
+<summary><b>🔧 点击展开：源码编译与本地开发指引</b></summary>
+<br />
+
+#### 运行环境
+- Python 3.13+
+- Node.js 20+
+- Rust 1.80+（若需编译桌面壳层）
+
+#### 本地启动
+```bash
+git clone https://github.com/xiaYuTian11/maskit.git
+cd maskit
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..
+python engine/panel.py     # 默认端口 5801
+```
+</details>
+
+<details>
+<summary><b>🛡️ 点击展开：安全边界、已知限制与进阶说明</b></summary>
+<br />
+
+1. **思维链轨迹保护（Thinking Blocks）**：Anthropic 签名思考块整块不做脱敏以保证签名完整性（避免会话 400 破坏）；无签名约束的正文、工具参数与其它模型思考块照常打码还原；
+2. **多模态图像脱敏特性**：图片脱敏为物理覆盖、不可逆阻断；上游模型无法回答被覆盖的原图内容；
+3. **危险命令拦截边界**：作为辅助安全网，主要检查明文形态高危命令（如 `rm -rf /`、`DROP DATABASE`），仅在配置开启后告警/阻断，不承诺覆盖高级混淆变种；
+4. **日志隐私级别**：支持「最小记录（不落盘原文）」、「本地详细」与「15分钟临时排障」三种模式，敏感凭据恒只记录哈希摘要。
 </details>
 
 ---
@@ -139,77 +200,6 @@ print(response.choices[0].message.content)
 | ![拦截日志](docs/screenshots/logs.png) | ![敏感词库](docs/screenshots/words.png) |
 | **数据统计与成本看板 (Stats)** | **安全审计中心 (Audit)** |
 | ![数据统计](docs/screenshots/stats.png) | ![安全审计中心](docs/screenshots/audit.png) |
-
----
-
-## 🚀 下载与安装
-
-### 方式 A：桌面客户端（推荐个人日常使用）
-
-前往 **[GitHub Releases 最新发布页](https://github.com/xiaYuTian11/maskit/releases/latest)** 下载对应平台安装包：
-
-- **Windows**：下载 `Maskit_<版本>_x64-setup.exe`，安装后托盘常驻，支持全自动无缝更新；
-- **macOS (Apple Silicon)**：下载 `Maskit_<版本>_aarch64.dmg`，拖入“应用程序”文件夹即可。
-  > 💡 **macOS 首次打开提示**：若提示未验证，右键点击 Maskit 选择「打开」，或在终端执行：
-  > `xattr -cr /Applications/Maskit.app`
-- **Linux**：提供 `.deb` 与 `.AppImage`（支持 x86_64 与 aarch64）。
-
----
-
-### 方式 B：Docker 私有网关（推荐团队 / 服务器 / NAS 部署）
-
-直接拉取官方多架构镜像（支持 `linux/amd64` 与 `linux/arm64`），内嵌完整 Web 控制台：
-
-```bash
-docker run -d \
-  --name maskit \
-  --restart unless-stopped \
-  -p 127.0.0.1:5801:5801 \
-  -p 127.0.0.1:18701:18701 \
-  -p 127.0.0.1:18702:18702 \
-  -p 127.0.0.1:18703:18703 \
-  -v maskit_data:/data \
-  ghcr.io/xiayutian11/maskit:latest
-```
-浏览器打开 `http://127.0.0.1:5801` 即可进入管理控制台。
-
----
-
-<details>
-<summary><b>🔧 点击展开：源码编译与本地开发指引</b></summary>
-<br />
-
-#### 运行环境
-- Python 3.13+
-- Node.js 20+
-- Rust 1.80+（若需编译桌面壳层）
-
-#### 本地启动
-```bash
-# 1. 克隆仓库
-git clone https://github.com/xiaYuTian11/maskit.git
-cd maskit
-
-# 2. 安装 Python 引擎依赖
-pip install -r requirements.txt
-
-# 3. 安装前端依赖并构建
-cd frontend && npm install && npm run build && cd ..
-
-# 4. 启动核心引擎服务（默认端口 5801）
-python engine/panel.py
-```
-</details>
-
-<details>
-<summary><b>🛡️ 点击展开：安全边界、已知限制与进阶说明</b></summary>
-<br />
-
-1. **思维链轨迹保护（Thinking Blocks）**：Anthropic 签名思考块整块不做脱敏以保证签名完整性（避免会话 400 破坏）；无签名约束的正文、工具参数与其它模型思考块照常打码还原；
-2. **多模态图像脱敏特性**：图片脱敏为物理覆盖、不可逆阻断；上游模型无法回答被覆盖的原图内容；
-3. **危险命令拦截边界**：作为辅助安全网，主要检查明文形态高危命令（如 `rm -rf /`、`DROP DATABASE`），仅在配置开启后告警/阻断，不承诺覆盖高级混淆变种；
-4. **日志隐私级别**：支持「最小记录（不落盘原文）」、「本地详细」与「15分钟临时排障」三种模式，敏感凭据恒只记录哈希摘要。
-</details>
 
 ---
 

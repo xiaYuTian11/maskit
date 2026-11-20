@@ -6,7 +6,8 @@
  * 是结论，事件类型降级为详情与悬停。
  *
  * 颜色语义（与 `log-outcome.ts` 的分类一一对应）：
- * 成功绿 / 有告警琥珀 / 失败红 / 已取消与未处理中性灰 / 进行中蓝 / 安全告警琥珀。
+ * 成功绿 / **无敏感词灰** / 有告警琥珀 / 失败红 / 已取消与未处理中性灰 / 进行中蓝 / 安全告警琥珀。
+ * 「无敏感词」刻意用灰而不是绿：它表示请求里没有可保护的东西，不是保护生效了。
  * 依据 AGENTS.md 红线：CANCEL 与 DNS_ERROR 不是本机故障，视觉上不归为红色。
  */
 import {
@@ -17,6 +18,7 @@ import {
   CircleSlash,
   Loader2,
   ShieldAlert,
+  ShieldCheck,
   XCircle,
   type LucideIcon,
 } from 'lucide-react'
@@ -34,8 +36,11 @@ interface OutcomeMeta {
   spin?: boolean
 }
 
+// @guard G703 本表是 `Record<OutcomeKey, ...>`，与 `OUTCOME_ORDER` / `OUTCOME_LABEL_KEY` /
+// `OUTCOME_HINT_KEY` 四份键集合必须逐一相等；漏一个键 TS 直接报错，多一个键徽标也会找不到。
 export const OUTCOME_META: Record<OutcomeKey, OutcomeMeta> = {
   success: { icon: CheckCircle2, cls: 'text-success-ink', dot: 'bg-success' },
+  clean: { icon: ShieldCheck, cls: 'text-muted-foreground', dot: 'bg-muted-foreground' },
   warn: { icon: AlertTriangle, cls: 'text-warning-ink', dot: 'bg-warning' },
   failed: { icon: XCircle, cls: 'text-destructive-ink', dot: 'bg-destructive' },
   canceled: { icon: CircleSlash, cls: 'text-muted-foreground', dot: 'bg-muted-foreground' },

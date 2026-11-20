@@ -3190,6 +3190,9 @@ def _start_proxy_locked():
             # 现场落盘必须在 kill 之前：这一分支的 mitmdump 真实输出只作为 API 返回值
             # 给前端 toast，用户关掉提示就永久丢失；而 _emit_log 只进内存、进程随后
             # 被强杀，等于启动失败现场什么都不剩（只有 crash-dumps 里才有端口占用表）。
+            # @guard G721 这一步的**唯一**目的是在进程还活着时抓端口占用表——命令行只能
+            # 对存活 PID 查，kill 之后这段永远为空。输出尾部由下面的
+            # `_append_crash_tail` 往同一份里追加，不得为此再 dump 一份。
             _dump_crash_context("startfail")
             try:
                 _kill_proxy_tree(p.pid)
@@ -3207,6 +3210,10 @@ def _start_proxy_locked():
                 out = (raw or "")[-500:]
         except Exception:
             pass
+        # @guard G722 输出尾部必须进**同一份**现场：进程还活着时上面已落过盘（为了拿端口表），
+        # 这里命中 5s 去重拿到同一个路径再追加；进程已退出时这里才第一次落盘（端口表仍可查）。
+        # 这段输出原先只进 return 值、作为 API 返回给前端 toast，用户关掉提示就永久丢失。
+        _append_crash_tail(_dump_crash_context("startfail"), out)
         _start_fallback("启动失败")
         reason = out.strip() or (f"{_START_READY_TIMEOUT}s 内未监听端口 {missing}"
                                  if not ready else "进程已退出")
@@ -3787,6 +3794,13 @@ def _cancel_pending_restart():
             pass
 
 
+# 同一次启动失败的内外层重复落盘窗口（秒）：实测两次调用相隔约 3s（现场文件时间戳
+# 20261119-174152 / 174155），取 5s 留余量。超过窗口才认为是另一轮真失败。
+_CRASH_DUMP_DEDUP_S = 5.0
+# 上一次落盘的现场（reason → 路径），供 `_dump_crash_context` 去重时复用。
+_LAST_CRASH_DUMP = {"ts": 0.0, "reason": "", "path": None}
+
+
 def _dump_crash_context(reason="crash"):
     """mitmdump 退出/启动失败时把完整现场落盘（崩溃现场），避免被 800 行环形缓冲冲掉。
 
@@ -3797,6 +3811,14 @@ def _dump_crash_context(reason="crash"):
     reason="startfail"：watchdog 自动重启失败（如端口残留清理不掉）时也留现场，
     曾出现面板启动后代理 8 分钟才拉起、期间 503 频发，却查不到占端口的是谁。
     """
+    # @guard G723 同一次启动失败会被写两遍：`_start_proxy_locked` 内部一次（进程还活着，
+    # 能抓端口表），外层 watchdog / `_restart_proxy_locked` 在 `start_proxy()` 返回 False 后
+    # 又调一次（此时进程已死、端口表与输出都已丢，写出来必然全空）。
+    # 窗口内同 reason 直接复用第一份 —— 5 秒取自实测（两份空文件的时间戳相隔 3 秒）。
+    now = time.time()
+    if (reason == _LAST_CRASH_DUMP["reason"]
+            and now - _LAST_CRASH_DUMP["ts"] <= _CRASH_DUMP_DEDUP_S):
+        return _LAST_CRASH_DUMP["path"]
     try:
         import datetime
         dump_dir = DATA_ROOT / "crash-dumps"
@@ -3844,12 +3866,36 @@ def _dump_crash_context(reason="crash"):
         except Exception:
             pass
         fname.write_text("\n".join(lines), encoding="utf-8")
+        _LAST_CRASH_DUMP.update(ts=now, reason=reason, path=str(fname))
         _emit_log(f"[panel] 崩溃现场已写入 {fname}")
         try:  # 只留最近 10 份，防堆积
             for o in sorted(dump_dir.glob("crash-*.txt"))[:-10]:
                 o.unlink(missing_ok=True)
         except Exception:
             pass
+        return str(fname)
+    except Exception:
+        # @guard G724 现场落盘只是诊断辅助，任何异常不得中断启动失败路径
+        # （外层要把 `False` 返回给调用方，抛出去就等于跟不上兜底监听）。
+        return None
+
+
+def _append_crash_tail(path, tail):
+    """把子进程输出尾部追加进**已落盘的那份**现场。
+
+    @guard G722 这段输出（mitmdump 为什么没起来）只活在 `p.stdout` 里，而且只能等进程
+    终止后才读得到（有界超时，见 `_start_proxy_locked` 的 Issue #19 注释）。所以它无法
+    进 `_dump_crash_context` 的一次性写入；也绝不能为此再 dump 一份 —— 那就是一次失败
+    两份文件，其中一份全是空的（正是 2026-11-19 那 10 份 205B 文件的成困）。
+
+    @guard G724 落盘失败不得影响启动失败路径（fail-safe）。
+    """
+    if not path or not tail:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n-- subprocess output (tail) --\n")
+            f.write(tail)
     except Exception:
         pass
 

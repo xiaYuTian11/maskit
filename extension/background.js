@@ -81,6 +81,11 @@ const DAILY_KEY = 'maskit:daily';
 const DOWN_WINDOW_MS = 60000;
 const PING_TTL_MS = 60000;
 const CALL_TIMEOUT_MS = 15000;
+// @guard G712 文本打码下发的超时上限。页面侧按文本大小分档（见 bridge-main.js 的
+// `MASK_TIMEOUT_MS_LARGE = 30s`），这里**必须钳得比它宽**：钳得更低会让「页桥超时 >
+// SW 超时」反转回旧形态 —— 页面等 30s、SW 15s 就放弃了，页面还在等一个永远不会来的
+// 失败结果。
+const CALL_TIMEOUT_MS_MAX = 60000;
 // 文件类打码的 SW→引擎超时。这两条端点里的重活是 OCR：Office 内嵌图总预算 20s、
 // PDF 逐页扫总预算 60s。用 15s 卡的话引擎还在扫、这里先 abort → `engine_timeout`
 // 归进 (B) 直通 → **原图/原文件上行**。这类失败看上去像“引擎慢”，实际是漏脱敏。
@@ -707,6 +712,15 @@ async function handleMask(payload, tabId, host) {
   const text = payload && typeof payload.text === 'string' ? payload.text : '';
   if (!text) return { ok: false, passthrough: true };
 
+  // @guard G712 超时长度由页面按文本大小选档后随载荷传下来，这里只做钳制。
+  // 它不是安全敏感字段（只影响等多久），但仍要有上下界：缺了下限会让一个空值
+  // 变成即时 abort；上限见 `CALL_TIMEOUT_MS_MAX` 的注释。
+  const requested = Number(payload && payload.timeoutMs);
+  const engineTimeoutMs =
+    Number.isFinite(requested) && requested >= 1000
+      ? Math.min(requested, CALL_TIMEOUT_MS_MAX)
+      : CALL_TIMEOUT_MS;
+
   // 站点开关在这里兜底——**配置是唯一真相来源**。
   //
   // 为什么必须在这一层：chatgpt.com / claude.ai 是 manifest 里静态声明的 content script，
@@ -737,7 +751,7 @@ async function handleMask(payload, tabId, host) {
   // 打字探针（autocomplete）**例外**：不复用 sid，防止未上屏的拼音碎片被 NER 误判后
   // 混进主对话映射表（跳轮污染，详见 isTypingProbe 注释）。脱敏照做。
   const sid = isTypingProbe(text) ? null : await findRecentSid(tabId, host);
-  const r = await safeCall('/api/ext/mask', { text, host, sid });
+  const r = await safeCall('/api/ext/mask', { text, host, sid }, engineTimeoutMs);
   if (r.ok) {
     await rememberSid(r.body.sid, tabId, host);
     await pushRecent({ host, path: 'mask', action: 'mask', count: 0, status: 'ok' });
