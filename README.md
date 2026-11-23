@@ -203,6 +203,28 @@ print(response.choices[0].message.content)
 
 ---
 
+## ❤️ 赞助支持
+
+如果 Data Maskit 帮你省下了一些麻烦，可以自愿赞助作者。
+
+**赞助纯属自愿，不构成任何服务对价，也不解锁任何功能。**
+
+| 微信支付 | 支付宝 |
+|:---:|:---:|
+| <img src="frontend/public/sponsor/wechat.png" width="180" alt="微信支付收款码" /> | <img src="frontend/public/sponsor/alipay.png" width="180" alt="支付宝收款码" /> |
+
+> 收款码仅用于接受自愿赞助；企业商用与私有化部署请通过 [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) 联系作者。
+
+---
+
+## 🙏 支持者
+
+感谢每一位支持过这个项目的人。**名单只写昵称、不写金额**，按首次支持时间排列。
+
+> 暂无 —— 第一位支持者出现后更新。赞助后到 [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) 留一句昵称即可上榜（也可以选择匿名）。
+
+---
+
 ## 🤝 参与贡献与社区
 
 欢迎提交 Issue 与 Pull Request！请查阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解开发规范与门禁流程。

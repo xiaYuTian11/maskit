@@ -340,3 +340,41 @@ details[open] > summary .chev {
 [data-theme='dark'] .vibrancy {
   background-color: hsl(var(--card) / 0.68);
 }
+
+/* ===== 顶栏赞助入口的「呼吸光」 =====
+   目的只有一个：在一排灰图标里让那颗心被看见，而不是长期抓住注意力。
+   - 静态：玫瑰色（原来跟着其它图标走 muted-foreground，等于隐形，这是它不明显的主因）；
+   - 动态：只在「新用户 + 没点开过」时由 AppLayout 挂 .is-pulsing（首启 14 天内），
+     点开一次或满 14 天后自动退化为静态，hover 仍会亮；
+   - 常驻呼吸在这个每天要看几小时的顶栏里会从「被看见」滑向「像广告位」，
+     所以动画必须有生命周期，而不是永久；
+   - prefers-reduced-motion 下只保留静态色。 */
+@keyframes sponsor-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 hsl(350 89% 60% / 0);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 10px 2px hsl(350 89% 60% / 0.35);
+    transform: scale(1.04);
+  }
+}
+
+.sponsor-heart {
+  color: hsl(350 89% 60% / 0.85);
+  transition: color 160ms ease-out, box-shadow 200ms ease-out;
+}
+.sponsor-heart:hover {
+  color: hsl(350 89% 60%);
+  box-shadow: 0 0 10px 2px hsl(350 89% 60% / 0.28);
+}
+.sponsor-heart.is-pulsing {
+  animation: sponsor-breathe 2.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sponsor-heart.is-pulsing {
+    animation: none;
+  }
+}

@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   X,
   Globe,
+  Heart,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStatus, startProxy, stopProxy } from '@/api/proxy'
@@ -41,6 +42,8 @@ import { toast } from '@/lib/toast'
 import { shieldFetch } from '@/lib/shield-fetch'
 import { HelpCenter } from '@/components/help/HelpCenter'
 import { OnboardingWizard, ONBOARDING_STORAGE_KEY } from '@/components/onboarding/OnboardingWizard'
+import { SponsorDialog } from '@/components/common/SponsorDialog'
+import { SponsorNudge } from '@/components/common/SponsorNudge'
 
 function GithubIcon({ className }: { className?: string }) {
   return (
@@ -106,6 +109,21 @@ function useTheme() {
 }
 
 export function AppLayout({ children }: { children: ReactNode }) {
+  const [sponsorOpen, setSponsorOpen] = useState(false)
+  // 顶栏赞助图标的「呼吸光」：只对「新用户 + 还没点开过」生效（首次启动起 14 天内），
+  // 点开一次或满 14 天就退化成静态玫瑰色（hover 仍会亮）。
+  // 为什么不常驻：这是一个每天要盯好几小时的顶栏，永久呼吸等于永久抢注意力，
+  // 与「不打扰」的产品口径冲突；有生命周期的动画既能被看见，也不变成噪音。
+  const [sponsorGlow, setSponsorGlow] = useState(() => {
+    try {
+      if (localStorage.getItem('maskit_sponsor_seen')) return false
+      const first = Number(localStorage.getItem('maskit_first_seen_at')) || 0
+      return !first || Date.now() - first < 14 * 24 * 60 * 60 * 1000
+    } catch {
+      return false
+    }
+  })
+
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
       return true
@@ -622,6 +640,21 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 setOnboardingOpen(true)
               }}
             />
+            {/* 赞助入口（顶栏图标位）：纯自愿赞赏，不锁任何功能；合规边界见 docs/SPONSOR.md */}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                try { localStorage.setItem('maskit_sponsor_seen', '1') } catch {}
+                setSponsorGlow(false)
+                setSponsorOpen(true)
+              }}
+              title={t('sponsor.title')}
+              aria-label={t('sponsor.title')}
+              className={cn('sponsor-heart h-8 w-8 rounded-full px-0', sponsorGlow && 'is-pulsing')}
+            >
+              <Heart className="h-4 w-4" />
+            </Button>
             <Button
               size="sm"
               variant="ghost"
@@ -753,6 +786,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </main>
       </div>
+      <SponsorDialog open={sponsorOpen} onOpenChange={setSponsorOpen} />
+      <SponsorNudge onSponsor={() => setSponsorOpen(true)} />
+
       <OnboardingWizard
         open={onboardingOpen}
         onOpenChange={setOnboardingOpen}

@@ -28,6 +28,7 @@ import {
   Gauge,
   Loader2,
   LockKeyhole,
+  Heart,
 } from 'lucide-react'
 import { getStatus, dismissAutoRecover } from '@/api/proxy'
 import { getTodayStats, getRestoreItems, getConfig, saveConfig, getHealth, getStatsModels, getStatsHistory, type StatsHistoryPoint } from '@/api/settings'
@@ -38,6 +39,7 @@ import { OutcomeBadge } from '@/components/events/OutcomeBadge'
 import { deriveOutcome, describeTerminal } from '@/lib/log-outcome'
 import { EventDetailDialog } from '@/components/events/EventDetailDialog'
 import { DiagnosticPreviewButton } from '@/components/settings/DiagnosticPreviewButton'
+import { SponsorDialog } from '@/components/common/SponsorDialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -177,6 +179,7 @@ export default function Dashboard() {
   const isStarting = (status === undefined) || !!status?.proxy_starting
   const isStopping = !!status?.proxy_stopping
   const [statsRange, setStatsRange] = useState<'today' | '7d' | '30d'>('today')
+  const [sponsorOpen, setSponsorOpen] = useState(false)
   const { data: stats } = useQuery({
     queryKey: ['todayStats', statsRange],
     queryFn: () => getTodayStats(statsRange === 'today' ? undefined : statsRange),
@@ -705,6 +708,28 @@ export default function Dashboard() {
         })}
       </div>
       </section>
+
+      {/* 赞助软文案：用户在这里看到的数字是「我自己被保护了多少」，是有付费感的时刻。
+          刻意不用弹窗、不抢视觉 —— 一行小字 + 一个文字按钮，看不到就看不到。 */}
+      {(stats?.masked_items ?? 0) >= 100 && (
+        <div className="flex flex-wrap items-center gap-2 px-1 text-2xs text-muted-foreground">
+          <Heart className="h-3.5 w-3.5 shrink-0 text-rose-500" />
+          <span>
+            {tf('dash.sponsorThanks', {
+              n: formatCompactNumber(stats?.masked_items ?? 0, unitSystem).compact,
+            })}
+          </span>
+          <button
+            type="button"
+            onClick={() => setSponsorOpen(true)}
+            className="font-medium text-primary-ink underline-offset-2 hover:underline"
+          >
+            {t('sponsor.nudgeCta')}
+          </button>
+          <span>{t('dash.sponsorVoluntary')}</span>
+        </div>
+      )}
+      <SponsorDialog open={sponsorOpen} onOpenChange={setSponsorOpen} />
 
       {/* 前缀保真度：MASK 事件三个诊断字段（body_rewritten / first_diff_byte /
           suffix_reused）的聚合，用来回答「上游缓存命中率掉了，是我们改了请求

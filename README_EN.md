@@ -203,6 +203,28 @@ Download `Maskit_<version>_extension.zip` from [Releases](https://github.com/xia
 
 ---
 
+## ❤️ Sponsor
+
+If Data Maskit saved you some trouble, you can voluntarily support the author.
+
+**Sponsoring is entirely voluntary, constitutes no consideration for any service, and unlocks no features.**
+
+| WeChat Pay | Alipay |
+|:---:|:---:|
+| <img src="frontend/public/sponsor/wechat.png" width="180" alt="WeChat Pay QR code" /> | <img src="frontend/public/sponsor/alipay.png" width="180" alt="Alipay QR code" /> |
+
+> These QR codes are only for voluntary sponsorship. For commercial licensing or on-premise deployment, please reach the author via [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues).
+
+---
+
+## 🙏 Supporters
+
+Thanks to everyone who has supported this project. **Names only, no amounts**, ordered by first support date.
+
+> None yet — updated as soon as the first supporter appears. After sponsoring, leave your nickname on [GitHub Issues](https://github.com/xiaYuTian11/maskit/issues) to be listed (anonymity is fine too).
+
+---
+
 ## 🤝 Contributing & Community
 
 Issues and Pull Requests are warmly welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) for workflow details.
