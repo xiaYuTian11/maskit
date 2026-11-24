@@ -2452,7 +2452,12 @@ def _new_token(label):
         token = "{{%s_%s}}" % (lab, _rand_suffix())
         # 冲突判定按**当前表组**：演示仓是真实复用窗口的快照副本，所以查它同时
         # 覆盖了两边——演示里签出的 token 不会与真实 token 抢同一个后缀。
-        if token not in tables.rev and _token_suffix(token) not in tables.suffix:
+        suf = _token_suffix(token)
+        # @guard G746 避让集 = 当前表组后缀 ∪ 全局 _RECENT_SUFFIX ∪ 活跃文件任务后缀。
+        # 文件隔离作用域是空表，必须并查全局与活跃任务后缀才不会撞车；全局签发同样
+        # 避让文件任务后缀（双向互避）。普通会话无活跃文件任务时后两项恒空/冗余，行为不变。
+        if (token not in tables.rev and suf not in tables.suffix
+                and suf not in _RECENT_SUFFIX and suf not in _FILE_SUFFIX_ACTIVE):
             return token
     # 兜底仍用 6 位：长度必须落在 _SUFFIX_PAT 认得的范围内。
     # 原来这里返回 secrets.token_hex(6)（12 个字符），而正则只认 6 个——
@@ -2562,6 +2567,9 @@ def _recent_in_use():
 def _recent_in_use_add(token):
     """登记一个「本请求用到」的 token（`_hit` 是唯一入口）。"""
     if not token:
+        return
+    # @guard G745 文件隔离作用域不写全局淘汰保护名单（避免大文件冲刷活跃会话保护项）。
+    if _is_isolated():
         return
     try:
         s = _recent_in_use()
@@ -2694,6 +2702,9 @@ def _known_add(orig: str, token: str, label: str) -> bool:
         自定义词），不是「替规则扩大覆盖面」；
       · **本身就是占位符**：防套娃。
     """
+    # @guard G745 文件隔离作用域不写全局 known（避免整份合同的值灌进 known 挤掉活跃会话）。
+    if _is_isolated():
+        return False
     global _KNOWN_GEN
     try:
         if not orig or len(orig) < _KNOWN_MIN:
@@ -2936,6 +2947,10 @@ def _known_lookup_spans(text: str):
     """
     if not text:
         return []
+    # @guard G745 文件隔离作用域不读全局 known 做正向打码（任务内一致性由规则+NER 覆盖，
+    # 且 apply 自包含不依赖全局状态）。返回空区间，_mask_text 的 known 块自然空转。
+    if _is_isolated():
+        return []
     try:
         with _KNOWN_LOCK:
             if not _KNOWN_BY_HEAD:
@@ -3022,6 +3037,9 @@ def _sent_lookup(key):
     old 命中），cur 会**无限增长**（`_sent_store` 只在插入时检查，而这里不经过
     它）。那是无界内存增长，在长会话里会持续累积。
     """
+    # @guard G745 文件隔离作用域不查/不搬全局 sent 缓存（_SENT_MAX 不该被大文件冲刷）。
+    if _is_isolated():
+        return None
     with _SENT_LOCK:
         v = _SENT_CUR.get(key)
         if v is not None:
@@ -3039,6 +3057,9 @@ def _sent_lookup(key):
 
 
 def _sent_store(key, spans):
+    # @guard G745 文件隔离作用域不写全局 sent 缓存。
+    if _is_isolated():
+        return
     with _SENT_LOCK:
         if len(_SENT_CUR) >= _SENT_MAX:
             _SENT_OLD.clear()
@@ -3635,6 +3656,75 @@ def demo_store_scope(seed_recent=True):
             _TABLES_TLS.__dict__.pop("cur", None)
         else:
             _TABLES_TLS.cur = prev
+
+
+# ── 文件工作台隔离作用域（file_workbench，2026-11-24）─────────────────────────
+# 复用 _TokenTables / _TABLES_TLS 表组机制（与 demo_store_scope 同源），但**空表不种子**：
+# 文件任务不需要模拟真实请求的复用行为，空表让 token 签发与 apply 完全自包含，也不复用
+# 代理会话的 token。所有脱敏路径经 _tables() 取表，因此复用窗口/后缀索引/自定义词映射
+# 自动落在任务本地表，全局 _RECENT_* 一条不增不减、时间戳不动（自定义词仍由 CUSTOM_WORDS
+# 配置驱动检测，只是不沿用永久 token，改签任务本地新 token，apply 时一并替换）。
+#
+# 不走表组的全局副作用（_known_add / _sent_store / _sent_lookup / _known_lookup_spans /
+# _recent_in_use_add）由 _is_isolated() 旁路——否则表组隔离是假的（审计核验：这些函数
+# 直接写模块全局，不受 _tables() 约束）。
+#
+# 后缀互避：空表签发只避让自身后缀，可能与全局活跃 token 撞车（凭据 token 会留在成品里，
+# 撞车后成品贴进聊天被跨会话还原成别人的值）。_FILE_SUFFIX_ACTIVE 是进程级活跃文件任务
+# 后缀并集（_STATE_LOCK 保护），_new_token 避让集并入它与全局 _RECENT_SUFFIX，全局签发
+# 路径同样避让文件任务后缀——双向互避，不动 _RECENT_* 的「索引与 FWD/REV 成对」不变量。
+_FILE_JOB_SUFFIXES = {}      # job_id -> set(suffix)
+_FILE_SUFFIX_ACTIVE = set()  # 所有活跃文件任务后缀的并集（O(1) 成员判定）
+
+
+def _is_isolated():
+    """当前线程是否处于文件任务隔离作用域。代理/扩展/事件库线程从不设置，恒 False。"""
+    return bool(_TABLES_TLS.__dict__.get("isolated"))
+
+
+def _current_file_job():
+    """当前线程的文件任务 id（隔离作用域内才有）。"""
+    return _TABLES_TLS.__dict__.get("file_job_id")
+
+
+@contextlib.contextmanager
+def file_store_scope(job_id):
+    """把当前工作线程切到文件任务专用**空表组**（退出必然还原，异常也一样）。
+
+    与 demo_store_scope 的区别：不种子（空表），并置 isolated 标记旁路全局副作用。
+    嵌套时逐层还原（与 demo 同口径），不删外层属性。
+    """
+    tables = _TokenTables(fwd={}, rev={}, suffix={}, cw_fwd={}, cw_rev={})
+    prev_cur = _TABLES_TLS.__dict__.get("cur")
+    prev_iso = _TABLES_TLS.__dict__.get("isolated")
+    prev_job = _TABLES_TLS.__dict__.get("file_job_id")
+    _TABLES_TLS.cur = tables
+    _TABLES_TLS.isolated = True
+    _TABLES_TLS.file_job_id = job_id
+    try:
+        yield tables
+    finally:
+        if prev_cur is None:
+            _TABLES_TLS.__dict__.pop("cur", None)
+        else:
+            _TABLES_TLS.cur = prev_cur
+        if prev_iso is None:
+            _TABLES_TLS.__dict__.pop("isolated", None)
+        else:
+            _TABLES_TLS.isolated = prev_iso
+        if prev_job is None:
+            _TABLES_TLS.__dict__.pop("file_job_id", None)
+        else:
+            _TABLES_TLS.file_job_id = prev_job
+
+
+def file_suffix_unregister(job_id):
+    """任务结束/取消：精确移除本任务登记的后缀（绝不碰他人条目）。"""
+    with _STATE_LOCK:
+        sfxs = _FILE_JOB_SUFFIXES.pop(job_id, None)
+        if sfxs:
+            _FILE_SUFFIX_ACTIVE.difference_update(sfxs)
+
 
 # 复用表用独立 TTL，不跟着 SESSION_TTL（默认 600s）走。
 #
@@ -5653,7 +5743,14 @@ def _suffix_index_add(token):
     with _STATE_LOCK:
         # 签发台账与后缀索引同处一个临界区：判据读的就是这里写进去的东西，
         # 分开加锁会让「刚签发的 token 立刻被判定为外来」出现窗口。
-        _note_issued_suffix(sfx)
+        # @guard G746 文件任务后缀登记进活跃注册表（供全局/并发任务双向避让）；
+        # 隔离作用域不写全局签发台账（_note_issued_suffix 是进程级诊断 ledger）。
+        job = _current_file_job()
+        if job is not None:
+            _FILE_JOB_SUFFIXES.setdefault(job, set()).add(sfx)
+            _FILE_SUFFIX_ACTIVE.add(sfx)
+        else:
+            _note_issued_suffix(sfx)
         cur = tables.suffix.get(sfx)
         if cur is None:
             tables.suffix[sfx] = token

@@ -80,8 +80,10 @@ export async function shieldFetch<T>(
   options: ShieldFetchOptions = {},
 ): Promise<T> {
   const { noToken, raw, timeoutMs = DEFAULT_TIMEOUT_MS, ...rest } = options
+  // FormData 必须让浏览器自己带 boundary，不能塞 application/json。
+  const isForm = typeof FormData !== 'undefined' && rest.body instanceof FormData
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
+    ...(isForm ? {} : { 'Content-Type': 'application/json' }),
     ...(rest.headers as Record<string, string> | undefined),
   }
   if (!noToken) {

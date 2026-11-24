@@ -142,6 +142,11 @@ python engine/panel.py     # default port 5801
 - **Passthrough Fallback Guarantee**: If the proxy is stopped or closed, local ports maintain listeners and **automatically passthrough raw traffic** — your AI tools never disconnect;
 - **Zero Telemetry & Compliance**: Runs 100% locally with zero external telemetry or user tracking; credentials are saved as hashes only.
 
+### 📄 5. File Workbench (Word / PDF / Images / Text)
+- **On-device scan, review and edit**: drop in Word, PowerPoint, Excel, plain text, PDF, or images; findings can be replaced or kept one by one, and history stores only masked file names and counters;
+- **Visual redaction**: page-by-page preview for PDFs and images with rectangle and brush tools; sensitive pages are rasterized so text cannot be copied, while clean pages stay untouched where possible;
+- **Controlled output**: unscanned embedded objects are stripped by default, PDF document info can be cleared, and the result downloads through a one-time link on both desktop and Docker.
+
 ---
 
 ## 🛠️ 1-Minute Quick Start

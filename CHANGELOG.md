@@ -7,12 +7,18 @@
 ## [Unreleased]
 
 ### 更新摘要 / Summary
+- 新增文件脱敏工作台：把 Word、PDF、图片或文本拖进来，先在本机找出敏感信息，逐项确认后下载打码副本。
 - 日志页现在把「脱敏成功」和「没发现敏感词」分开显示，不再满屏绿色「成功」分不清哪些请求真的被保护过。
 - 网页版 AI 里粘贴大段文本时，脱敏不会再提前放弃并把原文发出去，大段内容会等够处理时间。
-- 代理启动失败留下的故障快照现在带真正的启动报错，不再是一份空文件。
+- New File Workbench: drop in Word, PDF, image, or text files, review what was found locally, then download a masked copy.
 - The logs page now tells "masked successfully" apart from "nothing to mask" instead of showing one green "success" for both.
 - Pasting long text into web AI no longer gives up early and sends the original through; large inputs now wait for processing to finish.
-- Crash snapshots from failed proxy startups now include the real startup error instead of being an empty file.
+
+### 新增
+- 新增「文件脱敏」页：支持 Word / PowerPoint / Excel、纯文本、PDF 与图片；扫描后命中项可逐项替换或保留，PDF/图片可在预览上画框、画笔遮盖，成品通过一次性链接下载。
+- Added a File Workbench page: supports Word, PowerPoint, Excel, plain text, PDF, and images; after scanning, each finding can be replaced or kept, PDF/image previews accept rectangle and brush redactions, and the result downloads through a one-time link.
+- 文件任务默认全程在本机处理，不向互联网发起请求；OCR 默认走本机或环回服务，只有显式开启远端 OCR 才会外发页图。历史只保留打码后的文件名与计数，不保存原文、命中清单或真实文件名。
+- File jobs stay on this machine by default with no internet requests; OCR uses a local or loopback service unless remote OCR is explicitly enabled. History keeps only masked file names and counters, never originals, hit lists, or real file names.
 
 ### 修复
 - 网页版 AI 的文本脱敏改为按内容长度分档设置等待时间，并保证页面等待长于本地处理，避免大段内容在页面先放弃后被原样发出。

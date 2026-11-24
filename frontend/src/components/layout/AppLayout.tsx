@@ -29,6 +29,7 @@ import {
   X,
   Globe,
   Heart,
+  FileLock2,
 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getStatus, startProxy, stopProxy } from '@/api/proxy'
@@ -76,6 +77,7 @@ const NAV_ITEMS = [
   { to: '/stats', key: 'stats', icon: BarChart3 },
   { to: '/clients', key: 'clients', icon: Network },
   { to: '/extension', key: 'extension', icon: Globe },
+  { to: '/files', key: 'files', icon: FileLock2 },
   { to: '/words', key: 'words', icon: ScanSearch },
   { to: '/audit', key: 'audit', icon: ShieldCheck },
   { to: '/settings', key: 'settings', icon: Settings },
@@ -351,6 +353,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     if (p === '/words') return t('nav.words')
     if (p === '/clients') return t('nav.clients')
     if (p === '/extension') return t('nav.extension')
+    if (p === '/files') return t('nav.files')
     if (p === '/audit') return t('nav.audit')
     if (p === '/settings') return t('nav.settings')
     return t('layout.appName')

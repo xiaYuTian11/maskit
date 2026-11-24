@@ -43,7 +43,7 @@ import zlib
 from pathlib import Path
 from collections import deque
 from urllib.parse import urlparse, urlsplit, unquote
-from flask import Flask, request, jsonify, make_response, send_file
+from flask import Flask, request, jsonify, make_response, send_file, g
 from shield_defaults import (
     DEFAULT_DOMAINS,
     DEFAULT_PATHS,
@@ -641,6 +641,11 @@ def _guard_reject(reason, resp, status=403):
     return resp, status
 
 
+# 文件下载 nonce 豁免路径（G747）：仅精确匹配单个任务的 download，绝不按 /api/files/
+# 前缀放行（那会让整个文件接口绕过 token）。job_id 形如 fj_<hex>。
+_FILE_DOWNLOAD_RX = re.compile(r"^/api/files/jobs/[A-Za-z0-9_]+/download$")
+
+
 @app.before_request
 def api_guard():
     # 存活探针：不需要 token（Docker HEALTHCHECK 拿不到随机 token），只回 ok，不泄露任何状态
@@ -658,6 +663,15 @@ def api_guard():
         return _guard_reject("host_rejected",
                              jsonify({"ok": False, "error": "host_rejected",
                                       "message": "非法请求来源 Host"}))
+
+    # 文件下载 nonce 豁免（G747）：仅精确匹配 GET .../download，token 由路由内一次性
+    # nonce 替代（导航式下载带不了自定义头）。Host 已在上面校验，Origin 仍校验。
+    if request.method == "GET" and _FILE_DOWNLOAD_RX.match(request.path):
+        if not _origin_ok():
+            return _guard_reject("origin_rejected",
+                                 jsonify({"ok": False, "error": "origin_rejected",
+                                          "message": "Origin 校验未通过"}))
+        return None
 
     # API 令牌校验（主防线）：任何外部未授权请求在第一道防线直接阻断
     token = request.headers.get("X-Shield-Token", "")
@@ -4093,6 +4107,19 @@ def default_config():
         # 内置危害命令作为**可读可改的默认值**随包分发，用户可在界面新增/修改/
         # 停用/删除（删除不复活，见 _normalize_command_block 的种子语义）。
         "command_block": copy.deepcopy(DEFAULT_COMMAND_BLOCK),
+        # 文件脱敏工作台（file-workbench-kernel，G752）：合法键真相源，缺键会让
+        # /api/config 更新被 _config_patch_node 当未知键拒绝。默认值与规约一致。
+        "files_enabled": True,
+        "files_max_size_mb": 1024,
+        "files_max_pages": 1000,
+        "files_max_image_mp": 32,
+        "files_max_hits": 20000,
+        "files_queue_max": 8,
+        "files_worker_concurrency": 1,
+        "files_review_ttl_min": 60,
+        "files_clear_pdf_docinfo": True,
+        "files_strip_embedded": True,
+        "files_path_source": True,
     }
 
 
@@ -4113,6 +4140,16 @@ def _clean_domain(value):
     if not d or not DOMAIN_RE.fullmatch(d):
         return None
     return d
+
+
+def _files_int(value, default, lo, hi):
+    """文件工作台数值键归一（G752）：非法值回落默认并钳制范围，绝不让配置保存崩溃。"""
+    # @guard G752 files_* 键归一，默认值与 default_config / 规约一致。
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
 
 
 def _normalize_ocr_engine(raw):
@@ -4830,6 +4867,18 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         "meta": raw.get("meta") if isinstance(raw.get("meta"), dict) else {},
         "audit": _normalize_audit(raw.get("audit")),
         "command_block": _normalize_command_block(raw.get("command_block"), warn),
+        # 文件脱敏工作台（G752）：扁平键归一，默认值与 default_config / 规约一致。
+        "files_enabled": bool(raw.get("files_enabled", True)),
+        "files_max_size_mb": _files_int(raw.get("files_max_size_mb"), 1024, 1, 10240),
+        "files_max_pages": _files_int(raw.get("files_max_pages"), 1000, 1, 100000),
+        "files_max_image_mp": _files_int(raw.get("files_max_image_mp"), 32, 1, 512),
+        "files_max_hits": _files_int(raw.get("files_max_hits"), 20000, 1, 200000),
+        "files_queue_max": _files_int(raw.get("files_queue_max"), 8, 1, 64),
+        "files_worker_concurrency": _files_int(raw.get("files_worker_concurrency"), 1, 1, 2),
+        "files_review_ttl_min": _files_int(raw.get("files_review_ttl_min"), 60, 1, 1440),
+        "files_clear_pdf_docinfo": bool(raw.get("files_clear_pdf_docinfo", True)),
+        "files_strip_embedded": bool(raw.get("files_strip_embedded", True)),
+        "files_path_source": bool(raw.get("files_path_source", True)),
     }
 
 
@@ -8347,6 +8396,382 @@ def api_ocr_runtime_uninstall():
         reason = getattr(e, "reason", "uninstall_failed")
         code = 409 if reason == "install_in_progress" else 400
         return jsonify({"ok": False, "error": reason}), code
+
+
+# ── 文件脱敏工作台（file-workbench-kernel，2026-11-24）─────────────────────────
+# 任务内核在 file_workbench.JobManager；本段只做 HTTP 适配 + 上传闸门 + nonce 下载 +
+# save 守卫 + path 门控。载体引擎（OOXML/PDF/图片）由后续任务注册进管理器。
+import hmac as _hmac
+
+_FILE_MGR = None
+_FILE_MGR_LOCK = threading.Lock()
+_FILE_NONCES = {}                      # nonce -> (job_id, exp, sig)
+_FILE_NONCE_LOCK = threading.Lock()
+_FILE_EXT_CARRIER = {
+    "docx": "ooxml", "pptx": "ooxml", "xlsx": "ooxml",
+    "pdf": "pdf", "png": "image", "jpg": "image", "jpeg": "image",
+    "webp": "image", "bmp": "image", "tif": "image", "tiff": "image",
+    "txt": "text", "md": "text", "json": "text", "csv": "text", "log": "text",
+    "xml": "text", "yaml": "text", "yml": "text", "html": "text",
+}
+
+
+def _file_manager():
+    global _FILE_MGR
+    with _FILE_MGR_LOCK:
+        if _FILE_MGR is None:
+            import file_workbench
+            import file_job_store
+            cfg = load_config()
+            hist = file_job_store.HistoryStore(DATA_ROOT)
+            _FILE_MGR = file_workbench.JobManager(
+                DATA_ROOT, cfg=cfg, history=hist,
+                concurrency=cfg.get("files_worker_concurrency", 1),
+                queue_max=cfg.get("files_queue_max", 8),
+                review_ttl_min=cfg.get("files_review_ttl_min", 60))
+            import file_carriers
+            file_carriers.register(_FILE_MGR)      # T2 文字类载体
+            import file_visual
+            file_visual.register(_FILE_MGR)        # T3 视觉类载体
+            _FILE_MGR.startup_cleanup()
+        return _FILE_MGR
+
+
+def _probe_job_file(path, carrier):
+    """按载体分发预检（文字类 / 视觉类）。"""
+    cfg = load_config()
+    if carrier in ("pdf", "image"):
+        import file_visual
+        return file_visual.probe(path, carrier, cfg=cfg)
+    import file_carriers
+    return file_carriers.probe(path, carrier)
+
+
+def _file_carrier_for(filename):
+    ext = os.path.splitext(filename or "")[1].lstrip(".").lower()
+    return _FILE_EXT_CARRIER.get(ext, "")
+
+
+class _BoundedUploadFile:
+    """G743 兜底：Content-Length 谎报/缺失时按实际写入字节封顶，超限即抛 413，
+    防止撑爆磁盘。其余文件方法委托底层句柄（read/seek/close 等）。
+    """
+
+    def __init__(self, fh, limit):
+        self._fh = fh
+        self._limit = limit
+        self._n = 0
+
+    def write(self, b):
+        self._n += len(b)
+        if self._limit and self._n > self._limit:
+            import file_workbench as fw
+            raise fw.FileWorkbenchError(fw.E_TOO_LARGE, 413)
+        return self._fh.write(b)
+
+    def __getattr__(self, name):
+        return getattr(self._fh, name)
+
+
+class _FileUploadRequest(app.request_class):
+    """G744：文件工作台上传经 _get_file_stream 直写 DATA_ROOT/file-jobs/<id>/src.bin，
+    不落系统 %TEMP%。仅当路由设置了 g.file_upload_target 时直写；其它 multipart
+    （如 ext mask-file）保持 werkzeug 默认 spool 行为，不受影响。
+    """
+
+    def _get_file_stream(self, total_content_length, content_type, filename=None, content_length=None):
+        # @guard G744 文件工作台上传直写 DATA_ROOT/file-jobs/<id>/src.bin，禁系统 %TEMP% spool。
+        target = getattr(g, "file_upload_target", None)
+        if target:
+            fh = open(os.path.join(target, "src.bin"), "wb")
+            limit = getattr(g, "file_upload_max", 0)
+            return _BoundedUploadFile(fh, limit) if limit else fh
+        return super()._get_file_stream(total_content_length, content_type, filename, content_length)
+
+
+app.request_class = _FileUploadRequest
+
+
+def _file_err(e):
+    import file_workbench
+    if isinstance(e, file_workbench.FileWorkbenchError):
+        body = {"ok": False, "error": e.code, "message": e.message}
+        if e.http == 413:
+            body["blocking"] = True
+        return jsonify(body), e.http
+    return jsonify({"ok": False, "error": "internal_error"}), 500
+
+
+def _is_under(child, parent):
+    try:
+        return os.path.commonpath([os.path.realpath(child), os.path.realpath(parent)]) == os.path.realpath(parent)
+    except ValueError:
+        return False
+
+
+def _file_save_guard(job, dest, overwrite):
+    """G748：绝对路径、存在目录、非 DATA_ROOT、非源目录、默认拒覆盖。"""
+    # @guard G748 任一条件不满足回 FILE_7408 / 400，绝不落盘到受保护位置。
+    import file_workbench as fw
+    if not dest or not os.path.isabs(dest):
+        raise fw.FileWorkbenchError(fw.E_SAVE_DEST, 400)
+    d = os.path.realpath(dest)
+    if not os.path.isdir(d):
+        raise fw.FileWorkbenchError(fw.E_SAVE_DEST, 400)
+    if _is_under(d, str(DATA_ROOT)):
+        raise fw.FileWorkbenchError(fw.E_SAVE_DEST, 400)
+    if job.source_path:
+        src_dir = os.path.dirname(os.path.realpath(job.source_path))
+        if _is_under(d, src_dir):
+            raise fw.FileWorkbenchError(fw.E_SAVE_DEST, 400)
+    target = os.path.join(d, os.path.basename(job.filename) or "masked.bin")
+    if os.path.exists(target) and not overwrite:
+        raise fw.FileWorkbenchError(fw.E_SAVE_DEST, 400)
+    return target
+
+
+def _file_nonce_make(job_id):
+    exp = int(time.time()) + 120
+    nonce = secrets.token_urlsafe(24)
+    sig = _hmac.new(API_TOKEN.encode(), ("%s:%d" % (job_id, exp)).encode(), hashlib.sha256).hexdigest()
+    with _FILE_NONCE_LOCK:
+        # 顺手清过期 nonce，字典只增不减会缓慢泄漏（G747）。
+        now = time.time()
+        for k in [k for k, v in _FILE_NONCES.items() if v[1] < now]:
+            _FILE_NONCES.pop(k, None)
+        _FILE_NONCES[nonce] = (job_id, exp, sig)
+    return nonce, exp, sig
+
+
+def _file_nonce_take(job_id, nonce, exp, sig):
+    # @guard G747 HMAC 校验 + 120s 过期 + 一次性取出即作废，重放/篡改/过期回 FILE_7407 / 403。
+    import file_workbench as fw
+    try:
+        exp = int(exp)
+    except (TypeError, ValueError):
+        raise fw.FileWorkbenchError(fw.E_NONCE, 403)
+    expect = _hmac.new(API_TOKEN.encode(), ("%s:%d" % (job_id, exp)).encode(), hashlib.sha256).hexdigest()
+    if not nonce or not sig or not secrets.compare_digest(str(sig), expect):
+        raise fw.FileWorkbenchError(fw.E_NONCE, 403)
+    if time.time() > exp:
+        raise fw.FileWorkbenchError(fw.E_NONCE, 403)
+    with _FILE_NONCE_LOCK:
+        rec = _FILE_NONCES.pop(nonce, None)   # 一次性：取出即作废，重放失败
+    if rec is None or rec[0] != job_id:
+        raise fw.FileWorkbenchError(fw.E_NONCE, 403)
+
+
+@app.get("/api/files/capabilities")
+def api_files_capabilities():
+    cfg = load_config()
+    mgr = _file_manager()
+    carriers = sorted(mgr._carriers.keys())
+    return jsonify({"ok": True, "enabled": bool(cfg.get("files_enabled", True)),
+                    "carriers": carriers, "extensions": sorted(_FILE_EXT_CARRIER.keys()),
+                    "path_source": bool(cfg.get("files_path_source", True)) and not REMOTE_MODE,
+                    "max_size_mb": cfg.get("files_max_size_mb", 1024)})
+
+
+@app.post("/api/files/jobs")
+def api_files_create():
+    import file_workbench as fw
+    cfg = load_config()
+    if not cfg.get("files_enabled", True):
+        return jsonify({"ok": False, "error": "files_disabled"}), 403
+    mgr = _file_manager()
+    max_bytes = int(cfg.get("files_max_size_mb", 1024)) * 1024 * 1024
+    try:
+        # path 模式（桌面，G751 门控）
+        if request.is_json:
+            body = request.get_json(silent=True) or {}
+            if body.get("path"):
+                # @guard G751 仅 files_path_source 且非 REMOTE_MODE 才允许 path 模式，否则 FILE_7411 / 400。
+                if not (cfg.get("files_path_source", True) and not REMOTE_MODE):
+                    return jsonify({"ok": False, "error": fw.E_PATH_MODE}), 400
+                src_path = str(body["path"])
+                if not os.path.isfile(src_path):
+                    return jsonify({"ok": False, "error": "file_not_found"}), 400
+                size = os.path.getsize(src_path)
+                if size > max_bytes:
+                    return jsonify({"ok": False, "error": fw.E_TOO_LARGE, "blocking": True,
+                                    "limit_bytes": max_bytes}), 413
+                filename = os.path.basename(src_path)
+                carrier = _file_carrier_for(filename)
+                job = mgr.create_job(filename, size, carrier, source_path=src_path)
+                # 桌面 path 模式：源文件拷入任务目录（src.bin），后续扫描读它。
+                import shutil
+                shutil.copyfile(src_path, mgr.job_dir(job.id) / "src.bin")
+                ok, pc, err = _probe_job_file(str(mgr.job_dir(job.id) / "src.bin"), carrier)
+                mgr.probe_result(job.id, ok, page_count=pc, error=err)
+                _emit_log("[file] %s path 上传 %s" % (job.id, filename))
+                return jsonify({"ok": True, "job": job.snapshot()}), 201
+        # 上传模式闸门（G743）：解析前判，超限回 JSON 413 + blocking。
+        # @guard G743 content_length 超限或 Transfer-Encoding 一律 FILE_7403 / 413 + blocking。
+        if request.headers.get("Transfer-Encoding") or (request.content_length or 0) > max_bytes:
+            return jsonify({"ok": False, "error": fw.E_TOO_LARGE, "blocking": True,
+                            "limit_bytes": max_bytes}), 413
+        job_id = "fj_" + secrets.token_hex(8)
+        target = mgr.job_dir(job_id)
+        target.mkdir(parents=True, exist_ok=True)
+        g.file_upload_target = str(target)        # G744：stream_factory 直写此处
+        g.file_upload_max = max_bytes             # G743：有界写入兜底
+        form = request.form
+        f = request.files.get("file")
+        filename = form.get("filename") or (f.filename if f else "")
+        src = target / "src.bin"
+        if not src.exists():
+            mgr.delete(job_id)
+            return jsonify({"ok": False, "error": "no_file"}), 400
+        size = src.stat().st_size
+        if size > max_bytes:
+            mgr.delete(job_id)
+            return jsonify({"ok": False, "error": fw.E_TOO_LARGE, "blocking": True,
+                            "limit_bytes": max_bytes}), 413
+        carrier = _file_carrier_for(filename)
+        job = mgr.create_job(filename, size, carrier, job_id=job_id)
+        ok, pc, err = _probe_job_file(str(src), carrier)
+        mgr.probe_result(job.id, ok, page_count=pc, error=err)
+        _emit_log("[file] %s 上传 %s (%d bytes)" % (job.id, filename, size))
+        return jsonify({"ok": True, "job": job.snapshot()}), 201
+    except Exception as e:
+        # 上传中途失败（含有界写入超限）：清掉已落盘的任务目录，不留半成品。
+        tgt = getattr(g, "file_upload_target", None)
+        if tgt:
+            import shutil
+            shutil.rmtree(tgt, ignore_errors=True)
+        return _file_err(e)
+
+
+@app.get("/api/files/jobs")
+def api_files_list():
+    return jsonify({"ok": True, "jobs": _file_manager().list_jobs()})
+
+
+@app.get("/api/files/jobs/<job_id>")
+def api_files_get(job_id):
+    try:
+        return jsonify({"ok": True, "job": _file_manager().get_job(job_id).snapshot()})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.get("/api/files/jobs/<job_id>/hits")
+def api_files_hits(job_id):
+    try:
+        return jsonify({"ok": True, "hits": _file_manager().hits(job_id)})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/jobs/<job_id>/scan")
+def api_files_scan(job_id):
+    try:
+        body = request.get_json(silent=True) or {}
+        job = _file_manager().request_scan(job_id, body.get("mode", "auto"),
+                                           bool(body.get("scan_embedded", False)))
+        # G742：进队回 201 + position；队满由内核抛 429。
+        return jsonify({"ok": True, "job": job.snapshot(), "position": job.position}), 201
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/jobs/<job_id>/apply")
+def api_files_apply(job_id):
+    try:
+        body = request.get_json(silent=True) or {}
+        job = _file_manager().request_apply(job_id, body.get("edits"), body.get("redactions"),
+                                            body.get("options"))
+        return jsonify({"ok": True, "job": job.snapshot()}), 202
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/jobs/<job_id>/cancel")
+def api_files_cancel(job_id):
+    try:
+        job = _file_manager().cancel(job_id)
+        return jsonify({"ok": True, "job": job.snapshot()})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.delete("/api/files/jobs/<job_id>")
+def api_files_delete(job_id):
+    existed = _file_manager().delete(job_id)
+    return jsonify({"ok": True, "deleted": existed})
+
+
+@app.get("/api/files/jobs/<job_id>/preview")
+def api_files_preview(job_id):
+    try:
+        mgr = _file_manager()
+        job = mgr.get_job(job_id)
+        import file_visual
+        url = file_visual.preview_data_url(job, request.args.get("page", 1))
+        return jsonify({"ok": True, "data": url})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/jobs/<job_id>/nonce")
+def api_files_nonce(job_id):
+    try:
+        mgr = _file_manager()
+        mgr.check_download(job_id)            # 仅 done 可签 nonce（G747/G750）
+        nonce, exp, sig = _file_nonce_make(job_id)
+        url = "/api/files/jobs/%s/download?nonce=%s&exp=%d&sig=%s" % (job_id, nonce, exp, sig)
+        return jsonify({"ok": True, "url": url, "exp": exp})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.get("/api/files/jobs/<job_id>/download")
+def api_files_download(job_id):
+    # api_guard 已对本路径豁免 token（Host/Origin 仍校验）；此处验一次性 nonce。
+    try:
+        mgr = _file_manager()
+        _file_nonce_take(job_id, request.args.get("nonce"), request.args.get("exp"),
+                         request.args.get("sig"))
+        job = mgr.check_download(job_id)
+        out_dir = mgr.job_dir(job_id) / "out"
+        files = list(out_dir.glob("*")) if out_dir.exists() else []
+        if not files:
+            return jsonify({"ok": False, "error": "no_output"}), 404
+        return send_file(str(files[0]), as_attachment=True,
+                         download_name=os.path.basename(job.filename) or "masked.bin")
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/jobs/<job_id>/save")
+def api_files_save(job_id):
+    import file_workbench as fw
+    try:
+        # 另存为是桌面能力（Tauri 目录选择）；Docker/LAN 远程模式禁用，走浏览器 nonce 下载。
+        if REMOTE_MODE:
+            return jsonify({"ok": False, "error": fw.E_PATH_MODE,
+                            "message": "远程模式请用浏览器下载"}), 400
+        mgr = _file_manager()
+        job = mgr.check_download(job_id)
+        body = request.get_json(silent=True) or {}
+        target = _file_save_guard(job, body.get("dest_dir", ""), bool(body.get("overwrite", False)))
+        out_dir = mgr.job_dir(job_id) / "out"
+        files = list(out_dir.glob("*")) if out_dir.exists() else []
+        if not files:
+            return jsonify({"ok": False, "error": "no_output"}), 404
+        import shutil
+        shutil.copyfile(files[0], target)
+        _emit_log("[file] %s 另存为 %s" % (job_id, target))
+        return jsonify({"ok": True, "path": target})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.get("/api/files/history")
+def api_files_history():
+    import file_job_store
+    hist = file_job_store.HistoryStore(DATA_ROOT)
+    return jsonify({"ok": True, "history": hist.entries()})
 
 
 @app.post("/api/ext/mask-image")

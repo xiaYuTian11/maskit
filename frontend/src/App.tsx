@@ -16,6 +16,7 @@ const AuditPage = lazy(() => import('@/pages/Audit'))
 const WordsPage = lazy(() => import('@/pages/Words'))
 const ClientsPage = lazy(() => import('@/pages/Clients'))
 const ExtensionPage = lazy(() => import('@/pages/Extension'))
+const FilesPage = lazy(() => import('@/pages/Files'))
 
 function App() {
   const { token, setToken, setEngineReady, setEngineError } = useAuthStore()
@@ -123,6 +124,7 @@ function App() {
           <Route path="/words" element={<WordsPage />} />
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/extension" element={<ExtensionPage />} />
+          <Route path="/files" element={<FilesPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

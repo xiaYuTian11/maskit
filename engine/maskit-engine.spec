@@ -34,6 +34,13 @@ hiddenimports = (
         'connection_policy',
         'mitm_transport_adapter',
         'panel',
+        # 文件脱敏工作台（2026-11-24）：panel 全部在函数内懒加载它们，
+        # 且 file_visual 进一步懒加载 OCR/PDF 依赖。按 selfcheck 的同类教训显式枚举，
+        # 避免打包态「页面在、接口 500」这种只在用户机器上出现的缺模块。
+        'file_workbench',
+        'file_carriers',
+        'file_visual',
+        'file_job_store',
         'credential_labels',
         'onboarding',
         # 与 datas 同步：transparent.py（被 mitmdump 当脚本加载）在模块级 import 它们，

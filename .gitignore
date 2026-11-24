@@ -77,6 +77,15 @@ log-trace.json
 diagnostics-*.json
 shield-env-backup.json
 debug-*.log
+# 文件脱敏工作台的运行时数据（开发态 DATA_ROOT = engine/）：
+# 任务目录含原始/中间/成品字节，历史只存打码文件名；都不属于源码。
+engine/file-jobs/
+engine/file-jobs.json
+
+# flowspec / AGENTS 的本机备份：只服务当次初始化，误提交会把旧规约带回仓库。
+.flowspec.bak-*/
+AGENTS.md.bak-*
+.gitignore.bak-*
 
 # Node / Frontend
 frontend/node_modules/

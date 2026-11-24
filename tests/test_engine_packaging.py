@@ -80,6 +80,17 @@ class EngineSpecCoverageTests(unittest.TestCase):
             self.assertIn("'" + name + "'", src)
             self.assertIn("ENGINE_DIR / '" + name + ".py'", src)
 
+    def test_file_workbench_modules_are_explicitly_listed(self):
+        """文件工作台四个模块必须显式进 hiddenimports（panel 全是函数内懒加载）。
+
+        它们不在 mitmdump 的脚本导入链上，所以不能靠 datas 兜底；靠 PyInstaller
+        分析器捞函数级 import 属于“运气”，漏了就是打包态页面在、接口 500。
+        """
+        src = self._spec_source()
+        for name in ("file_workbench", "file_carriers", "file_visual", "file_job_store"):
+            self.assertIn("'" + name + "'", src,
+                          "spec 的 hiddenimports 里缺 %s（文件工作台打包态会缺模块）" % name)
+
     def _engine_import_closure(self, root):
         """engine/ 内从 `root` 出发能走到的模块（含函数体内的懒 import）。"""
         modules = self._engine_modules()
