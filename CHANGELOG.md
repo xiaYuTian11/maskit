@@ -21,6 +21,8 @@
 - File jobs stay on this machine by default with no internet requests; OCR uses a local or loopback service unless remote OCR is explicitly enabled. History keeps only masked file names and counters, never originals, hit lists, or real file names.
 
 ### 修复
+- 文件脱敏页的「覆盖情况」和提示改成能读懂的文案，不再把引擎内部字段 JSON 直接糊在界面上。
+- The file workbench now phrases coverage and notes as readable sentences instead of dumping internal JSON field names.
 - Linux 下 `systemctl list-units` 输出里的 systemd 单元名（如带实例的 `本地@实例.单元后缀`）不再被当成邮箱脱敏，agent 能正常看出是哪个单元，从而继续做系统诊断。
 - systemd unit names in `systemctl list-units` output are no longer masked as email addresses, so agents can still tell which unit is which during system diagnosis.
 - 网页版 AI 的文本脱敏改为按内容长度分档设置等待时间，并保证页面等待长于本地处理，避免大段内容在页面先放弃后被原样发出。

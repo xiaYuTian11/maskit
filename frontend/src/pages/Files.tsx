@@ -54,6 +54,65 @@ function statusTone(status: string): 'default' | 'secondary' | 'destructive' | '
   return 'outline'
 }
 
+type TranslateF = ReturnType<typeof useI18n>['tf']
+
+// 引擎的覆盖计数是按载体各报一份的字典（text: scanned/masked，pdf: rendered_pages/…）；
+// 直接 JSON.stringify 给用户看等于把内部字段名糊在界面上。这里只保留非零项并翻成人话，
+// 零值/不适用字段不显示，避免「跳过 OCR 0 页」这类噪声。
+function describeCoverage(
+  coverage: Record<string, unknown>,
+  carrier: string,
+  tf: TranslateF,
+): string[] {
+  const lines: string[] = []
+  const n = (k: string) => {
+    const v = Number(coverage?.[k] ?? 0)
+    return Number.isFinite(v) ? v : 0
+  }
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(coverage || {}, k)
+  const add = (k: string, key: string) => {
+    if (n(k) > 0) lines.push(tf(key, { n: n(k) }))
+  }
+  if (has('scanned')) {
+    // 纯文本是整文件一次扫完，说「1 个部分」反而费解
+    if (carrier === 'text') lines.push(tf('files.cov.fullText'))
+    else if (n('scanned') > 0) lines.push(tf('files.cov.scanned', { n: n('scanned') }))
+  }
+  add('masked', 'files.cov.masked')
+  add('rendered_pages', 'files.cov.pages')
+  add('rasterized_pages', 'files.cov.rasterized')
+  add('text_layer_hits', 'files.cov.textLayerHits')
+  add('hidden_hits', 'files.cov.hiddenHits')
+  add('skipped_ocr_pages', 'files.cov.skippedOcr')
+  add('skipped_embedded_images', 'files.cov.skippedEmbeddedImages')
+  add('embedded_objects_present', 'files.cov.embeddedPresent')
+  add('embedded_objects_stripped', 'files.cov.embeddedStripped')
+  add('embedded_objects_kept_unscanned', 'files.cov.embeddedKept')
+  add('attachments_stripped', 'files.cov.attachmentsStripped')
+  add('attachments_kept_unscanned', 'files.cov.attachmentsKept')
+  return lines
+}
+
+// 告警码是引擎内部标识（`page_3_full_cover` 等），不能原样给用户看；
+// 未知码保留原码作为尾巴，方便报告问题时定位，但不让整行变成乱码。
+const PAGE_WARN_RX = /^page_(\d+)_(full_cover|ocr_failed_full_cover|kept_with_unmasked_hits)$/
+
+function describeWarnings(warnings: string[], tf: TranslateF): string[] {
+  return (warnings || []).map((code) => {
+    if (code === 'embedded_objects_kept_unscanned') return tf('files.warn.embeddedKept')
+    if (code === 'attachments_kept_unscanned') return tf('files.warn.attachmentsKept')
+    if (code === 'image_ocr_failed_full_cover') return tf('files.warn.imageOcrFailed')
+    const m = PAGE_WARN_RX.exec(code)
+    if (m) {
+      const page = Number(m[1])
+      if (m[2] === 'full_cover') return tf('files.warn.pageFullCover', { page })
+      if (m[2] === 'ocr_failed_full_cover') return tf('files.warn.pageOcrFailed', { page })
+      return tf('files.warn.pageKeptUnmasked', { page })
+    }
+    return tf('files.warn.unknown', { code })
+  })
+}
+
 export default function FilesPage() {
   const { t, tf } = useI18n()
   const [caps, setCaps] = useState<FilesCapabilities | null>(null)
@@ -374,6 +433,8 @@ export default function FilesPage() {
   const canApply = selected?.status === 'awaiting_review'
   const canDownload = selected?.status === 'done'
   const canCancel = selected ? ['queued', 'scanning', 'applying'].includes(selected.status) : false
+  const coverageLines = selected ? describeCoverage(selected.coverage || {}, selected.carrier, tf) : []
+  const warningLines = selected ? describeWarnings(selected.warnings || [], tf) : []
 
   if (loading) {
     // @guard G809 加载态有骨架/文案，不渲染空白表格
@@ -563,14 +624,14 @@ export default function FilesPage() {
                         ) : null}
                       </div>
                     ) : null}
-                    {selected.coverage && Object.keys(selected.coverage).length > 0 ? (
+                    {coverageLines.length ? (
                       <p className="text-[11px] text-muted-foreground">
-                        {t('files.coverage')}: {JSON.stringify(selected.coverage)}
+                        {t('files.coverage')}: {coverageLines.join(' · ')}
                       </p>
                     ) : null}
-                    {selected.warnings?.length ? (
+                    {warningLines.length ? (
                       <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                        {t('files.warnings')}: {selected.warnings.join(' · ')}
+                        {t('files.warnings')}: {warningLines.join(' · ')}
                       </p>
                     ) : null}
                   </CardContent>

@@ -63,6 +63,13 @@ class FileWorkbenchUiTests(unittest.TestCase):
         self.assertIn("setInterval", self.page)
         self.assertIn("NON_TERMINAL.has(jobStatus)", self.page)
         self.assertIn("/api/files/jobs", self.api)
+        # 覆盖/提示要翻成人话：把引擎内部计数字典 JSON.stringify 给用户看，
+        # 等于把 embedded_objects_kept_unscanned 这类字段名糊在界面上（2026-11-26 反馈）
+        self.assertNotIn("JSON.stringify(selected.coverage)", self.page)
+        self.assertIn("describeCoverage", self.page)
+        self.assertIn("describeWarnings", self.page)
+        self.assertIn("files.cov.masked", self.page)
+        self.assertIn("files.warn.pageFullCover", self.page)
 
     def test_g804_hit_list_privacy(self):
         """G804 命中清单：凭据项只读 preview+digest，非凭据可改可留。"""
@@ -143,6 +150,19 @@ class FileWorkbenchUiTests(unittest.TestCase):
         code = re.sub(r"//[^\n]*", "", self.page)
         code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
         self.assertFalse(re.search(r"[\u4e00-\u9fff]", code), "页面出现硬编码中文")
+        # 覆盖/提示走 tf()（上面的 t() 正则扫不到），这里显式要求中英成对
+        for key in ("files.cov.fullText", "files.cov.scanned", "files.cov.masked",
+                    "files.cov.pages", "files.cov.rasterized", "files.cov.textLayerHits",
+                    "files.cov.hiddenHits", "files.cov.skippedOcr",
+                    "files.cov.skippedEmbeddedImages", "files.cov.embeddedPresent",
+                    "files.cov.embeddedStripped", "files.cov.embeddedKept",
+                    "files.cov.attachmentsStripped", "files.cov.attachmentsKept",
+                    "files.warn.embeddedKept", "files.warn.attachmentsKept",
+                    "files.warn.imageOcrFailed", "files.warn.pageFullCover",
+                    "files.warn.pageOcrFailed", "files.warn.pageKeptUnmasked",
+                    "files.warn.unknown"):
+            self.assertIn("'%s':" % key, zh_block, "缺少中文词条 %s" % key)
+            self.assertIn("'%s':" % key, en_block, "缺少英文词条 %s" % key)
 
     def test_g811_cancel_delete(self):
         """G811 取消/删除：取消仅允许态显示，删除需确认。"""
