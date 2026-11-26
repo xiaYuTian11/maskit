@@ -21,6 +21,8 @@
 - File jobs stay on this machine by default with no internet requests; OCR uses a local or loopback service unless remote OCR is explicitly enabled. History keeps only masked file names and counters, never originals, hit lists, or real file names.
 
 ### 修复
+- Linux 下 `systemctl list-units` 输出里的 systemd 单元名（如带实例的 `本地@实例.单元后缀`）不再被当成邮箱脱敏，agent 能正常看出是哪个单元，从而继续做系统诊断。
+- systemd unit names in `systemctl list-units` output are no longer masked as email addresses, so agents can still tell which unit is which during system diagnosis.
 - 网页版 AI 的文本脱敏改为按内容长度分档设置等待时间，并保证页面等待长于本地处理，避免大段内容在页面先放弃后被原样发出。
 - Text masking in the web extension now scales its wait time with input size and always waits longer than local processing, so large inputs are no longer forwarded unmasked.
 - 代理启动失败时，故障快照现在会带上子进程的启动输出，并且一次失败只留一份快照。

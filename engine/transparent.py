@@ -1840,11 +1840,37 @@ def _landline_ok(num_str: str) -> bool:
     return True
 
 
+# 邮箱规则必须让路的「确定不是 TLD」后缀：systemd 的单元实例名形如
+# 「本地部分@实例.单元后缀」（列出用户管理器、getty 终端等单元时全被命中），
+# 形态与邮箱逐字符同构，会被整段当邮箱脱敏；于是 agent 读 `systemctl list-units`
+# 只能看到占位符，无法判断是哪个单元（issue #52 实测，2026-11-25）。
+#
+# 这里走**后缀黑名单**而不是「只认已知 TLD」白名单：内网邮箱常用 `.local` /
+# `.internal` / `.corp`，新 gTLD 也在持续放号，白名单会让这些地址**明文出网**。
+# 两者代价不对等——多脱一个单元名只是可读性问题，漏脱一个邮箱是泄密。
+# 新增后缀前必须确认 IANA 根区无同名 TLD。`.target` 故意不收：它是根区真实 TLD
+# （Target 品牌），收了就会把该域下的真邮箱放出去；带 @ 实例的 target 单元本就极少。
+_EMAIL_NON_TLD_SUFFIXES = frozenset({
+    "service",    # systemd 服务单元
+    "socket",     # systemd 套接字单元
+    "timer",      # systemd 定时器单元
+    "busname",    # systemd D-Bus 激活单元
+    "mount",      # systemd 挂载单元
+    "automount",  # systemd 自动挂载单元
+    "swap",       # systemd 交换单元
+    "path",       # systemd 路径单元
+    "slice",      # systemd cgroup 切片
+    "scope",      # systemd 作用域单元
+    "device",     # systemd 设备单元
+})
+
+
 def _email_ok(email_str: str) -> bool:
     """邮箱地址校验：
     1. 包含合法用户名与域名；
     2. 排除连续双点及冒号前缀连接串；
-    3. 顶级域名至少 2 位。
+    3. 顶级域名至少 2 位；
+    4. 域尾是 systemd 单元后缀（`.service` 等）的视为单元名，不是邮箱。
     """
     s = str(email_str or "").strip()
     if "@" not in s or s.startswith("@") or s.endswith("@"):
@@ -1859,6 +1885,8 @@ def _email_ok(email_str: str) -> bool:
         return False
     tld = domain.split(".")[-1]
     if len(tld) < 2:
+        return False
+    if tld.lower() in _EMAIL_NON_TLD_SUFFIXES:
         return False
     return True
 
