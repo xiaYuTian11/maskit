@@ -8557,7 +8557,7 @@ def _file_nonce_take(job_id, nonce, exp, sig):
     except (TypeError, ValueError):
         raise fw.FileWorkbenchError(fw.E_NONCE, 403)
     expect = _hmac.new(API_TOKEN.encode(), ("%s:%d" % (job_id, exp)).encode(), hashlib.sha256).hexdigest()
-    if not nonce or not sig or not secrets.compare_digest(str(sig), expect):
+    if not nonce or not sig or not secrets.compare_digest(str(sig).encode("utf-8"), expect.encode("utf-8")):
         raise fw.FileWorkbenchError(fw.E_NONCE, 403)
     if time.time() > exp:
         raise fw.FileWorkbenchError(fw.E_NONCE, 403)
@@ -8628,11 +8628,21 @@ def api_files_create():
         filename = form.get("filename") or (f.filename if f else "")
         src = target / "src.bin"
         if not src.exists():
-            mgr.delete(job_id)
+            if f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            mgr._cleanup_dir(job_id)
             return jsonify({"ok": False, "error": "no_file"}), 400
         size = src.stat().st_size
         if size > max_bytes:
-            mgr.delete(job_id)
+            if f:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            mgr._cleanup_dir(job_id)
             return jsonify({"ok": False, "error": fw.E_TOO_LARGE, "blocking": True,
                             "limit_bytes": max_bytes}), 413
         carrier = _file_carrier_for(filename)

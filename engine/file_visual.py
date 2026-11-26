@@ -356,47 +356,63 @@ def scan_pdf(job, src, staged, opts, cancel):
                 raise fw.FileWorkbenchError(E_TEXTLAYER, 422)
             if text.strip():
                 b = set(tables.fwd)
-                tr.mask_body(text, job.id)
+                masked = tr.mask_body(text, job.id)
                 _collect_new(tables, b, text, "第%d页文本层" % (index + 1), locations, counts)
-                spans = []
-                for orig in tables.fwd.keys() - b:
+                # 同一敏感值在后续页再次出现时已存在 tables.fwd 中，不能只扫本页新增键，
+                # 否则第 2 页起文本层不建框、不栅格化，导致明文泄露。
+                page_matched_origs = [
+                    orig for orig, rec in tables.fwd.items()
+                    if orig and rec[0] in masked and orig in text
+                ]
+                loc_label = "第%d页文本层" % (index + 1)
+                full_warn = "page_%d_full_cover" % (index + 1)
+                for orig in page_matched_origs:
+                    locations.setdefault(orig, set()).add(loc_label)
+                    orig_spans = []
                     start = 0
                     while True:
                         pos = text.find(orig, start)
                         if pos < 0:
                             break
-                        spans.append((pos, pos + len(orig)))
+                        orig_spans.append((pos, pos + len(orig)))
                         start = pos + len(orig)
-                if spans:
-                    rects = pr._text_rects_px(spans, char_boxes, page, scale)
+                    if not orig_spans:
+                        continue
+                    rects = pr._text_rects_px(orig_spans, char_boxes, page, scale)
                     if rects is None:
                         boxes.append({"kind": "full", "source": "auto"})
-                        warnings.append("page_%d_full_cover" % (index + 1))
-                    else:
-                        for l, t, r, btm in rects:
-                            boxes.append({"kind": "rect",
-                                          "rect": [l / image.size[0], t / image.size[1],
-                                                   (r - l) / image.size[0],
-                                                   (btm - t) / image.size[1]],
-                                          "source": "text_layer", "orig": "", "label": ""})
-                        text_layer_hits += len(spans)
-                        for orig in tables.fwd.keys() - b:
-                            page_hit_ids.add(orig)
+                        if full_warn not in warnings:
+                            warnings.append(full_warn)
+                        page_hit_ids.update(page_matched_origs)
+                        break
+                    for l, t, r, btm in rects:
+                        boxes.append({"kind": "rect",
+                                      "rect": [l / image.size[0], t / image.size[1],
+                                               (r - l) / image.size[0],
+                                               (btm - t) / image.size[1]],
+                                      "source": "text_layer", "orig": orig, "label": ""})
+                    text_layer_hits += len(orig_spans)
+                    page_hit_ids.add(orig)
             # OCR 自动框选
             if mode == "auto":
+                b = set(tables.fwd)
                 try:
                     detected = _detect_boxes(page_jpeg, image, job.id)
                 except PageOcrFailed:
                     detected = [{"kind": "full", "source": "auto"}]
                     warnings.append("page_%d_ocr_failed_full_cover" % (index + 1))
                     skipped_ocr += 1
-                b = set(tables.fwd)
                 texts = " ".join(x.get("text") or "" for x in detected)
                 texts = texts.strip()
                 if texts:
                     tr.mask_body(texts, job.id)
                     _collect_new(tables, b, texts,
                                  "第%d页自动识别" % (index + 1), locations, counts)
+                else:
+                    for orig in tables.fwd.keys() - b:
+                        locations.setdefault(orig, set()).add("第%d页自动识别" % (index + 1))
+                        if not counts.get(orig):
+                            counts[orig] = 1
                 for box in detected:
                     if box.get("kind") == "full" or "rect" not in box:
                         boxes.append({"kind": "full", "source": "auto"})
@@ -545,6 +561,7 @@ def apply_pdf(job, staged, out, edits, redactions, options):
     hits = fc.job_hits(job)
     hits_by_id = {h.hit_id: h for h in hits}
     fc._validate_edits(edits, hits_by_id)
+    _validate_redactions(redactions, len(manifest.get("pages") or []) or 1)
     kept = {e.get("hit_id") for e in (edits or []) if e.get("action") == "keep"}
     finals = {}
     for hit in hits:
@@ -728,13 +745,18 @@ def scan_image(job, src, staged, opts, cancel):
         ok, rwhy = _ocr_ready()
         if not ok:
             raise fw.FileWorkbenchError(E_OCR, 503)
+        b = set(tables.fwd)
         try:
             detected = _detect_boxes(raw, img, job.id)
-            b = set(tables.fwd)
             texts = " ".join(x.get("text") or "" for x in detected).strip()
             if texts:
                 tr.mask_body(texts, job.id)
                 _collect_new(tables, b, texts, "图片自动识别", locations, counts)
+            else:
+                for orig in tables.fwd.keys() - b:
+                    locations.setdefault(orig, set()).add("图片自动识别")
+                    if not counts.get(orig):
+                        counts[orig] = 1
             for box in detected:
                 boxes.append({"kind": "rect", "rect": box["rect"], "source": "auto",
                               "label": box.get("label") or "", "orig": box.get("text") or ""})
@@ -752,7 +774,8 @@ def scan_image(job, src, staged, opts, cancel):
     manifest = {"kind": "image", "pages": [{"page": 1, "w": img.size[0], "h": img.size[1],
                                             "preview": "page-0001.jpg", "boxes": boxes,
                                             "text_hit_ids": []}],
-                "attachments": 0, "hidden_hits": 0}
+                "attachments": 0, "hidden_hits": 0,
+                "skipped_ocr_pages": skipped, "warnings": warnings}
     with open(staged, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False)
     coverage = {"rendered_pages": 1, "rasterized_pages": 0,
@@ -767,6 +790,8 @@ def apply_image(job, staged, out, edits, redactions, options):
         manifest = json.load(f)
     hits = fc.job_hits(job)
     fc._validate_edits(edits, {h.hit_id: h for h in hits})
+    _validate_redactions(redactions, 1)
+    kept = {e.get("hit_id") for e in (edits or []) if e.get("action") == "keep"}
     src = os.path.join(os.path.dirname(staged), "src.bin")
     with open(src, "rb") as f:
         raw = f.read()
@@ -782,7 +807,17 @@ def apply_image(job, staged, out, edits, redactions, options):
         img = base
     else:
         img = img.convert("RGB")
-    _paint(img, _page_redactions(redactions, 1))
+    page0 = (manifest.get("pages") or [{}])[0]
+    boxes = []
+    for b in page0.get("boxes") or []:
+        if b.get("kind") == "full":
+            boxes.append({"kind": "full"})
+        elif b.get("kind") == "rect":
+            if b.get("hit_id") and b["hit_id"] in kept:
+                continue
+            boxes.append({"kind": "rect", "rect": b["rect"]})
+    boxes.extend(_page_redactions(redactions, 1))
+    _paint(img, boxes)
     ext = os.path.splitext(job.filename)[1].lstrip(".").lower()
     fmt = {"jpg": "JPEG", "jpeg": "JPEG", "png": "PNG", "webp": "WEBP",
            "bmp": "BMP", "tif": "TIFF", "tiff": "TIFF"}.get(ext, "PNG")
@@ -803,9 +838,10 @@ def apply_image(job, staged, out, edits, redactions, options):
         raise fw.FileWorkbenchError(E_META, 422)
     with open(out, "wb") as f:
         f.write(buf.getvalue())
-    warnings = []
+    warnings = list(manifest.get("warnings") or [])
     coverage = {"rendered_pages": 1, "rasterized_pages": 1,
-                "text_layer_hits": 0, "hidden_hits": 0, "skipped_ocr_pages": 0,
+                "text_layer_hits": 0, "hidden_hits": 0,
+                "skipped_ocr_pages": int(manifest.get("skipped_ocr_pages") or 0),
                 "attachments_stripped": 0, "warnings": warnings}
     return coverage
 

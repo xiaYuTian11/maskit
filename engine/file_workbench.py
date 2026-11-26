@@ -392,11 +392,17 @@ class JobManager:
             with self._lock:
                 job = self._require(job_id)
                 job.coverage = coverage or job.coverage
+                if isinstance(coverage, dict) and coverage.get("warnings"):
+                    merged = list(job.warnings or [])
+                    for w in coverage["warnings"]:
+                        if w not in merged:
+                            merged.append(w)
+                    job.warnings = merged
                 job.status = ST_DONE
                 job.expires_at = time.time() + 30 * 60   # 完成档 30 分钟
+            self._record_history(job_id)
         except Exception as e:
             self._fail(job_id, getattr(e, "code", E_FAILCLOSED))
-        self._record_history(job_id)
 
     # ---- 取消（G741）----
     def cancel(self, job_id):

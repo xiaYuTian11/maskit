@@ -209,6 +209,40 @@ class KernelTests(unittest.TestCase):
         for p in mgr.job_dir(job.id).rglob("*"):
             self.assertNotIn("registry", p.name.lower())
 
+    def test_run_apply_merges_warnings_and_records_history_once_on_failure(self):
+        """apply 产生的告警必须同步回 job.warnings；apply 失败时历史只能写 1 条。"""
+        hist = fjs.HistoryStore(self.tmp)
+        mgr = fw.JobManager(self.tmp, history=hist, executor=_sync_executor)
+
+        def warn_apply(job, staged, out, edits, redactions, options):
+            Path(out).write_bytes(b"masked")
+            return {"scanned": 1, "warnings": ["attachments_kept_unscanned", "page_kept_with_unmasked_hits"]}
+
+        mgr.register_carrier("text", _stub_scan, warn_apply)
+        job = _ready_job(mgr)
+        mgr.request_scan(job.id)
+        mgr.request_apply(job.id)
+        self.assertEqual(mgr.get_job(job.id).status, fw.ST_DONE)
+        self.assertEqual(
+            mgr.get_job(job.id).warnings,
+            ["attachments_kept_unscanned", "page_kept_with_unmasked_hits"],
+        )
+
+        # 失败分支只能记 1 次历史
+        def fail_apply(job, staged, out, edits, redactions, options):
+            raise fw.FileWorkbenchError(fw.E_FAILCLOSED, 500)
+
+        mgr.register_carrier("text", _stub_scan, fail_apply)
+        j2 = _ready_job(mgr, filename="fail.txt")
+        mgr.request_scan(j2.id)
+        before_count = len(hist.entries())
+        mgr.request_apply(j2.id)
+        self.assertEqual(mgr.get_job(j2.id).status, fw.ST_FAILED)
+        entries = hist.entries()
+        self.assertEqual(len(entries), before_count + 1)
+        self.assertEqual(entries[-1]["id"], j2.id)
+        self.assertEqual(entries[-1]["status"], fw.ST_FAILED)
+
 
 class IsolationTests(unittest.TestCase):
     def test_g745_zero_pollution(self):
@@ -369,6 +403,27 @@ class PanelTests(unittest.TestCase):
             self.assertEqual(r2.get_json()["error"], fw.E_PATH_MODE)
         finally:
             p.REMOTE_MODE = old
+
+    def test_file_nonce_take_rejects_non_ascii_signature_without_500(self):
+        """非 ASCII 签名必须返回 FILE_7407 / 403，不得因 compare_digest 抛 TypeError 导致 500。"""
+        p = self.panel
+        nonce, exp, _sig = p._file_nonce_make("fj_nonce_nonascii")
+        with self.assertRaises(fw.FileWorkbenchError) as ctx:
+            p._file_nonce_take("fj_nonce_nonascii", nonce, exp, "中文签名")
+        self.assertEqual(ctx.exception.code, fw.E_NONCE)
+        self.assertEqual(ctx.exception.http, 403)
+
+    def test_empty_multipart_upload_leaves_no_orphan_dir(self):
+        """空 multipart 上传返回 no_file 且不能在 DATA_ROOT/file-jobs 下残留空目录。"""
+        p = self.panel
+        jobs_dir = p._file_manager().jobs_dir
+        before = set(jobs_dir.iterdir()) if jobs_dir.exists() else set()
+        r = self.client.post("/api/files/jobs", headers=self.auth, data={},
+                             content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.get_json()["error"], "no_file")
+        after = set(jobs_dir.iterdir()) if jobs_dir.exists() else set()
+        self.assertEqual(after - before, set(), "异常上传不能留下未注册任务目录")
 
 
 if __name__ == "__main__":

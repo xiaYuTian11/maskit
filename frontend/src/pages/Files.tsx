@@ -102,6 +102,7 @@ function describeWarnings(warnings: string[], tf: TranslateF): string[] {
     if (code === 'embedded_objects_kept_unscanned') return tf('files.warn.embeddedKept')
     if (code === 'attachments_kept_unscanned') return tf('files.warn.attachmentsKept')
     if (code === 'image_ocr_failed_full_cover') return tf('files.warn.imageOcrFailed')
+    if (code === 'page_kept_with_unmasked_hits') return tf('files.warn.pagesKeptUnmasked')
     const m = PAGE_WARN_RX.exec(code)
     if (m) {
       const page = Number(m[1])

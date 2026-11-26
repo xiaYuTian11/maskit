@@ -425,6 +425,77 @@ class VisualTests(unittest.TestCase):
         mgr.delete(job3.id)
         self.assertFalse(mgr.job_dir(job3.id).exists())
 
+    def test_multipage_pdf_repeated_sensitive_value_masked_on_all_pages(self):
+        """多页 PDF 在第 2 页起重复出现同一敏感值时也必须建框、归属位置并栅格化。"""
+        mgr = make_mgr(self.tmp)
+        job = ready(mgr, "多页重复.pdf", "pdf", lambda s: make_pdf(s, pages=2, text="Phone " + PHONE))
+        scan(mgr, job, mode="manual")
+        hs = [x for x in hits(mgr, job) if x.get("original") == PHONE]
+        self.assertTrue(hs)
+        locs = set(hs[0].get("locations") or [])
+        self.assertIn("第1页文本层", locs)
+        self.assertIn("第2页文本层", locs)
+        apply(mgr, job)
+        self.assertEqual(job.status, fw.ST_DONE)
+        self.assertEqual(job.coverage.get("rasterized_pages"), 2)
+        from pypdf import PdfReader
+        r = PdfReader(io.BytesIO(out_bytes(mgr, job)))
+        self.assertEqual((r.pages[0].extract_text() or "").strip(), "")
+        self.assertEqual((r.pages[1].extract_text() or "").strip(), "")
+
+    def test_image_auto_scan_boxes_applied_and_warnings_preserved(self):
+        """图片自动扫描产出的检测框与 OCR 失败兜底全图遮盖必须在 apply_image 中实际涂黑并保留告警。"""
+        from PIL import Image
+        mgr = make_mgr(self.tmp)
+        job = ready(mgr, "自动框.png", "image", lambda s: make_png(s, size=(200, 100)))
+        old_ready, old_detect = fv._ocr_ready, fv._detect_boxes
+        try:
+            fv._ocr_ready = lambda: (True, "")
+            fv._detect_boxes = lambda image_bytes, img, sid, deadline=None: [
+                {"rect": [0.0, 0.0, 1.0, 1.0], "label": "PHONE", "text": "tel " + PHONE}
+            ]
+            scan(mgr, job, mode="auto")
+        finally:
+            fv._ocr_ready, fv._detect_boxes = old_ready, old_detect
+        apply(mgr, job, redactions=[])
+        self.assertEqual(job.status, fw.ST_DONE)
+        with Image.open(io.BytesIO(out_bytes(mgr, job))) as im:
+            self.assertEqual(im.getpixel((190, 90)), fv._FILL)
+
+        job2 = ready(mgr, "失败兜底.png", "image", lambda s: make_png(s, size=(200, 100)))
+        try:
+            fv._ocr_ready = lambda: (True, "")
+
+            def boom(*a, **k):
+                raise fv.PageOcrFailed("ocr fail")
+
+            fv._detect_boxes = boom
+            scan(mgr, job2, mode="auto")
+        finally:
+            fv._ocr_ready, fv._detect_boxes = old_ready, old_detect
+        apply(mgr, job2, redactions=[])
+        self.assertEqual(job2.status, fw.ST_DONE)
+        self.assertIn("image_ocr_failed_full_cover", job2.warnings)
+        self.assertIn("image_ocr_failed_full_cover", job2.coverage.get("warnings") or [])
+        with Image.open(io.BytesIO(out_bytes(mgr, job2))) as im:
+            self.assertEqual(im.getpixel((190, 90)), fv._FILL)
+
+    def test_apply_rejects_invalid_redactions(self):
+        """apply_pdf 与 apply_image 必须拒绝越界页码与超限遮盖区域（FILE_7803）。"""
+        mgr = make_mgr(self.tmp)
+        pdf_job = ready(mgr, "校验.pdf", "pdf", lambda s: make_pdf(s, pages=1))
+        scan(mgr, pdf_job, mode="manual")
+        apply(mgr, pdf_job, redactions=[{"id": "r1", "page": 99, "kind": "rect", "rect": [0.1, 0.1, 0.2, 0.2]}])
+        self.assertEqual(pdf_job.status, fw.ST_FAILED)
+        self.assertEqual(pdf_job.error, fv.E_COORD)
+
+        img_job = ready(mgr, "校验.png", "image", lambda s: make_png(s, size=(200, 100)))
+        scan(mgr, img_job, mode="manual")
+        too_many = [{"id": f"r{i}", "page": 1, "kind": "rect", "rect": [0.1, 0.1, 0.1, 0.1]} for i in range(501)]
+        apply(mgr, img_job, redactions=too_many)
+        self.assertEqual(img_job.status, fw.ST_FAILED)
+        self.assertEqual(img_job.error, fv.E_COORD)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,8 @@ class FileWorkbenchUiTests(unittest.TestCase):
         self.assertIn("describeWarnings", self.page)
         self.assertIn("files.cov.masked", self.page)
         self.assertIn("files.warn.pageFullCover", self.page)
+        self.assertIn("page_kept_with_unmasked_hits", self.page)
+        self.assertIn("files.warn.pagesKeptUnmasked", self.page)
 
     def test_g804_hit_list_privacy(self):
         """G804 命中清单：凭据项只读 preview+digest，非凭据可改可留。"""
@@ -160,6 +162,7 @@ class FileWorkbenchUiTests(unittest.TestCase):
                     "files.warn.embeddedKept", "files.warn.attachmentsKept",
                     "files.warn.imageOcrFailed", "files.warn.pageFullCover",
                     "files.warn.pageOcrFailed", "files.warn.pageKeptUnmasked",
+                    "files.warn.pagesKeptUnmasked",
                     "files.warn.unknown"):
             self.assertIn("'%s':" % key, zh_block, "缺少中文词条 %s" % key)
             self.assertIn("'%s':" % key, en_block, "缺少英文词条 %s" % key)
