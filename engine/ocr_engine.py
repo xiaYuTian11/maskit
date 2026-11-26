@@ -202,14 +202,15 @@ def reset_for_tests():
 
 # ---- 图像处理 ----
 
-def _decode(image_bytes):
+def _decode(image_bytes, *, max_pixels=None):
     from PIL import Image, ImageOps
+    limit_px = MAX_PIXELS if max_pixels is None else int(max_pixels)
     try:
         img = Image.open(io.BytesIO(image_bytes))
         # 像素上限必须在 load() 之前判：open() 只读文件头就有尺寸，load() 才真正解码。
         # 先 load 再判，一张 8MB 的 PNG 解压炸弹（如 30000x30000 纯色）会先吃掉 2.7GB 内存。
         w, h = img.size
-        if w * h > MAX_PIXELS:
+        if w * h > limit_px:
             raise OcrError(REASON_TOO_LARGE, f"{w}x{h}")
         img.load()
         # 按 EXIF 摆正：手机照片普遍带 Orientation 标签，PIL 默认**不**应用它。
@@ -321,13 +322,14 @@ def _run_engine(engine, image_bytes, deadline):
     return out
 
 
-def _tile_ranges(height):
+def _tile_ranges(height, *, max_tiles=None):
     """长图切片的 y 区间（带重叠）。短图返回单区间。"""
     if height <= TILE_HEIGHT:
         return [(0, height)]
+    limit_tiles = MAX_TILES if max_tiles is None else max(1, int(max_tiles))
     step = TILE_HEIGHT - TILE_OVERLAP
     out, y = [], 0
-    while y < height and len(out) < MAX_TILES:
+    while y < height and len(out) < limit_tiles:
         out.append((y, min(height, y + TILE_HEIGHT)))
         if y + TILE_HEIGHT >= height:
             break
@@ -356,32 +358,36 @@ def _dedupe(boxes):
     return kept
 
 
-def detect(image_bytes, *, deadline=None, allow_rotation=True):
+def detect(image_bytes, *, deadline=None, allow_rotation=True,
+           max_pixels=None, max_bytes=None, max_tiles=None):
     """核心入口：`DetectResult`。
 
     - `deadline`：`time.monotonic()` 的绝对时刻；超了立刻 `ocr_timeout`；
     - `allow_rotation`：是否允许方向兜底（PDF 页等已知正立的图可关掉省时间）。
+    - `max_pixels`/`max_bytes`/`max_tiles`：可选离线宽口径覆盖，缺省沿用实时阈值。
     """
     if not image_bytes:
         raise OcrError(REASON_DECODE, "empty")
-    if len(image_bytes) > MAX_IMAGE_BYTES:
+    limit_bytes = MAX_IMAGE_BYTES if max_bytes is None else int(max_bytes)
+    limit_px = MAX_PIXELS if max_pixels is None else int(max_pixels)
+    if len(image_bytes) > limit_bytes:
         raise OcrError(REASON_TOO_LARGE, str(len(image_bytes)))
     engine, why = _load_backend()
     if engine is None:
         raise OcrError(why or REASON_RUNTIME_MISSING, _LOAD_ERROR)
 
     t0 = time.perf_counter()
-    img = _decode(image_bytes)
+    img = _decode(image_bytes, max_pixels=limit_px)
     width, height = img.size
     if width <= 0 or height <= 0:
         raise OcrError(REASON_DECODE, "zero-size")
-    if width * height > MAX_PIXELS:
+    if width * height > limit_px:
         raise OcrError(REASON_TOO_LARGE, "%dx%d" % (width, height))
     # （_decode 里 load 前已判过一次；这里保留是纵深防御——防未来有人改 _decode 的调用方绕过解码入口）
 
     # 长图优先切片（见 TILE_HEIGHT 注释）；切片时不再整体降采样，
     # 否则等于把"切了但看不清"的问题原样搬回来。
-    ranges = _tile_ranges(height) if (height > TILE_HEIGHT and height >= width) else [(0, height)]
+    ranges = _tile_ranges(height, max_tiles=max_tiles) if (height > TILE_HEIGHT and height >= width) else [(0, height)]
 
     downscaled = False
     scale = 1.0

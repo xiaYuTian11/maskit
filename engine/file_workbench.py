@@ -257,6 +257,16 @@ class JobManager:
         with self._lock:
             return [j.snapshot() for j in self._jobs.values()]
 
+    def set_progress(self, job_id, stage, current, total):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and job.status == ST_SCANNING:
+                job.progress = {
+                    "stage": str(stage),
+                    "current": int(current),
+                    "total": max(1, int(total)),
+                }
+
     def hits(self, job_id):
         with self._lock:
             self._require(job_id)
@@ -319,10 +329,20 @@ class JobManager:
             staged = self.job_dir(job_id) / "staged.bin"
             cancel = self._cancel_flags.get(job_id)
             # G745/G746：扫描在隔离作用域内，全局表零污染；后缀登记进活跃注册表。
-            with tr.file_store_scope(job_id):
+            # 启用文件任务耐心模式（patient=True）：宁愿慢些等完，也绝不因实时 2s 速率桶截断而漏脱；
+            # 若仍发生任何 NER 降级/跳过，必显式记入 warnings 与 coverage。
+            ner_skips = {}
+            with tr.file_store_scope(job_id), tr._ner_doc_budget(
+                3600.0, cancel_event=cancel, patient=True
+            ):
                 outcome = carrier["scan"](job, str(src), str(staged),
                                           {"scan_embedded": scan_embedded, "mode": job.mode},
                                           cancel)
+                try:
+                    import ner_engine
+                    ner_skips = ner_engine.request_skips(reset=True) or {}
+                except Exception:
+                    ner_skips = {}
             with self._lock:
                 job = self._require(job_id)
                 if cancel is not None and cancel.is_set():
@@ -333,8 +353,16 @@ class JobManager:
                     reg[h.original if not h.credential else h.token] = h
                 self._registries[job_id] = reg
                 job.hit_count = len(reg)
-                job.coverage = outcome.get("coverage") or {}
-                job.warnings = outcome.get("warnings") or []
+                cov = dict(outcome.get("coverage") or {})
+                warns = list(outcome.get("warnings") or [])
+                real_skips = {k: int(v) for k, v in ner_skips.items() if k != "cancelled" and int(v or 0) > 0}
+                if real_skips:
+                    cov["ner_skipped_chunks"] = sum(real_skips.values())
+                    if "ner_degraded" not in warns:
+                        warns.append("ner_degraded")
+                job.coverage = cov
+                job.warnings = warns
+                job.progress = {}
                 job.status = ST_REVIEW
                 ttl_min = int(self.cfg.get("files_review_ttl_min", self.review_ttl_min) or self.review_ttl_min)
                 job.expires_at = time.time() + ttl_min * 60

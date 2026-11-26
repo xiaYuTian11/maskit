@@ -1,5 +1,5 @@
 /** 文件脱敏工作台 API（T4）：所有请求经 shieldFetch，不直连 fetch。 */
-import { shieldFetch } from '@/lib/shield-fetch'
+import { isTauri, shieldFetch } from '@/lib/shield-fetch'
 
 export interface FilesCapabilities {
   ok: boolean
@@ -69,6 +69,7 @@ export interface PreviewBox {
   source: string
   label?: string
   hit_id?: string
+  can_dismiss?: boolean
 }
 
 export interface ApplyOptions {
@@ -76,6 +77,23 @@ export interface ApplyOptions {
   keep_embedded_objects?: boolean
   keep_attachments?: boolean
   keep_icc?: boolean
+  strip_non_image_media?: boolean
+  dismissed_boxes?: string[]
+}
+
+export interface FileHistoryEntry {
+  id: string
+  ts: number
+  name_preview: string
+  ext: string
+  size: number
+  carrier: string
+  mode: string
+  status: string
+  hit_count: number
+  page_count?: number | null
+  cost_ms: number
+  error?: string
 }
 
 type Json<T> = T & { ok: boolean }
@@ -95,7 +113,19 @@ export function getJob(id: string) {
 export function createJob(file: File) {
   const form = new FormData()
   form.append('file', file, file.name)
-  return shieldFetch<Json<{ job: FileJobView }>>('/api/files/jobs', { method: 'POST', body: form })
+  return shieldFetch<Json<{ job: FileJobView }>>('/api/files/jobs', {
+    method: 'POST',
+    body: form,
+    timeoutMs: 0,
+  })
+}
+
+export function createJobFromPath(path: string) {
+  return shieldFetch<Json<{ job: FileJobView }>>('/api/files/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+    timeoutMs: 0,
+  })
 }
 
 export function scanJob(id: string, mode: 'manual' | 'auto') {
@@ -106,11 +136,50 @@ export function scanJob(id: string, mode: 'manual' | 'auto') {
 }
 
 export function getHits(id: string) {
-  return shieldFetch<Json<{ hits: FileHitView[] }>>(`/api/files/jobs/${id}/hits`)
+  return shieldFetch<Json<{ hits: FileHitView[] }>>(`/api/files/jobs/${id}/hits`, {
+    timeoutMs: 120000,
+  })
 }
 
 export function getPreview(id: string, page: number) {
-  return shieldFetch<Json<{ data: string; boxes?: PreviewBox[] }>>(`/api/files/jobs/${id}/preview?page=${page}`)
+  return shieldFetch<Json<{ data: string; boxes?: PreviewBox[] }>>(
+    `/api/files/jobs/${id}/preview?page=${page}`,
+    { timeoutMs: 120000 },
+  )
+}
+
+export function saveJob(id: string, destDir: string, overwrite = false) {
+  return shieldFetch<Json<{ path: string }>>(`/api/files/jobs/${id}/save`, {
+    method: 'POST',
+    body: JSON.stringify({ dest_dir: destDir, overwrite }),
+    timeoutMs: 120000,
+  })
+}
+
+export function listHistory() {
+  return shieldFetch<Json<{ history: FileHistoryEntry[] }>>('/api/files/history')
+}
+
+export function isDesktopApp(): boolean {
+  return isTauri()
+}
+
+export async function pickDesktopDirectory(): Promise<string | null> {
+  if (!isTauri()) return null
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({ directory: true, multiple: false })
+  return typeof picked === 'string' && picked ? picked : null
+}
+
+export async function pickDesktopFile(extensions: string[]): Promise<string | null> {
+  if (!isTauri()) return null
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({
+    directory: false,
+    multiple: false,
+    filters: extensions.length ? [{ name: 'Files', extensions }] : undefined,
+  })
+  return typeof picked === 'string' && picked ? picked : null
 }
 
 export function applyJob(

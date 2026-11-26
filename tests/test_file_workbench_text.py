@@ -479,6 +479,40 @@ finally:
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
 
+    def test_text_encoding_auto_detection_chunk_progress_and_roundtrip(self):
+        """GB18030 与 UTF-8-SIG 文本必须无乱码识别并按原编码回写，分块扫描需写入进度。"""
+        mgr = make_mgr(self.tmp)
+        for enc, name in (("gb18030", "老数据.csv"), ("utf-8-sig", "表格.csv")):
+            src_text = "姓名,手机号,备注\n张三,%s,测试中文\n" % PHONE
+            raw = src_text.encode(enc)
+            job = mgr.create_job(name, len(raw), "text")
+            (mgr.job_dir(job.id) / "src.bin").write_bytes(raw)
+            mgr.probe_result(job.id, True)
+            j = scan(mgr, job)
+            self.assertEqual(j.status, fw.ST_REVIEW)
+            self.assertEqual(j.coverage.get("encoding"), enc)
+            hs = mgr.hits(job.id)
+            h_phone = [h for h in hs if h.get("original") == PHONE][0]
+            apply(mgr, job, edits=[{"hit_id": h_phone["hit_id"], "action": "replace", "text": "脱敏号"}])
+            out = out_bytes(mgr, job)
+            decoded_out = out.decode(enc)
+            self.assertIn("测试中文", decoded_out)
+            self.assertIn("脱敏号", decoded_out)
+            self.assertNotIn(PHONE, decoded_out)
+
+    def test_ooxml_non_image_media_warning_and_optional_strip(self):
+        """OOXML 含音视频等非图片媒体时必须告警，开启选项时剥离并计数。"""
+        import io
+        mgr = make_mgr(self.tmp)
+        job = ready_docx(mgr, extra={"word/media/video1.mp4": b"MP4DATA"})
+        scan(mgr, job)
+        self.assertEqual(job.coverage.get("non_image_media_present"), 1)
+        self.assertIn("non_image_media_unscanned", job.warnings)
+        apply(mgr, job, options={"strip_non_image_media": True})
+        self.assertEqual(job.coverage.get("non_image_media_stripped"), 1)
+        with zipfile.ZipFile(io.BytesIO(out_bytes(mgr, job))) as zout:
+            self.assertNotIn("word/media/video1.mp4", zout.namelist())
+
 
 if __name__ == "__main__":
     unittest.main()

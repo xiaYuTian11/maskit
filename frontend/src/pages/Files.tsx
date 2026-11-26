@@ -16,6 +16,9 @@ import {
   RefreshCw,
   FileLock2,
   Download,
+  FolderOpen,
+  History,
+  RotateCcw,
   Trash2,
   Ban,
   ShieldCheck,
@@ -37,21 +40,27 @@ import {
 } from '@/components/ui/select'
 import { useI18n } from '@/lib/i18n'
 import {
-  applyJob, cancelJob, createJob, deleteJob, downloadJob, getCapabilities, getHits,
-  getJob, getPreview, listJobs, scanJob,
-  type ApplyOptions, type FileHitView, type FileJobView, type FilesCapabilities,
-  type PreviewBox, type Redaction, type TextEdit,
+  applyJob, cancelJob, createJob, createJobFromPath, deleteJob, downloadJob,
+  getCapabilities, getHits, getJob, getPreview, isDesktopApp, listHistory,
+  listJobs, pickDesktopDirectory, pickDesktopFile, saveJob, scanJob,
+  type ApplyOptions, type FileHistoryEntry, type FileHitView, type FileJobView,
+  type FilesCapabilities, type PreviewBox, type Redaction, type TextEdit,
 } from '@/api/files'
 
 const NON_TERMINAL = new Set(['created', 'probing', 'ready', 'queued', 'scanning', 'applying', 'canceling'])
 const VISUAL = new Set(['pdf', 'image'])
 const TEXT_CARRIERS = new Set(['ooxml', 'text'])
+const PROGRESS_STAGES = new Set([
+  'pdf_pages', 'pdf_hidden', 'ooxml_parts', 'ooxml_media', 'text_chunks', 'image_ocr',
+])
 
 const defaultOptions = (): ApplyOptions => ({
   clear_docinfo: true,
   keep_attachments: false,
   keep_embedded_objects: false,
   keep_icc: false,
+  strip_non_image_media: false,
+  dismissed_boxes: [],
 })
 
 function statusTone(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
@@ -67,7 +76,9 @@ const ERROR_KEYS: Record<string, string> = {
   FILE_7401: 'files.err.state',
   FILE_7402: 'files.err.queueFull',
   FILE_7403: 'files.err.tooLarge',
+  FILE_7408: 'files.err.saveDest',
   FILE_7410: 'files.err.failClosed',
+  FILE_7411: 'files.err.pathModeDisabled',
   FILE_7601: 'files.err.officeUnsupported',
   FILE_7602: 'files.err.zipBomb',
   FILE_7610: 'files.err.tooManyHits',
@@ -130,6 +141,9 @@ function describeCoverage(
   add('embedded_objects_present', 'files.cov.embeddedPresent')
   add('embedded_objects_stripped', 'files.cov.embeddedStripped')
   add('embedded_objects_kept_unscanned', 'files.cov.embeddedKept')
+  add('non_image_media_present', 'files.cov.nonImageMediaPresent')
+  add('non_image_media_stripped', 'files.cov.nonImageMediaStripped')
+  add('ner_skipped_chunks', 'files.cov.nerSkippedChunks')
   add('attachments_stripped', 'files.cov.attachmentsStripped')
   add('attachments_kept_unscanned', 'files.cov.attachmentsKept')
   return lines
@@ -143,6 +157,10 @@ function describeWarnings(warnings: string[], tf: TranslateF): string[] {
   return (warnings || []).map((code) => {
     if (code === 'embedded_objects_kept_unscanned') return tf('files.warn.embeddedKept')
     if (code === 'attachments_kept_unscanned') return tf('files.warn.attachmentsKept')
+    if (code === 'non_image_media_unscanned') return tf('files.warn.nonImageMediaUnscanned')
+    if (code === 'ner_degraded') return tf('files.warn.nerDegraded')
+    if (code === 'text_encoding_fallback') return tf('files.warn.textEncodingFallback')
+    if (code === 'text_encoding_utf8_fallback') return tf('files.warn.textEncodingUtf8Fallback')
     if (code === 'embedded_images_ocr_unavailable') return tf('files.warn.embeddedOcrUnavailable')
     if (code === 'embedded_images_covered') return tf('files.warn.embeddedCovered')
     if (code === 'image_ocr_failed_full_cover') return tf('files.warn.imageOcrFailed')
@@ -174,6 +192,7 @@ export default function FilesPage() {
   const [page, setPage] = useState(1)
   const [preview, setPreview] = useState('')
   const [autoBoxes, setAutoBoxes] = useState<PreviewBox[]>([])
+  const [dismissedBoxes, setDismissedBoxes] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState('')
   const [previewBusy, setPreviewBusy] = useState(false)
   const [previewTick, setPreviewTick] = useState(0)
@@ -182,9 +201,12 @@ export default function FilesPage() {
   const modeTouchedRef = useRef(false)
   const [options, setOptions] = useState<ApplyOptions>(defaultOptions)
   const [notice, setNotice] = useState('')
+  const [savedPath, setSavedPath] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [uploading, setUploading] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [history, setHistory] = useState<FileHistoryEntry[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
   const dragRef = useRef<{ x: number; y: number } | null>(null)
   const brushRef = useRef<[number, number][]>([])
   const [draft, setDraft] = useState<Redaction | null>(null)
@@ -211,11 +233,18 @@ export default function FilesPage() {
 
   useEffect(() => { loadCaps() }, [loadCaps])
 
+  const refreshHistory = useCallback(() => {
+    listHistory()
+      .then((res) => setHistory(res.history || []))
+      .catch(() => { /* 历史读取失败不阻断当前队列视图 */ })
+  }, [])
+
   const refreshJobs = useCallback(() => {
     listJobs()
       .then((res) => setJobs(res.jobs || []))
       .catch(() => { /* 列表失败保留旧值，错误由 selected 区呈现 */ })
-  }, [])
+    refreshHistory()
+  }, [refreshHistory])
 
   useEffect(() => {
     if (!caps?.enabled) return
@@ -235,11 +264,12 @@ export default function FilesPage() {
         .then((res) => {
           setSelected(res.job)
           setJobs((prev) => prev.map((j) => (j.id === res.job.id ? res.job : j)))
+          if (!NON_TERMINAL.has(res.job.status)) refreshHistory()
         })
         .catch(() => { /* 轮询失败不打断页面 */ })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [jobId, jobStatus])
+  }, [jobId, jobStatus, refreshHistory])
 
   // 命中清单（G804）
   // @guard G804 凭据只读，非凭据才渲染输入与保留开关
@@ -285,11 +315,31 @@ export default function FilesPage() {
     setSelected(job)
     setPage(1)
     setRedactions([])
+    setDismissedBoxes({})
     setOptions(defaultOptions())
     setNotice('')
+    setSavedPath('')
     setHits([])
     setPreview('')
     setAutoBoxes([])
+  }
+
+  const pickLocalFile = async () => {
+    if (!caps || uploading) return
+    setUploadError('')
+    try {
+      const path = await pickDesktopFile(caps.extensions || [])
+      if (!path) return
+      setUploading(true)
+      const res = await createJobFromPath(path)
+      setJobs((prev) => [res.job, ...prev])
+      select(res.job)
+      refreshJobs()
+    } catch (e: unknown) {
+      setUploadError(describeRequestError(e, tf))
+    } finally {
+      setUploading(false)
+    }
   }
 
   const upload = async (file: File) => {
@@ -418,6 +468,20 @@ export default function FilesPage() {
     }
   }
 
+  const doSaveAs = async () => {
+    if (!selected || selected.status !== 'done') return
+    setNotice('')
+    setSavedPath('')
+    try {
+      const dir = await pickDesktopDirectory()
+      if (!dir) return
+      const res = await saveJob(selected.id, dir, false)
+      setSavedPath(res.path || dir)
+    } catch (e: unknown) {
+      setNotice(describeRequestError(e, tf))
+    }
+  }
+
   // 画布（G806）：坐标 0~1
   const pointOf = (e: MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
@@ -473,17 +537,47 @@ export default function FilesPage() {
     }
   }
 
-  const onUp = () => {
-    if (!draft) {
-      dragRef.current = null
-      brushRef.current = []
-      return
-    }
-    if (draft.kind === 'rect' && (draft.rect?.[2] || 0) > 0.002 && (draft.rect?.[3] || 0) > 0.002) {
+  const toggleDismissAutoBox = (boxId: string) => {
+    setDismissedBoxes((prev) => {
+      const next = { ...prev, [boxId]: !prev[boxId] }
+      const list = Object.keys(next).filter((k) => next[k])
+      setOptions((o) => ({ ...o, dismissed_boxes: list }))
+      return next
+    })
+  }
+
+  const restorePageAutoBoxes = () => {
+    setDismissedBoxes((prev) => {
+      const next = { ...prev }
+      for (const b of visibleAutoBoxes) {
+        delete next[b.id]
+      }
+      const list = Object.keys(next).filter((k) => next[k])
+      setOptions((o) => ({ ...o, dismissed_boxes: list }))
+      return next
+    })
+  }
+
+  const pageDismissedCount = visibleAutoBoxes.filter((b) => dismissedBoxes[b.id]).length
+
+  const onUp = (allowClick = true) => {
+    const startPt = dragRef.current
+    const hadRectDraft = draft?.kind === 'rect' && (draft.rect?.[2] || 0) > 0.002 && (draft.rect?.[3] || 0) > 0.002
+    const hadPathDraft = draft?.kind === 'path' && (draft.points?.length || 0) >= 2
+    if (hadRectDraft && draft) {
       setRedactions((prev) => [...prev, { ...draft, id: 'r' + (prev.length + 1) }])
-    }
-    if (draft.kind === 'path' && (draft.points?.length || 0) >= 2) {
+    } else if (hadPathDraft && draft) {
       setRedactions((prev) => [...prev, { ...draft, id: 'r' + (prev.length + 1) }])
+    } else if (allowClick && startPt) {
+      const matched = visibleAutoBoxes.filter((b) => {
+        if (b.kind !== 'rect' || b.can_dismiss === false || !b.rect) return false
+        const [bx, by, bw, bh] = b.rect
+        return startPt.x >= bx && startPt.x <= bx + bw && startPt.y >= by && startPt.y <= by + bh
+      })
+      if (matched.length > 0) {
+        const target = matched[matched.length - 1]
+        toggleDismissAutoBox(target.id)
+      }
     }
     setDraft(null)
     dragRef.current = null
@@ -492,12 +586,16 @@ export default function FilesPage() {
 
   const clearAreas = () => setRedactions((prev) => prev.filter((r) => r.page !== page))
 
+  const desktopMode = isDesktopApp()
   const canScan = selected?.status === 'ready'
   const canApply = selected?.status === 'awaiting_review'
   const showApplyOptions = canApply && (
     selected?.carrier === 'pdf'
     || selected?.carrier === 'image'
-    || (selected?.carrier === 'ooxml' && Number(selected.coverage?.embedded_objects_present || 0) > 0)
+    || (selected?.carrier === 'ooxml' && (
+      Number(selected.coverage?.embedded_objects_present || 0) > 0
+      || Number(selected.coverage?.non_image_media_present || 0) > 0
+    ))
   )
   const canDownload = selected?.status === 'done'
   const canCancel = selected ? ['queued', 'scanning', 'applying'].includes(selected.status) : false
@@ -505,6 +603,12 @@ export default function FilesPage() {
   const warningLines = selected ? describeWarnings(selected.warnings || [], tf) : []
   const embeddedHandled = Number(selected?.coverage?.masked_embedded_images || 0) > 0
     || Number(selected?.coverage?.covered_embedded_images || 0) > 0
+  const progressStage = typeof selected?.progress?.stage === 'string' ? selected.progress.stage : ''
+  const progressCur = Number(selected?.progress?.current || 0)
+  const progressTotal = Number(selected?.progress?.total || 0)
+  const progressPct = progressTotal > 0
+    ? Math.max(0, Math.min(100, Math.round((progressCur / progressTotal) * 100)))
+    : 0
 
   if (loading) {
     // @guard G809 加载态有骨架/文案，不渲染空白表格
@@ -563,6 +667,20 @@ export default function FilesPage() {
             <div className="text-[12px] text-muted-foreground">
               {tf('files.dropHint', { mb: caps.max_size_mb, exts: accept || '—' })}
             </div>
+            {caps.path_source && desktopMode ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={uploading}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void pickLocalFile()
+                }}
+              >
+                <FolderOpen className="mr-1.5 h-4 w-4" /> {t('files.pickLocalFile')}
+              </Button>
+            ) : null}
             {uploading ? <div className="text-[12px]">{t('files.uploading')}</div> : null}
             {uploadError ? <div className="text-[12px] text-destructive">{uploadError}</div> : null}
             <input
@@ -630,6 +748,27 @@ export default function FilesPage() {
                       <p className="text-[12px] text-destructive">{describeError(selected.error, tf)}</p>
                     ) : null}
                     {notice ? <p className="text-[12px] text-destructive">{notice}</p> : null}
+                    {savedPath ? (
+                      <p className="text-[12px] text-emerald-600 dark:text-emerald-400">
+                        {tf('files.savedTo', { path: savedPath })}
+                      </p>
+                    ) : null}
+                    {selected.status === 'queued' && selected.position ? (
+                      <p className="text-[12px] text-muted-foreground">
+                        {tf('files.queuePos', { pos: selected.position })}
+                      </p>
+                    ) : null}
+                    {selected.status === 'scanning' && progressTotal > 0 && PROGRESS_STAGES.has(progressStage) ? (
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between text-[12px] text-muted-foreground">
+                          <span>{tf(`files.progress.${progressStage}`, { cur: progressCur, total: progressTotal })}</span>
+                          <span>{progressPct}%</span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                          <div className="h-full bg-primary transition-all" style={{ width: `${progressPct}%` }} />
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap items-center gap-2">
                       {TEXT_CARRIERS.has(selected.carrier) && canScan ? (
                         <Button size="sm" onClick={doScan} disabled={busy}>
@@ -666,6 +805,11 @@ export default function FilesPage() {
                           <Download className="mr-1.5 h-4 w-4" /> {t('files.download')}
                         </Button>
                       ) : null}
+                      {canDownload && caps.path_source && desktopMode ? (
+                        <Button size="sm" variant="outline" onClick={doSaveAs}>
+                          <FolderOpen className="mr-1.5 h-4 w-4" /> {t('files.saveAs')}
+                        </Button>
+                      ) : null}
                       {canCancel ? (
                         <Button size="sm" variant="outline" onClick={doCancel}>
                           <Ban className="mr-1.5 h-4 w-4" /> {t('files.cancel')}
@@ -696,6 +840,13 @@ export default function FilesPage() {
                             <Switch checked={!!options.keep_embedded_objects}
                               onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_embedded_objects: v }))} />
                             {t('files.keepEmbeddedObjects')}
+                          </label>
+                        ) : null}
+                        {selected.carrier === 'ooxml' && Number(selected.coverage?.non_image_media_present || 0) > 0 ? (
+                          <label className="flex items-center gap-2">
+                            <Switch checked={!!options.strip_non_image_media}
+                              onCheckedChange={(v) => setOptions((o) => ({ ...o, strip_non_image_media: v }))} />
+                            {t('files.stripNonImageMedia')}
                           </label>
                         ) : null}
                         {selected.carrier === 'image' ? (
@@ -736,6 +887,11 @@ export default function FilesPage() {
                         <Button variant="ghost" size="sm" onClick={clearAreas}>
                           {t('files.clearRedactions')}
                         </Button>
+                        {pageDismissedCount > 0 ? (
+                          <Button variant="ghost" size="sm" onClick={restorePageAutoBoxes}>
+                            <RotateCcw className="mr-1 h-3.5 w-3.5" /> {t('files.restoreAutoBoxes')}
+                          </Button>
+                        ) : null}
                       </div>
                     </CardHeader>
                     <CardContent className="space-y-2">
@@ -767,13 +923,14 @@ export default function FilesPage() {
                               preserveAspectRatio="none"
                               onMouseDown={onDown}
                               onMouseMove={onMove}
-                              onMouseUp={onUp}
-                              onMouseLeave={onUp}
+                              onMouseUp={() => onUp(true)}
+                              onMouseLeave={() => onUp(false)}
                             >
                               {visibleAutoBoxes.map((b) => {
                                 if (b.kind === 'full') {
                                   return <rect key={b.id} x={0} y={0} width={1} height={1} fill="rgba(245,158,11,0.22)" />
                                 }
+                                const isDismissed = !!dismissedBoxes[b.id]
                                 return (
                                   <rect
                                     key={b.id}
@@ -781,8 +938,9 @@ export default function FilesPage() {
                                     y={b.rect?.[1] || 0}
                                     width={b.rect?.[2] || 0}
                                     height={b.rect?.[3] || 0}
-                                    fill="rgba(239,68,68,0.26)"
-                                    stroke="rgba(220,38,38,0.85)"
+                                    fill={isDismissed ? 'rgba(148,163,184,0.08)' : 'rgba(239,68,68,0.26)'}
+                                    stroke={isDismissed ? 'rgba(148,163,184,0.75)' : 'rgba(220,38,38,0.85)'}
+                                    strokeDasharray={isDismissed ? '0.01 0.008' : undefined}
                                     strokeWidth={0.0025}
                                   />
                                 )
@@ -902,6 +1060,43 @@ export default function FilesPage() {
           </div>
         </div>
       )}
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <History className="h-4 w-4" />
+            <span>{t('files.historyTitle')}</span>
+            <Badge variant="outline">{history.length}</Badge>
+          </CardTitle>
+          <Button variant="ghost" size="sm" onClick={() => setHistoryOpen((v) => !v)}>
+            {historyOpen ? t('files.historyHide') : t('files.historyShow')}
+          </Button>
+        </CardHeader>
+        {historyOpen ? (
+          <CardContent className="space-y-1.5 pt-1">
+            {history.length === 0 ? (
+              <p className="text-[12px] text-muted-foreground">{t('files.historyEmpty')}</p>
+            ) : (
+              history.slice().reverse().slice(0, 30).map((item) => (
+                <div
+                  key={`${item.id}-${item.ts}`}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/50 px-3 py-1.5 text-[12px]"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-medium">{item.name_preview}</span>
+                    <Badge variant={statusTone(item.status)}>{t(`files.status.${item.status}`)}</Badge>
+                    <span className="text-muted-foreground">{tf('files.size', { n: (item.size / 1024).toFixed(0) })}</span>
+                    {item.hit_count ? <span className="text-muted-foreground">{tf('files.hitCount', { n: item.hit_count })}</span> : null}
+                  </div>
+                  <span className="text-[11px] text-muted-foreground">
+                    {new Date(item.ts * 1000).toLocaleString()}
+                  </span>
+                </div>
+              ))
+            )}
+          </CardContent>
+        ) : null}
+      </Card>
     </div>
   )
 }

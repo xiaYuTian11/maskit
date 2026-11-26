@@ -14,6 +14,7 @@ OOXML（docx/xlsx/pptx）与纯文本的两阶段 scan/apply：
 import os
 import io
 import re
+import time
 import zipfile
 import hashlib
 import shutil
@@ -157,11 +158,23 @@ def _placeholder_image_bytes(image_bytes, fn, vr):
     return buf.getvalue()
 
 
+def _progress(job, stage, current, total):
+    mgr = getattr(job, "_mgr", None)
+    if mgr is not None and hasattr(mgr, "set_progress"):
+        mgr.set_progress(job.id, stage, current, total)
+
+
+def _is_non_image_media(fn):
+    low = fn.lower()
+    return "/media/" in low and not low.endswith("/") and not _is_media(fn)
+
+
 def _mask_embedded_image(content, fn, job, cfg):
     """在嵌套任务作用域内脱敏 OOXML 内嵌图，返回 `(bytes, hits, status)`。"""
     import visual_redactor as vr
     _sync_visual_cfg(cfg, vr)
     ext = os.path.splitext(fn or "")[1].lower()
+    max_px = int((cfg or {}).get("files_max_image_mp", 32) or 32) * 1_000_000
     if ext and ext not in vr.RASTER_IMAGE_EXTS:
         return _placeholder_image_bytes(content, fn, vr), 1, vr.ST_COVER_UNSUPPORTED
 
@@ -169,8 +182,11 @@ def _mask_embedded_image(content, fn, job, cfg):
     try:
         with tr.file_store_scope(sub_id):
             res = vr.redact_image_bytes(
-                content, sub_id, tr, deadline=None, hint_name=fn,
+                content, sub_id, tr, deadline=time.monotonic() + 180.0, hint_name=fn,
                 allow_cover=True, cover_on_scan_fail=False, use_cache=False,
+                max_pixels=max_px,
+                max_bytes=max(vr.MAX_DATA_URL_IMAGE_BYTES, len(content) + 1),
+                max_tiles=64,
             )
     finally:
         tr.file_suffix_unregister(sub_id)
@@ -375,6 +391,7 @@ def scan_ooxml(job, src, staged, opts, cancel):
     covered_images = 0
     embedded_image_hits = 0
     embedded_present = 0
+    non_image_media_present = 0
     masked_entries = 0
     media_modified = False
     warnings = []
@@ -382,14 +399,25 @@ def scan_ooxml(job, src, staged, opts, cancel):
     ocr_ok = False
     with zipfile.ZipFile(src) as zin, \
             zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
+        items = zin.infolist()
+        total_parts = sum(1 for i in items if _should_mask(i.filename, ext))
+        total_media = sum(1 for i in items if _is_media(i.filename))
+        cur_part = 0
+        cur_media = 0
+        for item in items:
             if cancel is not None and cancel.is_set():
                 raise fw.FileWorkbenchError("canceled", 409)
             content = zin.read(item.filename)
             fn = item.filename
             if _is_embedding(fn):
                 embedded_present += 1
+            elif _is_non_image_media(fn):
+                non_image_media_present += 1
+                if "non_image_media_unscanned" not in warnings:
+                    warnings.append("non_image_media_unscanned")
             elif _is_media(fn):
+                cur_media += 1
+                _progress(job, "ooxml_media", cur_media, max(1, total_media))
                 if not scan_embedded:
                     skipped_images += 1
                 else:
@@ -420,6 +448,8 @@ def scan_ooxml(job, src, staged, opts, cancel):
                                 if "embedded_images_covered" not in warnings:
                                     warnings.append("embedded_images_covered")
             elif _should_mask(fn, ext):
+                cur_part += 1
+                _progress(job, "ooxml_parts", cur_part, max(1, total_parts))
                 try:
                     new = _mask_xml(content, ext, fn, locations, counts, job.id)
                     if new != content:
@@ -448,6 +478,7 @@ def scan_ooxml(job, src, staged, opts, cancel):
         "embedded_image_hits": embedded_image_hits,
         "skipped_embedded_images": skipped_images,
         "embedded_objects_present": embedded_present,
+        "non_image_media_present": non_image_media_present,
     }
     return {"hits": hits, "coverage": coverage, "warnings": warnings}
 
@@ -526,14 +557,16 @@ def apply_ooxml(job, staged, out, edits, redactions, options):
     _validate_edits(edits, hits_by_id)
     final = _final_map(edits, hits_by_id)
     keep_embedded = bool(options.get("keep_embedded_objects"))
-    # 无编辑无选项且无嵌入需剥离：直接复制 staged，保证字节一致（G768），不重压缩。
-    if not final and not keep_embedded and not options.get("clear_docinfo"):
+    strip_media = bool(options.get("strip_non_image_media"))
+    # 无编辑无选项且无嵌入/音视频需剥离：直接复制 staged，保证字节一致（G768），不重压缩。
+    if not final and not keep_embedded and not options.get("clear_docinfo") and not strip_media:
         with zipfile.ZipFile(staged) as z:
             has_emb = any(_is_embedding(n) for n in z.namelist())
         if not has_emb:
             shutil.copyfile(staged, out)
-            return {"embedded_objects_stripped": 0, "embedded_objects_kept_unscanned": 0, "warnings": []}
-    stripped = kept = 0
+            return {"embedded_objects_stripped": 0, "embedded_objects_kept_unscanned": 0,
+                    "non_image_media_stripped": 0, "warnings": []}
+    stripped = kept = media_stripped = 0
     warnings = []
     if keep_embedded:
         warnings.append("embedded_objects_kept_unscanned")
@@ -548,6 +581,9 @@ def apply_ooxml(job, staged, out, edits, redactions, options):
                 else:
                     stripped += 1
                 continue
+            if strip_media and _is_non_image_media(fn):
+                media_stripped += 1
+                continue
             content = zin.read(fn)
             if final and fn.lower().endswith(".xml"):
                 try:
@@ -556,7 +592,7 @@ def apply_ooxml(job, staged, out, edits, redactions, options):
                     pass
             zout.writestr(item, content)
     coverage = {"embedded_objects_stripped": stripped, "embedded_objects_kept_unscanned": kept,
-                "warnings": warnings}
+                "non_image_media_stripped": media_stripped, "warnings": warnings}
     return coverage
 
 
@@ -568,22 +604,74 @@ def job_hits(job):
     return list(reg.values())
 
 
+def _detect_text_encoding(raw):
+    """按 BOM → UTF-8 → GB18030 自动探测文本编码，避免中文误用 replace 变乱码。"""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        try:
+            return raw.decode("utf-8-sig"), "utf-8-sig", False
+        except UnicodeDecodeError:
+            pass
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16"), "utf-16", False
+        except UnicodeDecodeError:
+            pass
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return raw.decode(enc, "strict"), enc, False
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace"), "utf-8", True
+
+
+def _split_text_chunks(text, target_chars=65536):
+    if not text or len(text) <= target_chars:
+        return [text]
+    chunks = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(n, start + target_chars)
+        if end < n:
+            nl = text.rfind("\n", start, end)
+            if nl > start:
+                end = nl + 1
+        chunks.append(text[start:end])
+        start = end
+    return chunks
+
+
 # ── 纯文本 scan/apply（G769）────────────────────────────────────────────────
 def scan_text(job, src, staged, opts, cancel):
     # @guard G769 纯文本整文本 mask_body 产打码 staged + 注册表。
     with open(src, "rb") as f:
         raw = f.read()
-    text = raw.decode("utf-8", "replace")
+    text, enc, enc_fallback = _detect_text_encoding(raw)
+    enc_path = os.path.join(os.path.dirname(staged), "encoding.txt")
+    with open(enc_path, "w", encoding="utf-8") as f:
+        f.write(enc)
     locations, counts = {}, {}
-    b = set(tr._tables().fwd)
-    masked = tr.mask_body(text, job.id)
-    _accumulate(tr._tables(), b, text, "正文", locations, counts)
+    chunks = _split_text_chunks(text)
+    out_parts = []
+    total_chunks = max(1, len(chunks))
+    for idx, chunk in enumerate(chunks, 1):
+        if cancel is not None and cancel.is_set():
+            raise fw.FileWorkbenchError("canceled", 409)
+        _progress(job, "text_chunks", idx, total_chunks)
+        b = set(tr._tables().fwd)
+        masked_chunk = tr.mask_body(chunk, job.id)
+        _accumulate(tr._tables(), b, chunk, "正文", locations, counts)
+        out_parts.append(masked_chunk)
+    masked = "".join(out_parts)
     tables = tr._tables()
     max_hits = int(job_cfg(job).get("files_max_hits", 20000))
     hits = _build_hits(tables, locations, counts, max_hits)
     with open(staged, "wb") as f:
         f.write(masked.encode("utf-8"))
-    return {"hits": hits, "coverage": {"scanned": 1, "masked": len(hits)}, "warnings": []}
+    warnings = ["text_encoding_fallback"] if enc_fallback else []
+    return {"hits": hits,
+            "coverage": {"scanned": 1, "masked": len(hits), "encoding": enc},
+            "warnings": warnings}
 
 
 def apply_text(job, staged, out, edits, redactions, options):
@@ -594,9 +682,26 @@ def apply_text(job, staged, out, edits, redactions, options):
     with open(staged, "rb") as f:
         text = f.read().decode("utf-8", "replace")
     text = _replace_tokens(text, final)
+    enc_path = os.path.join(os.path.dirname(staged), "encoding.txt")
+    enc = "utf-8"
+    if os.path.isfile(enc_path):
+        try:
+            with open(enc_path, "r", encoding="utf-8") as f:
+                enc = (f.read() or "utf-8").strip() or "utf-8"
+        except Exception:
+            enc = "utf-8"
+    warnings = []
+    try:
+        out_bytes = text.encode(enc)
+    except UnicodeEncodeError:
+        out_bytes = text.encode("utf-8")
+        warnings.append("text_encoding_utf8_fallback")
     with open(out, "wb") as f:
-        f.write(text.encode("utf-8"))
-    return {"masked": len(hits)}
+        f.write(out_bytes)
+    cov = {"masked": len(hits)}
+    if warnings:
+        cov["warnings"] = warnings
+    return cov
 
 
 def register(mgr):

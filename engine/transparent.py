@@ -5944,7 +5944,7 @@ def _ner_warn_once(key, msg):
 
 
 @contextlib.contextmanager
-def _ner_doc_budget(seconds, *, deadline=None, cancel_event=None):
+def _ner_doc_budget(seconds, *, deadline=None, cancel_event=None, patient=False):
     """给一段连续调用（如整份 Office 文档逐 run 脱敏）设 NER 总预算。
 
     单条短文本实测约 10ms，几千个 run 会线性堆到分钟级，而扩展侧 HTTP 超时更短，
@@ -5955,10 +5955,10 @@ def _ner_doc_budget(seconds, *, deadline=None, cancel_event=None):
     except Exception:
         yield
         return
-    if deadline is None and cancel_event is None:
+    if deadline is None and cancel_event is None and not patient:
         ner_engine.begin_budget(seconds)
     else:
-        ner_engine.begin_budget(seconds, deadline=deadline, cancel_event=cancel_event)
+        ner_engine.begin_budget(seconds, deadline=deadline, cancel_event=cancel_event, patient=patient)
     try:
         yield
     finally:

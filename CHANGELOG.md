@@ -4,6 +4,28 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.21.0] - 2026-11-26
+
+### 更新摘要 / Summary
+- 本地文件脱敏针对稳定性全面加固：长文档智能识别不再因限速静默漏项，支持常见中文编码无乱码回写，放宽高清大图与长图处理上限并展示实时扫描进度。
+- 新增预览图点击单独取消或恢复自动框、桌面端另存为目标目录与历史记录视图，补充办公文档内嵌音视频提示与可选剥离，并提升旋转及特殊排版文档定位精度。
+- Hardened local file masking stability: patient long-document recognition, auto text encoding detection, raised large/tall image caps, and live scan progress.
+- Added click-to-dismiss preview boxes, desktop Save to folder and history view, audio/video media handling, and rotated document localization.
+
+### 新增与优化
+- 本地文件脱敏启用离线耐心模式与显式降级告警：长文档分段语义识别会在任务预算与可取消控制下耐心等待限速与并发槽位直到跑完，不再因代理 2 秒短窗口被静默跳过；若仍发生任何跳过必写入提示告警。
+- Local file masking now runs semantic recognition in patient mode and surfaces explicit degradation warnings instead of silently dropping segments on 2-second proxy rate bounds.
+- 纯文本与 CSV 支持 BOM / UTF-8 / GB18030 自动探测并在生成时按原编码回写，消除中文乱码漏检与损坏，同时改为按行边界分块扫描以支持实时进度与中途取消。
+- Plain text and CSV scans now auto-detect BOM / UTF-8 / GB18030 encodings and write outputs back in the original encoding while scanning line-safe chunks with live progress and cancellation support.
+- 统一工作台大图与超长图口径并放宽离线识别预算：支持高达 32MP 图片与最多 64 段超长图切片（单图/单页识别预算放宽至 180 秒），并在大文件上传、预检与页图预览链路取消 15 秒前端超时误杀。
+- Unified offline image size limits up to 32MP and up to 64 tiles for tall screenshots with a 180-second recognition budget, and removed the 15-second frontend timeout from file uploads and previews.
+- 新增扫描实时进度条、预览图点击单框取消或恢复自动检测框（凭据与整页遮盖仍不可取消）、桌面端本机路径选择与另存为目标目录、匿名脱敏历史记录视图，以及 Office 内嵌音视频提示与可选剥离开关。
+- Added live scan progress bars, click-to-dismiss/restore auto-detected preview boxes (excluding credentials and full covers), desktop local path pickers and Save to folder, anonymous history view, and Office audio/video media alerts/stripping.
+
+### 修复
+- 增强 PDF 旋转页（90°/180°/270°）、竖排文字与缺失字形框的坐标定位与邻域桥接回退，避免旋转页一刀切整页涂灰并防止全退化字形框漏脱。
+- Improved PDF coordinate mapping across 90°/180°/270° rotations, vertical text, and missing-glyph neighborhood bridging with fail-closed fallback.
+
 ## [0.20.1] - 2026-11-26
 
 ### 更新摘要 / Summary

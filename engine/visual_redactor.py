@@ -281,9 +281,16 @@ def available():
 # 后端：本地 det+rec / HTTP（兼容）
 # ---------------------------------------------------------------------------
 
-def _blocks_local(image_bytes, deadline):
+def _blocks_local(image_bytes, deadline, *, max_pixels=None, max_bytes=None, max_tiles=None):
     import ocr_engine
-    res = ocr_engine.detect(image_bytes, deadline=deadline)
+    kw = {}
+    if max_pixels is not None:
+        kw["max_pixels"] = max_pixels
+    if max_bytes is not None:
+        kw["max_bytes"] = max_bytes
+    if max_tiles is not None:
+        kw["max_tiles"] = max_tiles
+    res = ocr_engine.detect(image_bytes, deadline=deadline, **kw)
     return res.blocks, {"backend": "local", "orientation": res.orientation,
                         "ms": res.ms, "downscaled": res.downscaled,
                         "low_conf": len(res.low_conf)}
@@ -490,7 +497,25 @@ class _Blocked(Exception):
         super().__init__(self.reason)
 
 
-def detect_blocks(image_bytes, *, deadline=None, max_tokens=None):
+def _call_detect_blocks(image_bytes, *, deadline=None, max_tokens=None,
+                        max_pixels=None, max_bytes=None, max_tiles=None):
+    """兼容测试对 `detect_blocks` 的三参桩函数：仅当目标签名接收时才透传离线大图限额。"""
+    kw = {"deadline": deadline, "max_tokens": max_tokens}
+    if max_pixels is not None or max_bytes is not None or max_tiles is not None:
+        import inspect
+        try:
+            params = inspect.signature(detect_blocks).parameters
+            accepts_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            for k, v in (("max_pixels", max_pixels), ("max_bytes", max_bytes), ("max_tiles", max_tiles)):
+                if v is not None and (accepts_kw or k in params):
+                    kw[k] = v
+        except (TypeError, ValueError):
+            pass
+    return detect_blocks(image_bytes, **kw)
+
+
+def detect_blocks(image_bytes, *, deadline=None, max_tokens=None,
+                  max_pixels=None, max_bytes=None, max_tiles=None):
     """按后端偏好产出 `(blocks, info)`。任何失败都抛 `_Blocked`。"""
     if deadline is not None and deadline - time.monotonic() <= 0:
         raise _Blocked(BLOCK_TIMEOUT)
@@ -500,7 +525,12 @@ def detect_blocks(image_bytes, *, deadline=None, max_tokens=None):
         ok, why = ocr_engine.available()
         if ok:
             try:
-                fut = _VISION_POOL.submit(_blocks_local, image_bytes, deadline)
+                fut = _VISION_POOL.submit(
+                    lambda: _blocks_local(
+                        image_bytes, deadline,
+                        max_pixels=max_pixels, max_bytes=max_bytes, max_tiles=max_tiles,
+                    )
+                )
                 rem = (deadline - time.monotonic()) if deadline is not None else None
                 timeout = max(0.001, rem) if rem is not None else None
                 try:
@@ -532,7 +562,7 @@ def _load_image(image_bytes):
     return img, why
 
 
-def _load_image_ex(image_bytes):
+def _load_image_ex(image_bytes, *, max_pixels=None):
     """`(img, why, 元数据, 帧数)`。元数据是 `_ImageMeta`（解码失败时为 None）。"""
     image, _draw = _pil()
     if image is None:
@@ -542,8 +572,9 @@ def _load_image_ex(image_bytes):
         # 与 ocr_engine 同一道像素闸，且在 load() 之前：这里是第二次解码（用于涂色），
         # 不判的话 HTTP 后端路径会绕过 OCR 引擎的检查。
         import ocr_engine
+        limit_px = ocr_engine.MAX_PIXELS if max_pixels is None else int(max_pixels)
         w, h = img.size
-        if w * h > ocr_engine.MAX_PIXELS:
+        if w * h > limit_px:
             return None, BLOCK_TOO_LARGE, None, 1
         img.load()
         # 元数据要在摆正之前取：exif_transpose 返回新对象，`.info` 会被改写或丢弃。
@@ -819,7 +850,7 @@ def _scan_fail_result(reason, cover, image_bytes, sid, tr, *, hint_name="", extr
 
 def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
                        max_tokens=None, allow_cover=False, cover_on_scan_fail=False,
-                       use_cache=True):
+                       use_cache=True, max_pixels=None, max_bytes=None, max_tiles=None):
     """核心入口。优先查验 LRU 脱敏缓存，未命中则执行完整脱敏管线。"""
     if not image_bytes:
         return {"mode": MODE_BLOCKED, "reason": BLOCK_DECODE, "stats": {},
@@ -833,14 +864,17 @@ def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
     res = _redact_image_bytes_uncached(image_bytes, sid, tr, deadline=deadline,
                                        hint_name=hint_name, max_tokens=max_tokens,
                                        allow_cover=allow_cover,
-                                       cover_on_scan_fail=cover_on_scan_fail)
+                                       cover_on_scan_fail=cover_on_scan_fail,
+                                       max_pixels=max_pixels, max_bytes=max_bytes,
+                                       max_tiles=max_tiles)
     if use_cache:
         _put_image_cache(cache_key, res)
     return res
 
 
 def _redact_image_bytes_uncached(image_bytes, sid, tr, *, deadline=None, hint_name="",
-                                 max_tokens=None, allow_cover=False, cover_on_scan_fail=False):
+                                 max_tokens=None, allow_cover=False, cover_on_scan_fail=False,
+                                 max_pixels=None, max_bytes=None, max_tiles=None):
     """底层图像脱敏实现。返回 dict：
 
     - `mode`: `MODE_REDACTED` / `MODE_CLEAN` / `MODE_BLOCKED`
@@ -860,7 +894,8 @@ def _redact_image_bytes_uncached(image_bytes, sid, tr, *, deadline=None, hint_na
     if not ok:
         return _scan_fail_result(why, cover_on_scan_fail, image_bytes, sid, tr,
                                  hint_name=hint_name)
-    img, decode_why, meta, frames = _load_image_ex(image_bytes)
+    load_kw = {"max_pixels": max_pixels} if max_pixels is not None else {}
+    img, decode_why, meta, frames = _load_image_ex(image_bytes, **load_kw)
     if img is None:
         return _scan_fail_result(decode_why, cover_on_scan_fail, image_bytes, sid, tr,
                                  hint_name=hint_name)
@@ -877,7 +912,10 @@ def _redact_image_bytes_uncached(image_bytes, sid, tr, *, deadline=None, hint_na
     img = img.convert("RGB")
 
     try:
-        blocks, info = detect_blocks(image_bytes, deadline=deadline, max_tokens=max_tokens)
+        blocks, info = _call_detect_blocks(
+            image_bytes, deadline=deadline, max_tokens=max_tokens,
+            max_pixels=max_pixels, max_bytes=max_bytes, max_tiles=max_tiles,
+        )
     except _Blocked as e:
         return _scan_fail_result(e.reason, cover_on_scan_fail, image_bytes, sid, tr,
                                  hint_name=hint_name)

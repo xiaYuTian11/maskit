@@ -293,6 +293,31 @@ class KernelTests(unittest.TestCase):
             gate.set()
             mgr.stop()
 
+    def test_patient_ner_budget_and_degraded_warning(self):
+        """扫描在 patient 耐心模式下运行 NER；若发生跳过必写入 ner_degraded 告警与计数。"""
+        import ner_engine
+
+        seen = {}
+
+        def check_scan(job, src, staged, opts, cancel):
+            mgr = job._mgr
+            mgr.set_progress(job.id, "text_chunks", 1, 2)
+            self.assertEqual(mgr.get_job(job.id).progress, {"stage": "text_chunks", "current": 1, "total": 2})
+            seen["patient"] = bool(getattr(ner_engine._local, "patient", False))
+            ner_engine._note_skip("global_throttled")
+            Path(staged).write_bytes(b"staged")
+            return {"hits": [_stub_hit()], "coverage": {"scanned": 1}, "warnings": []}
+
+        mgr = _make_mgr(self.tmp)
+        mgr.register_carrier("text", check_scan, _stub_apply)
+        job = _ready_job(mgr, filename="long.txt")
+        mgr.request_scan(job.id)
+        j = mgr.get_job(job.id)
+        self.assertTrue(seen.get("patient"))
+        self.assertEqual(j.progress, {})
+        self.assertIn("ner_degraded", j.warnings)
+        self.assertGreaterEqual(j.coverage.get("ner_skipped_chunks", 0), 1)
+
 
 class IsolationTests(unittest.TestCase):
     def test_g745_zero_pollution(self):

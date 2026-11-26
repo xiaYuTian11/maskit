@@ -160,15 +160,24 @@ class FileWorkbenchUiTests(unittest.TestCase):
                     "files.cov.coveredEmbeddedImages", "files.cov.skippedEmbeddedImages",
                     "files.cov.embeddedPresent",
                     "files.cov.embeddedStripped", "files.cov.embeddedKept",
+                    "files.cov.nonImageMediaPresent", "files.cov.nonImageMediaStripped",
+                    "files.cov.nerSkippedChunks",
                     "files.cov.attachmentsStripped", "files.cov.attachmentsKept",
                     "files.warn.embeddedKept", "files.warn.attachmentsKept",
+                    "files.warn.nonImageMediaUnscanned", "files.warn.nerDegraded",
+                    "files.warn.textEncodingFallback", "files.warn.textEncodingUtf8Fallback",
                     "files.warn.embeddedOcrUnavailable", "files.warn.embeddedCovered",
                     "files.warn.imageOcrFailed", "files.warn.pageFullCover",
                     "files.warn.pageOcrFailed", "files.warn.pageKeptUnmasked",
                     "files.warn.pagesKeptUnmasked",
                     "files.warn.unknown",
                     "files.autoBoxesCount",
+                    "files.queuePos", "files.savedTo",
+                    "files.progress.pdf_pages", "files.progress.pdf_hidden",
+                    "files.progress.ooxml_parts", "files.progress.ooxml_media",
+                    "files.progress.text_chunks", "files.progress.image_ocr",
                     "files.err.state", "files.err.queueFull", "files.err.tooLarge",
+                    "files.err.saveDest", "files.err.pathModeDisabled",
                     "files.err.failClosed", "files.err.officeUnsupported", "files.err.zipBomb",
                     "files.err.tooManyHits", "files.err.visualUnsupported", "files.err.diskFull",
                     "files.err.badCoords", "files.err.ocrUnavailable", "files.err.rasterFailed",
@@ -176,6 +185,16 @@ class FileWorkbenchUiTests(unittest.TestCase):
                     "files.err.typeUnsupported", "files.err.engineRestart"):
             self.assertIn("'%s':" % key, zh_block, "缺少中文词条 %s" % key)
             self.assertIn("'%s':" % key, en_block, "缺少英文词条 %s" % key)
+
+    def test_v210_stability_and_desktop_ui_contracts(self):
+        """v0.21.0 UI 契约：进度条、单框取消/恢复、桌面另存为/路径选择、历史视图及大文件无 15s 误杀。"""
+        self.assertIn("saveJob", self.page)
+        self.assertIn("listHistory", self.page)
+        self.assertIn("dismissedBoxes", self.page)
+        self.assertIn("selected.progress", self.page)
+        self.assertIn("timeoutMs: 0", self.api)
+        self.assertIn("/api/files/history", self.api)
+        self.assertIn("/save", self.api)
 
     def test_g811_cancel_delete(self):
         """G811 取消/删除：取消仅允许态显示，删除需确认。"""
@@ -289,6 +308,25 @@ class PanelRoundtripTests(unittest.TestCase):
             self.assertNotIn(phone.encode(), raw.data)
             self.assertIn(b"***", raw.data)
             raw.close()
+
+            import shutil
+            import tempfile
+            save_dir = Path(tempfile.mkdtemp(prefix="fw-save-"))
+            try:
+                old_rm = self.panel.REMOTE_MODE
+                self.panel.REMOTE_MODE = False
+                sr = self.client.post("/api/files/jobs/%s/save" % job_id, headers=self.auth,
+                                      json={"dest_dir": str(save_dir)})
+                self.assertEqual(sr.status_code, 200)
+                self.assertTrue(Path(sr.get_json()["path"]).is_file())
+            finally:
+                self.panel.REMOTE_MODE = old_rm
+                shutil.rmtree(save_dir, ignore_errors=True)
+
+            hr = self.client.get("/api/files/history", headers=self.auth)
+            self.assertEqual(hr.status_code, 200)
+            hist_list = hr.get_json().get("history") or []
+            self.assertTrue(any(item.get("id") == job_id for item in hist_list))
         finally:
             self.client.delete("/api/files/jobs/%s" % job_id, headers=self.auth)
 

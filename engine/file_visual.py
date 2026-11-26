@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import time
 
 import transparent as tr
 import file_workbench as fw
@@ -47,6 +48,7 @@ _PREVIEW_MAX = 2000          # 预览最长边
 _PAGE_WIDTH = 1600           # PDF 页渲染宽（与 pr.RENDER_MAX_WIDTH_PX 同口径）
 _MAX_AREAS_PER_PAGE = 500
 _MIN_AREA = 0.001
+_FILE_OCR_BUDGET_S = 180.0
 _FILL = getattr(vr, "_FILL", (120, 120, 120))
 
 
@@ -91,19 +93,26 @@ def _detect_boxes(image_bytes, img, sid, deadline=None):
 
     单页失败抛 PageOcrFailed，由 scan 转整页 full + 告警。
     """
+    eff_deadline = deadline if deadline is not None else (time.monotonic() + _FILE_OCR_BUDGET_S)
+    width, height = img.size
     try:
-        blocks, _info = vr.detect_blocks(image_bytes, deadline=deadline)
+        blocks, _info = vr._call_detect_blocks(
+            image_bytes,
+            deadline=eff_deadline,
+            max_pixels=max(32_000_000, width * height),
+            max_bytes=max(vr.MAX_DATA_URL_IMAGE_BYTES, len(image_bytes) + 1),
+            max_tiles=64,
+        )
     except Exception as e:
         raise PageOcrFailed(str(e))
     try:
         rects, stats = vr._locator.locate(
             blocks, lambda t: tr.mask_body(t, sid), img=img,
-            recognize=vr._recognize, deadline=deadline)
+            recognize=vr._recognize, deadline=eff_deadline)
     except Exception as e:
         raise PageOcrFailed(str(e))
     if stats.get("failed"):
         raise PageOcrFailed("locate_failed")
-    width, height = img.size
     out = []
     for r in rects:
         quad = r.quad
@@ -351,6 +360,7 @@ def scan_pdf(job, src, staged, opts, cancel):
         for index in range(pages):
             if cancel is not None and cancel.is_set():
                 raise fw.FileWorkbenchError(E_PREVIEW, 409)
+            fc._progress(job, "pdf_pages", index + 1, pages)
             width_pt, height_pt = doc.get_page_size(index)
             if width_pt <= 0 or height_pt <= 0:
                 raise fw.FileWorkbenchError(E_BUDGET, 507)
@@ -443,6 +453,7 @@ def scan_pdf(job, src, staged, opts, cancel):
         doc.close()
         raise
     # 隐藏文字（文档信息/XMP/书签/注释/表单/附件）
+    fc._progress(job, "pdf_hidden", pages, max(1, pages))
     hidden_hits = _scan_hidden(job.id, raw, locations, counts)
     final_hits = _build_manifest_hits(tables, locations, counts,
                                       int(cfg.get("files_max_hits", 20000)))
@@ -450,7 +461,9 @@ def scan_pdf(job, src, staged, opts, cancel):
     orig_to_id = {getattr(h, "_orig", None): h.hit_id for h in final_hits
                   if getattr(h, "_orig", None)}
     for page in page_meta:
-        for box in page["boxes"]:
+        pno = int(page.get("page") or 1)
+        for idx, box in enumerate(page["boxes"]):
+            box["id"] = "auto-%d-%d" % (pno, idx)
             orig = box.pop("orig", None)
             if box.get("source") == "text_layer" and not orig:
                 # 文本层整页覆盖时无法精确归属：标到页内全部文本命中 id
@@ -575,6 +588,8 @@ def apply_pdf(job, staged, out, edits, redactions, options):
     fc._validate_edits(edits, hits_by_id)
     _validate_redactions(redactions, len(manifest.get("pages") or []) or 1)
     kept = {e.get("hit_id") for e in (edits or []) if e.get("action") == "keep"}
+    cred_hit_ids = {h.hit_id for h in hits if not h.can_keep}
+    dismissed = set((options or {}).get("dismissed_boxes") or [])
     finals = {}
     for hit in hits:
         edit = next((e for e in (edits or []) if e.get("hit_id") == hit.hit_id), None)
@@ -610,7 +625,8 @@ def apply_pdf(job, staged, out, edits, redactions, options):
     rendered = []
     rasterized = 0
     for page in pages:
-        if not _page_needs_raster(page, kept, redactions, warnings):
+        if not _page_needs_raster(page, kept, redactions, warnings,
+                                  dismissed=dismissed, cred_hit_ids=cred_hit_ids):
             rendered.append(None)
             continue
         rasterized += 1
@@ -623,12 +639,17 @@ def apply_pdf(job, staged, out, edits, redactions, options):
         except Exception:
             raise fw.FileWorkbenchError(E_RASTER, 422)
         boxes = []
-        for b in page.get("boxes") or []:
+        pno = int(page.get("page") or 1)
+        for idx, b in enumerate(page.get("boxes") or []):
             if b.get("kind") == "full":
                 boxes.append({"kind": "full"})
             elif b.get("kind") == "rect":
+                hid = b.get("hit_id")
+                bid = b.get("id") or ("auto-%d-%d" % (pno, idx))
+                if hid not in cred_hit_ids and bid in dismissed:
+                    continue
                 # 文本层框：只有未保留的命中才涂；保留的命中让原文字可见
-                if b.get("source") == "text_layer" and b.get("hit_id") in kept:
+                if b.get("source") == "text_layer" and hid in kept:
                     continue
                 boxes.append({"kind": "rect", "rect": b["rect"]})
         boxes.extend(_page_redactions(redactions, page.get("page")))
@@ -650,18 +671,31 @@ def apply_pdf(job, staged, out, edits, redactions, options):
     return coverage
 
 
-def _page_needs_raster(page, kept, redactions, warnings):
+def _page_needs_raster(page, kept, redactions, warnings, dismissed=None, cred_hit_ids=None):
     if _page_redactions(redactions, page.get("page")):
         return True
-    for box in page.get("boxes") or []:
+    pno = int(page.get("page") or 1)
+    active_box = False
+    any_unmasked = False
+    for idx, box in enumerate(page.get("boxes") or []):
         if box.get("kind") == "full":
             return True
-        if box.get("kind") == "rect" and box.get("source") != "text_layer":
-            return True
-    ids = page.get("text_hit_ids") or []
-    if ids and any(i not in kept for i in ids):
+        if box.get("kind") == "rect":
+            hid = box.get("hit_id")
+            bid = box.get("id") or ("auto-%d-%d" % (pno, idx))
+            if dismissed and bid in dismissed and (not cred_hit_ids or hid not in cred_hit_ids):
+                any_unmasked = True
+                continue
+            if box.get("source") != "text_layer":
+                return True
+            if hid not in kept:
+                active_box = True
+    if active_box:
         return True
-    if ids and all(i in kept for i in ids):
+    ids = page.get("text_hit_ids") or []
+    if ids and not any_unmasked and any(i not in kept for i in ids):
+        return True
+    if (ids and all(i in kept for i in ids)) or any_unmasked:
         if "page_kept_with_unmasked_hits" not in warnings:
             warnings.append("page_kept_with_unmasked_hits")
     return False
@@ -734,13 +768,15 @@ def _strip_attachments(writer):
 def scan_image(job, src, staged, opts, cancel):
     # @guard G786 自动框选只出框；预览最长边 ≤2000
     cfg = fc.job_cfg(job)
+    max_px = _max_image_mp(cfg) * 1_000_000
     with open(src, "rb") as f:
         raw = f.read()
-    img, why, _meta, frames = vr._load_image_ex(raw)
+    img, why, _meta, frames = vr._load_image_ex(raw, max_pixels=max_px)
     if img is None:
         raise fw.FileWorkbenchError(E_CARRIER, 422)
     if frames > 1:
         raise fw.FileWorkbenchError(E_CARRIER, 400)
+    fc._progress(job, "image_ocr", 1, 1)
     job_dir = os.path.dirname(staged)
     preview_dir = os.path.join(job_dir, "preview")
     shutil.rmtree(preview_dir, ignore_errors=True)
@@ -782,7 +818,8 @@ def scan_image(job, src, staged, opts, cancel):
                                 int(cfg.get("files_max_hits", 20000)))
     orig_to_id = {getattr(h, "_orig", None): h.hit_id for h in hits
                   if getattr(h, "_orig", None)}
-    for box in boxes:
+    for idx, box in enumerate(boxes):
+        box["id"] = "auto-1-%d" % idx
         orig = box.pop("orig", None)
         if orig and orig in orig_to_id:
             box["hit_id"] = orig_to_id[orig]
@@ -801,16 +838,19 @@ def scan_image(job, src, staged, opts, cancel):
 
 def apply_image(job, staged, out, edits, redactions, options):
     # @guard G791 EXIF/XMP 剥离、方向先应用、输出不透明 RGB
+    cfg = fc.job_cfg(job)
     with open(staged, "r", encoding="utf-8") as f:
         manifest = json.load(f)
     hits = fc.job_hits(job)
     fc._validate_edits(edits, {h.hit_id: h for h in hits})
     _validate_redactions(redactions, 1)
     kept = {e.get("hit_id") for e in (edits or []) if e.get("action") == "keep"}
+    cred_hit_ids = {h.hit_id for h in hits if not h.can_keep}
+    dismissed = set((options or {}).get("dismissed_boxes") or [])
     src = os.path.join(os.path.dirname(staged), "src.bin")
     with open(src, "rb") as f:
         raw = f.read()
-    img, why, meta, _frames = vr._load_image_ex(raw)
+    img, why, meta, _frames = vr._load_image_ex(raw, max_pixels=_max_image_mp(cfg) * 1_000_000)
     if img is None:
         raise fw.FileWorkbenchError(E_META, 422)
     # 透明底填白（不透明 RGB）
@@ -824,11 +864,17 @@ def apply_image(job, staged, out, edits, redactions, options):
         img = img.convert("RGB")
     page0 = (manifest.get("pages") or [{}])[0]
     boxes = []
-    for b in page0.get("boxes") or []:
+    any_dismissed = False
+    for idx, b in enumerate(page0.get("boxes") or []):
         if b.get("kind") == "full":
             boxes.append({"kind": "full"})
         elif b.get("kind") == "rect":
-            if b.get("hit_id") and b["hit_id"] in kept:
+            hid = b.get("hit_id")
+            bid = b.get("id") or ("auto-1-%d" % idx)
+            if hid and hid in kept:
+                continue
+            if hid not in cred_hit_ids and bid in dismissed:
+                any_dismissed = True
                 continue
             boxes.append({"kind": "rect", "rect": b["rect"]})
     boxes.extend(_page_redactions(redactions, 1))
@@ -854,6 +900,8 @@ def apply_image(job, staged, out, edits, redactions, options):
     with open(out, "wb") as f:
         f.write(buf.getvalue())
     warnings = list(manifest.get("warnings") or [])
+    if any_dismissed and "page_kept_with_unmasked_hits" not in warnings:
+        warnings.append("page_kept_with_unmasked_hits")
     coverage = {"rendered_pages": 1, "rasterized_pages": 1,
                 "text_layer_hits": 0, "hidden_hits": 0,
                 "skipped_ocr_pages": int(manifest.get("skipped_ocr_pages") or 0),
@@ -909,22 +957,25 @@ def preview_boxes(job, page=1):
     target = next((p for p in pages if int(p.get("page") or 0) == page), None)
     if target is None:
         return []
+    cred_hit_ids = {h.hit_id for h in fc.job_hits(job) if not h.can_keep}
     out = []
     for idx, box in enumerate(target.get("boxes") or []):
         kind = box.get("kind") or "rect"
         if kind not in ("rect", "full"):
             continue
+        hid = box.get("hit_id")
         item = {
-            "id": "auto-%d-%d" % (page, idx),
+            "id": box.get("id") or ("auto-%d-%d" % (page, idx)),
             "kind": kind,
             "source": box.get("source") or "auto",
+            "can_dismiss": bool(kind == "rect" and hid not in cred_hit_ids),
         }
         if kind == "rect" and box.get("rect"):
             item["rect"] = box["rect"]
         if box.get("label"):
             item["label"] = box["label"]
-        if box.get("hit_id"):
-            item["hit_id"] = box["hit_id"]
+        if hid:
+            item["hit_id"] = hid
         out.append(item)
     return out
 
@@ -936,7 +987,9 @@ def _lazy_preview(job, job_dir, page):
     try:
         if job.carrier == "image":
             with open(src, "rb") as f:
-                img, _why, _meta, _frames = vr._load_image_ex(f.read())
+                img, _why, _meta, _frames = vr._load_image_ex(
+                    f.read(), max_pixels=_max_image_mp(fc.job_cfg(job)) * 1_000_000
+                )
             if img is None:
                 return
             img = img.convert("RGB")

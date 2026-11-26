@@ -710,13 +710,13 @@ def request_skips(reset: bool = False) -> Dict:
     return s
 
 
-def begin_budget(seconds, *, deadline=None, cancel_event=None):
+def begin_budget(seconds, *, deadline=None, cancel_event=None, patient=False):
     """Begin a thread-local request budget; always pair with end_budget in finally.
 
     deadline is an optional absolute time.monotonic() processing deadline (including
     upstream worker queue time). cancel_event is an optional threading.Event owned
-    by the caller. Checks are cooperative: running initialization/ONNX cannot be
-    interrupted. Expiry never implicitly ends or renews a request budget.
+    by the caller. patient=True allows offline file jobs to wait for quota/slots
+    within the overall deadline rather than dropping chunks on real-time 2s bounds.
     """
     effective = time.monotonic() + float(seconds)
     if deadline is not None:
@@ -724,6 +724,7 @@ def begin_budget(seconds, *, deadline=None, cancel_event=None):
     _local.doc_active = True
     _local.deadline = effective
     _local.cancel_event = cancel_event
+    _local.patient = bool(patient)
     _local.skips = {}
     _local.metrics = _empty_metrics()
 
@@ -732,6 +733,7 @@ def end_budget():
     _local.doc_active = False
     _local.deadline = None
     _local.cancel_event = None
+    _local.patient = False
 
 
 def _cancelled():
@@ -746,6 +748,8 @@ def _current_deadline():
         return None
     dl = getattr(_local, "deadline", None)
     if getattr(_local, "doc_active", False) and dl is not None:
+        if getattr(_local, "patient", False):
+            return dl if now < dl else None
         return min(dl, now + CALL_BUDGET_S) if now < dl else None
     return now + CALL_BUDGET_S
 
@@ -1234,17 +1238,17 @@ def _extract_entities_raw(text: str) -> List[Dict]:
     # 分段长度上限兜住）。
     # ⚠️ 批次 8：估价与结算都改成 **CPU 毫秒**（墙钟 × 线程数）—— 旧口径按墙钟计费，
     # 等于把「两个核全占满」记成「占了大半个核」，预算从不是真正的 CPU 上限。
+    patient = bool(getattr(_local, "patient", False))
     threads = _cpu_threads()
     est_ms = max(1.0, len(text) * _EST_CPU_MS_PER_CHAR)
     est_ms = min(est_ms, float(_NER_BUDGET_MS_PER_S))
     if not _bucket_take(est_ms):
-        # 额度不足：先在**有界**窗口内等一等（默认 2s，且不超过本轮剩余 deadline）。
-        # 等到就照常推理（记 budget_waited，“曾经缺额度但补上了”可见）；
-        # 等不到仍按原策略降级 —— 不阻断、不断链，只如实记原因。
-        # 保留既有策略：给并发槽位预留等待窗口，避免额度等待吃光剩余预算。
-        # 后续每道检查仍以绝对 deadline 为准，绝不续给最小等待时间。
-        budget_wait_s = min(_NER_BUDGET_WAIT_MS / 1000.0,
-                            max(0.0, deadline - time.monotonic() - _SEM_WAIT_MAX_S))
+        # 代理链路只在短窗口内等（避免队头阻塞）；文件工作台启用 patient=True 时可在总预算内耐心等完。
+        if patient:
+            budget_wait_s = max(0.0, deadline - time.monotonic())
+        else:
+            budget_wait_s = min(_NER_BUDGET_WAIT_MS / 1000.0,
+                                max(0.0, deadline - time.monotonic() - _SEM_WAIT_MAX_S))
         t_budget = time.monotonic()
         try:
             got_tokens = budget_wait_s > 0 and _bucket_wait(est_ms, budget_wait_s)
@@ -1268,7 +1272,7 @@ def _extract_entities_raw(text: str) -> List[Dict]:
     if _stopped(deadline):
         _bucket_refund(est_ms)
         return []
-    remaining = min(_SEM_WAIT_MAX_S, deadline - time.monotonic())
+    remaining = max(0.0, deadline - time.monotonic()) if patient else min(_SEM_WAIT_MAX_S, deadline - time.monotonic())
     t_wait0 = time.monotonic()
     got_slot = _acquire_until(_SEM, min(deadline, t_wait0 + remaining))
     wait_ms = max(0.0, time.monotonic() - t_wait0) * 1000

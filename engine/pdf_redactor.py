@@ -141,27 +141,75 @@ def _text_layer_hits(page, sid, tr):
     return [(s, e) for s, e, _label in spans], boxes
 
 
+def _valid_charbox(box):
+    return box is not None and len(box) >= 4 and box[2] > box[0] and box[3] > box[1]
+
+
+def _bridge_missing_glyphs(boxes, start, end):
+    """当命中区间全部字形框缺失或退化时，尝试用同一行左右相邻有效字形框做安全桥接。"""
+    lb = None
+    for j in range(start - 1, max(-1, start - 17), -1):
+        if _valid_charbox(boxes[j]):
+            lb = boxes[j]
+            break
+    rb = None
+    for j in range(end, min(len(boxes), end + 16)):
+        if _valid_charbox(boxes[j]):
+            rb = boxes[j]
+            break
+    if lb is None or rb is None:
+        return None
+    lh = lb[3] - lb[1]
+    rh = rb[3] - rb[1]
+    bh = max(lh, rh)
+    if abs(lb[1] - rb[1]) > bh * 0.6 or rb[0] < lb[0]:
+        return None
+    margin = max(bh * 0.5, 4.0)
+    return [min(lb[2], rb[0]) - margin, min(lb[1], rb[1]),
+            max(lb[2], rb[0]) + margin, max(lb[3], rb[1])]
+
+
 def _text_rects_px(spans, boxes, page, scale):
-    """把文本层命中映射到渲染图像素。无法可靠映射时返回 None（调用方整页遮盖）。"""
+    """把文本层命中映射到渲染图像素（支持 0/90/180/270° 旋转、竖排与缺失字形邻域桥接）。
+    无法可靠映射时返回 None（由调用方安全降级为整页遮盖）。
+    """
     try:
-        if page.get_rotation() % 360:
-            # 旋转页的坐标变换容易写错，写错就是漏遮；整页遮盖更稳妥。
+        rot = int(page.get_rotation() or 0) % 360
+        if rot not in (0, 90, 180, 270):
             return None
-        left, _bottom, _right, top = page.get_cropbox()
+        left, bottom, right, top = page.get_cropbox()
     except Exception:
         return None
+    page_w = right - left
+    page_h = top - bottom
+    if page_w <= 0 or page_h <= 0:
+        return None
+
     rects = []
     for start, end in spans:
+        hi = min(end, len(boxes))
+        has_valid = any(_valid_charbox(boxes[i]) for i in range(start, hi))
+        if not has_valid:
+            bridged = _bridge_missing_glyphs(boxes, start, hi)
+            if bridged is None:
+                return None
+            rects.append(bridged)
+            continue
+
         cur = None
-        for i in range(start, min(end, len(boxes))):
+        for i in range(start, hi):
             box = boxes[i]
-            if not box:
+            if not _valid_charbox(box):
                 continue
             l, b, r, t = box
-            if r <= l or t <= b:
-                continue  # 生成字符（换行/空格）没有字形
             h = t - b
-            if cur and abs(b - cur[1]) <= h * 0.5 and l >= cur[0] - h:
+            w = r - l
+            same_row = cur is not None and abs(b - cur[1]) <= h * 0.5 and l >= cur[0] - h
+            same_col = (
+                cur is not None and abs(l - cur[0]) <= w * 0.6 and abs(r - cur[2]) <= w * 0.6
+                and abs(t - cur[1]) <= max(h, cur[3] - cur[1]) * 1.5
+            )
+            if same_row or same_col:
                 cur = [min(cur[0], l), min(cur[1], b), max(cur[2], r), max(cur[3], t)]
             else:
                 if cur:
@@ -169,13 +217,35 @@ def _text_rects_px(spans, boxes, page, scale):
                 cur = [l, b, r, t]
         if cur:
             rects.append(cur)
-        if not any(boxes[i] for i in range(start, min(end, len(boxes)))):
-            return None  # 命中了却一个字形框都没有：画不了就整页盖
+
+    if spans and not rects:
+        return None
+
+    canvas_w = page_h if rot in (90, 270) else page_w
+    canvas_h = page_w if rot in (90, 270) else page_h
+    max_px_x = max(1, int(canvas_w * scale) + 1)
+    max_px_y = max(1, int(canvas_h * scale) + 1)
+
     out = []
     for l, b, r, t in rects:
-        pad = (t - b) * TEXT_BOX_PAD
-        out.append((int((l - pad - left) * scale), int((top - t - pad) * scale),
-                    int((r + pad - left) * scale) + 1, int((top - b + pad) * scale) + 1))
+        pad = max(t - b, 4.0) * TEXT_BOX_PAD
+        u1 = (l - pad) - left
+        u2 = (r + pad) - left
+        v1 = (b - pad) - bottom
+        v2 = (t + pad) - bottom
+        if rot == 0:
+            rx1, ry1, rx2, ry2 = u1, page_h - v2, u2, page_h - v1
+        elif rot == 90:
+            rx1, ry1, rx2, ry2 = v1, u1, v2, u2
+        elif rot == 180:
+            rx1, ry1, rx2, ry2 = page_w - u2, v1, page_w - u1, v2
+        else:
+            rx1, ry1, rx2, ry2 = page_h - v2, page_w - u2, page_h - v1, page_w - u1
+        px1 = max(0, min(max_px_x, int(rx1 * scale)))
+        py1 = max(0, min(max_px_y, int(ry1 * scale)))
+        px2 = max(px1 + 1, min(max_px_x, int(rx2 * scale) + 1))
+        py2 = max(py1 + 1, min(max_px_y, int(ry2 * scale) + 1))
+        out.append((px1, py1, px2, py2))
     return out
 
 

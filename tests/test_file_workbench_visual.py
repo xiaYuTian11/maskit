@@ -573,6 +573,110 @@ finally:
         apply(mgr, job)
         self.assertEqual(fv.preview_boxes(job, 1), [])
 
+    def test_pdf_rotated_90_180_270_text_layer_masked_precisely(self):
+        """90°/180°/270° 旋转 PDF 必须精确涂黑敏感文本框并保留同页其余文本，不盲目整页涂灰。"""
+        from pypdf import PdfWriter
+        from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+        from PIL import Image
+
+        mgr = make_mgr(self.tmp)
+        for rot in (90, 180, 270):
+            def build_rot(path, angle=rot):
+                w = PdfWriter()
+                page = w.add_blank_page(width=400, height=600)
+                font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+                                         NameObject("/Subtype"): NameObject("/Type1"),
+                                         NameObject("/BaseFont"): NameObject("/Helvetica")})
+                page[NameObject("/Resources")] = DictionaryObject(
+                    {NameObject("/Font"): DictionaryObject({NameObject("/F1"): w._add_object(font)})}
+                )
+                content = DecodedStreamObject()
+                content.set_data(("BT /F1 20 Tf 50 500 Td (%s) Tj 0 -80 Td (SAFEKEEP) Tj ET" % PHONE).encode("utf-8"))
+                page[NameObject("/Contents")] = w._add_object(content)
+                page.rotate(angle)
+                with open(path, "wb") as f:
+                    w.write(f)
+
+            job = ready(mgr, "rot_%d.pdf" % rot, "pdf", build_rot)
+            scan(mgr, job, mode="manual")
+            self.assertEqual(job.status, fw.ST_REVIEW)
+            self.assertNotIn("page_1_full_cover", job.warnings)
+            boxes = fv.preview_boxes(job, 1)
+            self.assertEqual(len(boxes), 1, boxes)
+            self.assertEqual(boxes[0]["kind"], "rect")
+            apply(mgr, job)
+            self.assertEqual(job.status, fw.ST_DONE)
+            import pdf_redactor as pr
+            doc = pr._open_document(out_bytes(mgr, job))
+            try:
+                out_img = doc[0].render(scale=1.0).to_pil().convert("RGB")
+                # 验证非命中区的空白背景没有被整页涂成 fv._FILL 灰色
+                self.assertNotEqual(out_img.getpixel((out_img.size[0] - 5, out_img.size[1] - 5)), fv._FILL)
+            finally:
+                doc.close()
+
+    def test_pdf_degenerate_charboxes_bridge_or_failclosed(self):
+        """全退化字形框在无有效邻框时必须 fail-closed（返回 None），有同行邻框时可桥接覆盖。"""
+        import pdf_redactor as pr
+
+        class _FakePage:
+            def get_rotation(self):
+                return 0
+            def get_cropbox(self):
+                return (0.0, 0.0, 400.0, 600.0)
+
+        # 全退化（无邻框）→ 绝不返回 [] 漏脱，必须回 None 走整页遮盖
+        degen = [(10.0, 100.0, 10.0, 110.0)] * 11
+        self.assertIsNone(pr._text_rects_px([(0, 11)], degen, _FakePage(), 1.0))
+
+        # 有同行左右邻框 → 安全桥接覆盖
+        boxes = (
+            [(20.0, 100.0, 32.0, 114.0)]
+            + [(0.0, 0.0, 0.0, 0.0)] * 11
+            + [(140.0, 100.0, 152.0, 114.0)]
+        )
+        rects = pr._text_rects_px([(1, 12)], boxes, _FakePage(), 1.0)
+        self.assertTrue(rects)
+        self.assertLessEqual(rects[0][0], 32)
+        self.assertGreaterEqual(rects[0][2], 140)
+
+    def test_large_image_18mp_accepted_and_box_dismiss_contract(self):
+        """工作台接受 18MP（<=32MP）大图；图片/PDF 单框取消跳过非凭据框但禁止取消凭据框。"""
+        from PIL import Image
+        mgr = make_mgr(self.tmp)
+        big = Path(self.tmp) / "18mp.png"
+        Image.new("RGB", (6000, 3000), "white").save(big)
+        ok, pc, err = fv.probe(str(big), "image", {"files_max_image_mp": 32})
+        self.assertTrue(ok, err)
+        job = mgr.create_job("18mp.png", 100, "image")
+        shutil.copyfile(big, mgr.job_dir(job.id) / "src.bin")
+        mgr.probe_result(job.id, ok, page_count=pc, error=err)
+        scan(mgr, job, mode="manual")
+        self.assertEqual(job.status, fw.ST_REVIEW)
+
+        # 单框取消：非凭据自动框可取消且不涂黑；凭据自动框不可取消，强制涂黑
+        job2 = ready(mgr, "dismiss.png", "image", lambda s: make_png(s, size=(200, 100)))
+        old_ready, old_detect = fv._ocr_ready, fv._detect_boxes
+        try:
+            fv._ocr_ready = lambda: (True, "")
+            fv._detect_boxes = lambda image_bytes, img, sid, deadline=None: [
+                {"rect": [0.05, 0.05, 0.25, 0.25], "label": "PHONE", "text": PHONE},
+                {"rect": [0.55, 0.55, 0.35, 0.35], "label": "API_KEY", "text": "sk-test-key-0000"},
+            ]
+            scan(mgr, job2, mode="auto")
+        finally:
+            fv._ocr_ready, fv._detect_boxes = old_ready, old_detect
+        boxes = fv.preview_boxes(job2, 1)
+        by_lbl = {b.get("label"): b for b in boxes}
+        self.assertTrue(by_lbl["PHONE"]["can_dismiss"])
+        self.assertFalse(by_lbl["API_KEY"]["can_dismiss"])
+        # 即使前端试图传入凭据框 ID，后端也必须拒绝取消
+        apply(mgr, job2, options={"dismissed_boxes": [by_lbl["PHONE"]["id"], by_lbl["API_KEY"]["id"]]})
+        self.assertEqual(job2.status, fw.ST_DONE)
+        with Image.open(io.BytesIO(out_bytes(mgr, job2))) as im:
+            self.assertEqual(im.getpixel((30, 15)), (255, 255, 255))
+            self.assertEqual(im.getpixel((140, 70)), fv._FILL)
+
 
 if __name__ == "__main__":
     unittest.main()
