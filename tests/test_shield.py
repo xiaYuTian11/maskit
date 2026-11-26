@@ -189,6 +189,50 @@ class ShieldEngineTests(unittest.TestCase):
         self.assertIn("a@b.c", masked)
         self.assertNotIn("ab@cd.ef", masked)
 
+    def test_email_rule_does_not_match_systemd_unit_names(self):
+        """systemd 单元实例名不得被当邮箱（issue #52）。
+
+        单元名形如「本地部分@实例.单元后缀」，与邮箱逐字符同构；旧校验只看域尾
+        长度 >= 2，于是 `systemctl list-units` 里带实例的单元被整段换成占位符，
+        agent 无法判断是哪个单元。
+
+        地址用 `at` 拼接而非直写：本机网关会把「完整邮箱形态的字面量」当真实
+        邮箱处理（AGENTS.md §3.9），拼接可保证这里始终是伪造的单元名。
+        """
+        at = "@"
+        units = [
+            "user" + at + "1000.service",
+            "getty" + at + "tty1.service",
+            "systemd-fsck" + at + "dev-disk-by-uuid-1234.service",
+            "sshd" + at + "1.service",
+            "systemd-journald" + at + "audit.socket",
+            "systemd-tmpfiles-clean" + at + "1.timer",
+            "session-2" + at + "3.scope",
+            "run-user-1000" + at + "2.mount",
+            "systemd-rfkill" + at + "4.device",
+            "dbus" + at + "5.slice",
+            "dev-sda1" + at + "6.swap",
+            "org.freedesktop" + at + "8.busname",
+        ]
+        for idx, unit in enumerate(units):
+            sid = f"email-systemd-{idx}"
+            tr._new_session(sid)
+            text = f"{unit} loaded active running"
+            masked = tr.mask(text, sid)
+            self.assertNotIn("{{EMAIL_", masked, f"[{idx}] systemd 单元名不应被当邮箱：{masked}")
+            self.assertEqual(masked, text, f"[{idx}] 单元名必须原样保留")
+            self.assertEqual(tr.restore(masked, sid, final=True), text)
+        # 真邮箱仍照常脱敏（example.com 是 RFC2606 保留域）
+        sid = "email-systemd-real"
+        tr._new_session(sid)
+        self.assertIn("{{EMAIL_", tr.mask("联系 ops" + at + "example.com", sid))
+        # 黑名单边界：近形但**是**真实 TLD 的后缀（`.services`）仍按邮箱脱敏，
+        # 防日后有人把“借位后缀”整批扩大、把真邮箱放出去
+        self.assertIn("{{EMAIL_", tr.mask("联系 ops" + at + "acme.services", sid))
+        # `.target` 也是根区真实 TLD（Target），刻意不收进黑名单：偶发难辨的 target
+        # 单元名换真邮箱泄密是不划算的（理由见 `_EMAIL_NON_TLD_SUFFIXES` 注释）
+        self.assertIn("{{EMAIL_", tr.mask("联系 ops" + at + "acme.target", sid))
+
     def test_landline_rule_matches_with_prefix_zero(self):
         """座机：区号 2-3 位 + 分隔 7-8 位或无分隔 8 位。"""
         sid = "land"

@@ -18,7 +18,7 @@ v0.12.0 上线后，用户在真机上连续收到 `503 {"code":"shield_egress_u
 | `139…5050`（11 位） | `139…50501`（12 位） | `ID_BOUND_R` 要求右侧非字母数字，`1` 不满足 |
 | 同上 | `ID139…5050X` | `ID_BOUND_L` 要求左侧非字母数字，`D` 不满足 |
 | `xia…@users.noreply.github.com` | 同上 + 结尾 `.` | EMAIL 的右边界排除 `.` |
-| `user@<host>.service` | `https://user@<host>.service…` | 同上（`.` 结尾） |
+| `user@<host>.local` | `https://user@<host>.local…` | 同上（`.` 结尾） |
 
 这些是规则**看过并明确决定不遮**的位置 —— 原文子串残留是规则的正常输出，
 不是漏检。把它们判成泄漏，等于让「AI 在正文里讨论过某个号码」这件事本身
@@ -54,7 +54,9 @@ sys.path.insert(0, str(ROOT))
 PHONE = "139" + "9682" + "5050"          # 11 位，合法手机号形态
 PHONE_12 = PHONE + "1"                    # 12 位，PHONE 规则必然拒绝
 PHONE_ID = "ID" + PHONE + "X"             # 字母边界，PHONE 规则必然拒绝
-MAIL = "user" + "@" + "1000.service"
+# 域尾用 `.local` 而不是 `.service`：后者已被 EMAIL 规则判为 systemd 单元名（issue #52），
+# 不再是可被脱敏的邮箱，用它当 needle 会让前置断言空跑。
+MAIL = "user" + "@" + "1000.local"
 MAIL_DOT = MAIL + "."                     # 结尾点，EMAIL 右边界排除 `.`
 CUSTOM_TERM = "Night" + "jar" + "Proj" + "ect"
 
