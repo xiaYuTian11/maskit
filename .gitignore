@@ -82,11 +82,6 @@ debug-*.log
 engine/file-jobs/
 engine/file-jobs.json
 
-# flowspec / AGENTS 的本机备份：只服务当次初始化，误提交会把旧规约带回仓库。
-.flowspec.bak-*/
-AGENTS.md.bak-*
-.gitignore.bak-*
-
 # Node / Frontend
 frontend/node_modules/
 frontend/dist/
@@ -130,7 +125,6 @@ Thumbs.db
 tests/e2e_reports/
 tests/e2e_web_console.py
 
-
 # 本机审计 / 分析产出（非项目资产）：写的是「代码现状 + 当时的判断」，
 # 生命周期比代码短，且会随着代码演进迅速过期，留在仓库里只会误导后来者。
 # 曾于 d4edbf6 被误纳入跟踪，并因文中引用 PEM 头部字面量把 CI 的 version job 打红。
@@ -163,8 +157,3 @@ onboarding-verification.tmp
 
 # OCR 运行时组件构建产物（scripts/build-ocr-runtime.py）
 dist_ocr/
-
-# flowspec:begin
-# FlowSpec 门禁配置、模板与规约沙箱（默认不污染业务代码与 SQL 仓库）
-.flowspec/
-# flowspec:end

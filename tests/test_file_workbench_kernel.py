@@ -1,6 +1,6 @@
 """file-workbench-kernel（2026-11-24）守卫 G741~G752 的 1:1 真测试。
 
-每个用例标题带 `Case G74x`，与规约守卫矩阵一一对应（flowspec 按此核对）。
+每个用例标题带 `Case G74x`，与规约守卫矩阵一一对应。
 内核（状态机/队列/TTL/fail-closed）用 file_workbench.JobManager + stub 载体直测；
 隔离（G745/G746）直测 transparent.file_store_scope；配置/路由（G743/G744/G747/
 G748/G751/G752）经 panel 函数与 test_client 验收。
