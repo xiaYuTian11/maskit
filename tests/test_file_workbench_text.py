@@ -137,6 +137,20 @@ class CarrierTests(unittest.TestCase):
         finally:
             fc._MAX_ENTRY = old
 
+    def test_text_size_cap_fails_closed(self):
+        """纯文本载体上限（2026-11-26）：scan_text 整文件读入 → 解码 → mask_body，
+        一份大日志就能把引擎顶到 OOM，所以超限必须在 probe 阶段 failed（不产成品）。"""
+        p = Path(self.tmp) / "big.log"
+        p.write_bytes(b"x" * (2 * 1024 * 1024))
+        ok, _, err = fc.probe(str(p), "text", cfg={"files_max_text_mb": 1})
+        self.assertFalse(ok)
+        self.assertEqual(err, fw.E_TOO_LARGE)
+        # 阈值刚好覆盖时放行；默认 128 MB 不得误伤普通小文件
+        ok, _, err = fc.probe(str(p), "text", cfg={"files_max_text_mb": 2})
+        self.assertTrue(ok, err)
+        ok, _, err = fc.probe(str(p), "text")
+        self.assertTrue(ok, err)
+
     def test_g763_scan_staged(self):
         """Case G763: scan 产已打码 staged + 注册表，src 未改，跨 run token 落单叶子（FILE_7603）。"""
         mgr = make_mgr(self.tmp)

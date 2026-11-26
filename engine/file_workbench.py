@@ -142,13 +142,15 @@ class FileHit:
 
 
 def name_preview(filename):
-    """历史只存打码文件名：前 2 字 *** .ext（G750：不存真实文件名）。"""
+    """历史只存打码文件名：`***.ext`（G750：不存真实文件名）。
+
+    刻意**不保留**任何真实字符：旧实现留前 2 字（「工资***.xlsx」），
+    对「工资单-2026.docx」这类文件名已足够推断出原文件，与 G750 的声明对不上。
+    扩展名保留是为了让历史列表还能看出载体类型。
+    """
     name = os.path.basename(filename or "")
-    stem, dot, ext = name.rpartition(".")
-    if not dot:
-        stem, ext = name, ""
-    head = stem[:2]
-    return (head + "***" + ("." + ext if ext else "")) if stem else ("***" + ("." + ext if ext else ""))
+    ext = os.path.splitext(name)[1].lstrip(".")
+    return ("***." + ext) if ext else "***"
 
 
 def file_digest(path):
@@ -429,6 +431,11 @@ class JobManager:
         # @guard G749 先清目录后删记录，Windows 句柄占用退避重试。
         with self._lock:
             job = self._jobs.get(job_id)
+        # 未登记的 id 一律当无操作：job_id 来自 URL，旧实现不先校验就清目录，
+        # 在 `..` 这类相对段上会把清理范围扩到 jobs_dir 之外（2026-11-26 实测
+        # DELETE /api/files/jobs/.. 把 DATA_ROOT 整棵删掉：配置、事件库、证书）。
+        if job is None:
+            return False
         self._cleanup_dir(job_id)
         with self._lock:
             self._jobs.pop(job_id, None)
@@ -443,6 +450,14 @@ class JobManager:
     def _cleanup_dir(self, job_id):
         import shutil
         d = self.job_dir(job_id)
+        # 第二道防线：即使调用方绕过了 delete 的存在性校验，清理目标也必须真的是
+        # jobs_dir 的直接子目录。`jobs_dir / ".."` 会解析到上个目录（DATA_ROOT），
+        # rmtree 一下就删到配置/事件库/证书（实测可经 HTTP 命中）。
+        try:
+            if d.resolve().parent != self.jobs_dir.resolve():
+                return
+        except OSError:
+            return
         # Windows 句柄占用退避重试（参考 local-dev-deploy.ps1）。
         for attempt in range(6):
             try:

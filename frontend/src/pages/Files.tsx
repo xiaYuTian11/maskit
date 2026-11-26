@@ -187,6 +187,16 @@ export default function FilesPage() {
       setUploadError(tf('files.tooLarge', { mb: caps.max_size_mb }))
       return
     }
+    // 纯文本载体单独更紧的上限：引擎侧 scan_text 整文件读入，超限必失败
+    const dot = file.name.lastIndexOf('.')
+    const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : ''
+    if ((caps.text_extensions || []).includes(ext)) {
+      const textLimit = (caps.max_text_mb || 128) * 1024 * 1024
+      if (file.size > textLimit) {
+        setUploadError(tf('files.textTooLarge', { mb: caps.max_text_mb }))
+        return
+      }
+    }
     setUploading(true)
     try {
       const res = await createJob(file)

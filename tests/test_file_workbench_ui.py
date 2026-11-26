@@ -43,6 +43,9 @@ class FileWorkbenchUiTests(unittest.TestCase):
         self.assertEqual("FILE_7902", "FILE_7902")
         self.assertIn("file.size > limit", self.page)
         self.assertIn("caps.max_size_mb", self.page)
+        # 纯文本载体单独更紧的上限：前端必须先拦，避免上传 1 GB 日志后必败
+        self.assertIn("caps.text_extensions", self.page)
+        self.assertIn("files.textTooLarge", self.page)
         self.assertIn("const accept = (caps.extensions || [])", self.page)
         self.assertIn("accept={accept}", self.page)
         self.assertIn("FormData", self.api)

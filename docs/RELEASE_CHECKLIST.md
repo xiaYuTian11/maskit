@@ -5,12 +5,12 @@
 ## 代码与依赖
 
 - [ ] 工作区没有运行时文件、诊断包、事件库、`.env` 或凭据。
-- [ ] `python scripts/verify-all.py` 全绿（**18 项**，本地与 CI 同一份清单；分组用 `--list` 查看）。
+- [ ] `python scripts/verify-all.py` 全绿（**24 项**，本地与 CI 同一份清单；分组用 `--list` 查看）。
       `build.ps1` / `release.ps1` 内部已调用它，无需手工重跑，但发版前要确认输出里没有
       `verify-all: FAIL`。
-- [ ] `python scripts/check-version.py`，**7 处**版本号一致（`panel.py` / `tauri.conf.json` /
-      `Cargo.toml` / `package.json` 四个主字段 + `Cargo.lock` / `package-lock.json` /
-      `package-lock` 根字段）。
+- [ ] `python scripts/check-version.py`，**9 处**版本字段一致（`panel.py` / `tauri.conf.json` /
+      `Cargo.toml` / `package.json` 四个主字段 + `Cargo.lock` + `package-lock.json` 的三个字段），
+      另外两项包名（`package.json#name` / `package-lock#name`）也必须一致。
 - [ ] 改动 `.github/workflows` 时额外确认 `python scripts/check-workflows.py` 通过
       （含 `verify-all.py` ↔ `ci.yml` 的门禁漂移比对）。
 

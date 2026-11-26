@@ -143,6 +143,29 @@ class KernelTests(unittest.TestCase):
         mgr.startup_cleanup(now=time.time())
         self.assertEqual(mgr.get_job(j3.id).status, fw.ST_FAILED)
 
+    def test_g749_delete_dotdot_cannot_escape_jobs_dir(self):
+        """Case G749 回归（2026-11-26）：URL 传相对路径时，delete 不得把清理范围
+        扩到 jobs_dir 之外。
+
+        旧实现不先查登记表就清目录，job_id=`..` 让 `jobs_dir/..` 解析到 DATA_ROOT，
+        `rmtree` 把配置、事件库、证书一起抹掉（实测 `DELETE /api/files/jobs/..`
+        回 200 且 DATA_ROOT 消失）。未登记 id 必须是无操作。
+        """
+        sentinel = Path(self.tmp) / "sentinel.txt"
+        sentinel.write_text("keep")
+        mgr = _make_mgr(self.tmp)
+        for bad in ("..", "../..", "", ".", "fj_x/../.."):
+            self.assertFalse(mgr.delete(bad), f"未登记 id {bad!r} 必须回 False")
+            self.assertTrue(sentinel.exists(), f"{bad!r} 不得删到 DATA_ROOT")
+        # 第二道防线：即使直接调 _cleanup_dir，越界目标也不得清
+        mgr._cleanup_dir("..")
+        self.assertTrue(sentinel.exists())
+        # 已知 id 仍按原语义先清目录再删记录
+        job = _ready_job(mgr)
+        d = mgr.job_dir(job.id)
+        self.assertTrue(mgr.delete(job.id))
+        self.assertFalse(d.exists())
+
     def test_g749_done_failed_ttl(self):
         """Case G749: 完成 30 / 失败 10 分钟到期清目录转 expired（FILE_7409）。"""
         mgr = _make_mgr(self.tmp)
@@ -232,7 +255,8 @@ class PanelTests(unittest.TestCase):
         """Case G752: files_* 键进白名单与 normalize_config，默认值固定（FILE_7412）。"""
         p = self.panel
         defaults = p.default_config()
-        expect = {"files_enabled": True, "files_max_size_mb": 1024, "files_max_pages": 1000,
+        expect = {"files_enabled": True, "files_max_size_mb": 1024, "files_max_text_mb": 128,
+                  "files_max_pages": 1000,
                   "files_max_image_mp": 32, "files_max_hits": 20000, "files_queue_max": 8,
                   "files_worker_concurrency": 1, "files_review_ttl_min": 60,
                   "files_clear_pdf_docinfo": True, "files_strip_embedded": True,

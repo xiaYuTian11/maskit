@@ -100,12 +100,31 @@ def _should_mask(fn, ext):
 
 
 # ── 预检（G761/G762）─────────────────────────────────────────────────────────
-def probe(src_path, carrier):
+# 纯文本载体上限：scan_text 是**整文件**读入 + 解码 + mask_body（全程多份副本）。
+# 实测 16 MiB 文本 → 3.3s / 峰值 +139 MB；若沿用 1 GiB 的通用上限，线性外推就是
+# ~3.5 分钟 / ~9 GB 内存 —— 一份大日志就能把引擎顶到 OOM（2026-11-26 实测）。
+# 默认 128 MiB 由 `files_max_text_mb` 配置，仍同时受 `files_max_size_mb` 约束。
+_TEXT_LIMIT_MB_DEFAULT = 128
+
+
+def _probe_text(src_path, cfg=None):
+    """文本载体只做尺寸闸：超限 fail-closed，不产成品（其余校验由载体本身负责）。"""
+    try:
+        size = os.path.getsize(src_path)
+    except OSError:
+        return False, None, E_CARRIER
+    limit_mb = int((cfg or {}).get("files_max_text_mb", _TEXT_LIMIT_MB_DEFAULT))
+    if size > limit_mb * 1024 * 1024:
+        return False, None, fw.E_TOO_LARGE
+    return True, None, ""
+
+
+def probe(src_path, carrier, cfg=None):
     """返回 (ok, page_count, error_code)。不通过一律 failed，绝不原样放行。"""
     # @guard G761 非 zip/加密/宏/旧格式 fail-closed
     # @guard G762 zip 解压防线
     if carrier == "text":
-        return True, None, ""
+        return _probe_text(src_path, cfg)
     if carrier != "ooxml":
         return False, None, E_CARRIER
     try:

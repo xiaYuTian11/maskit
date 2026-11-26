@@ -219,5 +219,20 @@
         "builtin": true
       }
     ]
-  }
+  },
+  "credential_categories": [],
+  "files_clear_pdf_docinfo": true,
+  "files_enabled": true,
+  "files_max_hits": 20000,
+  "files_max_image_mp": 32,
+  "files_max_pages": 1000,
+  "files_max_size_mb": 1024,
+  "files_max_text_mb": 128,
+  "files_path_source": true,
+  "files_queue_max": 8,
+  "files_review_ttl_min": 60,
+  "files_strip_embedded": true,
+  "files_worker_concurrency": 1,
+  "ocr_engine": "auto",
+  "vision_cover_on_scan_fail": false
 }

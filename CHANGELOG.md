@@ -29,6 +29,8 @@
 ### 优化
 - 日志筛选下拉删除了与相邻入口筛选重复的一项。
 - Removed a duplicate entry from the log filter dropdown that overlapped the adjacent source filter.
+- 文件脱敏工作台的纯文本文件超过 128 MB 会在本机直接拒绝，大日志不会再把引擎内存吃满；上限可在高级设置里调整。
+- The file workbench rejects plain-text files above 128 MB locally so a huge log can no longer exhaust engine memory; the cap is configurable in advanced settings.
 
 ## [0.17.0] - 2026-11-19
 

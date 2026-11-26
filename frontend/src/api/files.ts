@@ -6,8 +6,10 @@ export interface FilesCapabilities {
   enabled: boolean
   carriers: string[]
   extensions: string[]
+  text_extensions: string[]
   path_source: boolean
   max_size_mb: number
+  max_text_mb: number
 }
 
 export interface FileJobView {

@@ -4111,6 +4111,7 @@ def default_config():
         # /api/config 更新被 _config_patch_node 当未知键拒绝。默认值与规约一致。
         "files_enabled": True,
         "files_max_size_mb": 1024,
+        "files_max_text_mb": 128,
         "files_max_pages": 1000,
         "files_max_image_mp": 32,
         "files_max_hits": 20000,
@@ -4870,6 +4871,7 @@ def normalize_config(raw, warnings=None, *, validate_controls=True):
         # 文件脱敏工作台（G752）：扁平键归一，默认值与 default_config / 规约一致。
         "files_enabled": bool(raw.get("files_enabled", True)),
         "files_max_size_mb": _files_int(raw.get("files_max_size_mb"), 1024, 1, 10240),
+        "files_max_text_mb": _files_int(raw.get("files_max_text_mb"), 128, 1, 10240),
         "files_max_pages": _files_int(raw.get("files_max_pages"), 1000, 1, 100000),
         "files_max_image_mp": _files_int(raw.get("files_max_image_mp"), 32, 1, 512),
         "files_max_hits": _files_int(raw.get("files_max_hits"), 20000, 1, 200000),
@@ -8444,7 +8446,7 @@ def _probe_job_file(path, carrier):
         import file_visual
         return file_visual.probe(path, carrier, cfg=cfg)
     import file_carriers
-    return file_carriers.probe(path, carrier)
+    return file_carriers.probe(path, carrier, cfg=cfg)
 
 
 def _file_carrier_for(filename):
@@ -8568,8 +8570,10 @@ def api_files_capabilities():
     carriers = sorted(mgr._carriers.keys())
     return jsonify({"ok": True, "enabled": bool(cfg.get("files_enabled", True)),
                     "carriers": carriers, "extensions": sorted(_FILE_EXT_CARRIER.keys()),
+                    "text_extensions": sorted(k for k, v in _FILE_EXT_CARRIER.items() if v == "text"),
                     "path_source": bool(cfg.get("files_path_source", True)) and not REMOTE_MODE,
-                    "max_size_mb": cfg.get("files_max_size_mb", 1024)})
+                    "max_size_mb": cfg.get("files_max_size_mb", 1024),
+                    "max_text_mb": cfg.get("files_max_text_mb", 128)})
 
 
 @app.post("/api/files/jobs")

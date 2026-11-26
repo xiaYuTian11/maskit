@@ -626,6 +626,10 @@ class ConfigTests(CommandBlockTestBase):
         # 必然漂移：改了默认值却忘了改模板，新用户拿到的是旧口径）。
         self.assertEqual(ex["ner_req_budget_s"], dflt["ner_req_budget_s"])
         self.assertEqual(ex["ner_enabled"], dflt["ner_enabled"])
+        # 2026-11-26 补：光对比几个手挑的键盖不住新增默认（文件工作台 10 个 files_*
+        # 就是这样漂的）。这里改成全量键集合断言，新增默认键漏写模板会直接变红。
+        self.assertEqual(sorted(set(dflt) - set(ex)), [],
+                         "config.example.json 缺键：随包模板必须与 default_config() 同源")
 
     def test_user_pattern_without_id_gets_stable_id(self):
         pats = [{"label": "无 id", "regex": "rm -rf /important"}]
