@@ -152,18 +152,28 @@ class FileWorkbenchUiTests(unittest.TestCase):
         code = re.sub(r"//[^\n]*", "", self.page)
         code = re.sub(r"/\*.*?\*/", "", code, flags=re.S)
         self.assertFalse(re.search(r"[\u4e00-\u9fff]", code), "页面出现硬编码中文")
-        # 覆盖/提示走 tf()（上面的 t() 正则扫不到），这里显式要求中英成对
+        # 覆盖/提示/错误码映射走 tf()（上面的 t() 正则扫不到），这里显式要求中英成对
         for key in ("files.cov.fullText", "files.cov.scanned", "files.cov.masked",
                     "files.cov.pages", "files.cov.rasterized", "files.cov.textLayerHits",
                     "files.cov.hiddenHits", "files.cov.skippedOcr",
-                    "files.cov.skippedEmbeddedImages", "files.cov.embeddedPresent",
+                    "files.cov.scannedEmbeddedImages", "files.cov.maskedEmbeddedImages",
+                    "files.cov.coveredEmbeddedImages", "files.cov.skippedEmbeddedImages",
+                    "files.cov.embeddedPresent",
                     "files.cov.embeddedStripped", "files.cov.embeddedKept",
                     "files.cov.attachmentsStripped", "files.cov.attachmentsKept",
                     "files.warn.embeddedKept", "files.warn.attachmentsKept",
+                    "files.warn.embeddedOcrUnavailable", "files.warn.embeddedCovered",
                     "files.warn.imageOcrFailed", "files.warn.pageFullCover",
                     "files.warn.pageOcrFailed", "files.warn.pageKeptUnmasked",
                     "files.warn.pagesKeptUnmasked",
-                    "files.warn.unknown"):
+                    "files.warn.unknown",
+                    "files.autoBoxesCount",
+                    "files.err.state", "files.err.queueFull", "files.err.tooLarge",
+                    "files.err.failClosed", "files.err.officeUnsupported", "files.err.zipBomb",
+                    "files.err.tooManyHits", "files.err.visualUnsupported", "files.err.diskFull",
+                    "files.err.badCoords", "files.err.ocrUnavailable", "files.err.rasterFailed",
+                    "files.err.imageMetaFailed", "files.err.parseFailed",
+                    "files.err.typeUnsupported", "files.err.engineRestart"):
             self.assertIn("'%s':" % key, zh_block, "缺少中文词条 %s" % key)
             self.assertIn("'%s':" % key, en_block, "缺少英文词条 %s" % key)
 
@@ -221,10 +231,33 @@ class PanelRoundtripTests(unittest.TestCase):
         self.assertEqual(caps.status_code, 200)
         body = caps.get_json()
         self.assertTrue(body["enabled"])
+        self.assertIsInstance(body.get("ocr_available"), bool)
         self.assertIn("txt", body["extensions"])
         self.assertIn("tif", body["extensions"])
 
         import io
+        from PIL import Image
+        png_buf = io.BytesIO()
+        Image.new("RGB", (60, 40), "white").save(png_buf, format="PNG")
+        r_img = self.client.post(
+            "/api/files/jobs", headers=self.auth,
+            data={"file": (io.BytesIO(png_buf.getvalue()), "shot.png")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(r_img.status_code, 201)
+        img_id = r_img.get_json()["job"]["id"]
+        try:
+            self.client.post("/api/files/jobs/%s/scan" % img_id, headers=self.auth,
+                             json={"mode": "manual"})
+            self._wait(img_id, {"awaiting_review", "done"})
+            pv = self.client.get("/api/files/jobs/%s/preview?page=1" % img_id, headers=self.auth)
+            self.assertEqual(pv.status_code, 200)
+            pv_body = pv.get_json()
+            self.assertTrue(pv_body["data"].startswith("data:image/jpeg;base64,"))
+            self.assertIsInstance(pv_body.get("boxes"), list)
+        finally:
+            self.client.delete("/api/files/jobs/%s" % img_id, headers=self.auth)
+
         phone = "13800000000"
         data = {"file": (io.BytesIO(("联系人 %s\n" % phone).encode()), "note.txt")}
         r = self.client.post("/api/files/jobs", headers=self.auth, data=data,

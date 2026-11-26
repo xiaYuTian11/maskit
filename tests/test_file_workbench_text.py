@@ -292,12 +292,114 @@ class CarrierTests(unittest.TestCase):
         mgr = make_mgr(self.tmp)
         job = ready_docx(mgr, extra={"word/media/image1.png": b"PNG",
                                      "word/embeddings/o.bin": b"O"})
-        j = scan(mgr, job)
+        mgr.request_scan(job.id, scan_embedded=False)
+        j = mgr.get_job(job.id)
         cov = j.coverage
         self.assertEqual(cov.get("skipped_embedded_images"), 1)
         self.assertEqual(cov.get("embedded_objects_present"), 1)
         apply(mgr, job)
-        self.assertEqual(mgr.get_job(job.id).coverage.get("embedded_objects_stripped"), 1)
+        merged = mgr.get_job(job.id).coverage
+        self.assertEqual(merged.get("skipped_embedded_images"), 1)
+        self.assertEqual(merged.get("embedded_objects_stripped"), 1)
+
+    def test_ooxml_embedded_image_masked_by_default_and_fallbacks(self):
+        """OOXML 默认扫描内嵌图：敏感图打码不回退、干净图保字节一致、矢量/坏图遮盖、无 OCR 跳过告警。"""
+        import io
+        from types import SimpleNamespace
+        from PIL import Image
+        import visual_redactor as vr
+
+        def make_png_bytes(size=(200, 100), color="white"):
+            im = Image.new("RGB", size, color)
+            b = io.BytesIO()
+            im.save(b, format="PNG")
+            return b.getvalue()
+
+        old_ready = fc._ocr_ready
+        old_vr_avail = vr.available
+        old_vr_blocks = vr.detect_blocks
+        old_eng_avail = __import__("ocr_engine").available
+        try:
+            # 0. _ocr_ready 在无本地 OCR 且未显式配置端点时必须回 False（不能被默认 127.0.0.1:8082 误导）
+            ocr_mod = __import__("ocr_engine")
+            ocr_mod.available = lambda: (False, "ocr_runtime_missing")
+            ok_empty, _ = fc._ocr_ready({"ocr_engine": "auto", "ocr_endpoint": ""})
+            self.assertFalse(ok_empty)
+
+            # 1. OCR 可用 + 正文 0 命中 + 内嵌图含敏感信息 → 像素打码且 staged 不回退为原图
+            vr.available = lambda: (True, "")
+            fc._ocr_ready = lambda cfg=None: (True, "")
+            vr.detect_blocks = lambda image_bytes, deadline=None, max_tokens=None: (
+                [SimpleNamespace(text=PHONE, quad=(20, 20, 180, 60), score=0.95)],
+                {"backend": "local"},
+            )
+            clean_entries = {
+                "word/document.xml": CLEAN_XML.encode("utf-8"),
+                "[Content_Types].xml": b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            }
+            j1 = ready_docx(make_mgr(self.tmp), filename="图含敏.docx",
+                            entries=clean_entries,
+                            extra={"word/media/image1.png": make_png_bytes()})
+            mgr1 = j1._mgr
+            before_recent = dict(tr._RECENT_FWD)
+            scan(mgr1, j1)
+            self.assertEqual(j1.status, fw.ST_REVIEW)
+            self.assertEqual(j1.coverage.get("scanned_embedded_images"), 1)
+            self.assertEqual(j1.coverage.get("masked_embedded_images"), 1)
+            self.assertGreaterEqual(j1.coverage.get("embedded_image_hits"), 1)
+            self.assertEqual(j1.coverage.get("skipped_embedded_images"), 0)
+            self.assertEqual(mgr1.hits(j1.id), [])
+            self.assertEqual(tr._RECENT_FWD, before_recent)
+            apply(mgr1, j1)
+            with zipfile.ZipFile(io.BytesIO(out_bytes(mgr1, j1))) as zout:
+                with Image.open(io.BytesIO(zout.read("word/media/image1.png"))) as masked_im:
+                    self.assertEqual(masked_im.getpixel((100, 40)), vr._FILL)
+
+            # 2. OCR 可用 + 正文与图片均干净 → 成品与原包 SHA-256 一致
+            vr.detect_blocks = lambda image_bytes, deadline=None, max_tokens=None: (
+                [SimpleNamespace(text="普通说明文字", quad=(20, 20, 180, 60), score=0.95)],
+                {"backend": "local"},
+            )
+            j2 = ready_docx(mgr1, filename="全干净.docx",
+                            entries=clean_entries,
+                            extra={"word/media/image1.png": make_png_bytes()})
+            src2 = (mgr1.job_dir(j2.id) / "src.bin").read_bytes()
+            scan(mgr1, j2)
+            self.assertEqual(j2.coverage.get("scanned_embedded_images"), 1)
+            self.assertEqual(j2.coverage.get("masked_embedded_images"), 0)
+            apply(mgr1, j2)
+            self.assertEqual(out_bytes(mgr1, j2), src2)
+
+            # 3. 矢量格式(.emf)与损坏 PNG → 替换成中性灰占位图并带告警
+            j3 = ready_docx(mgr1, filename="矢量损坏.docx",
+                            entries=clean_entries,
+                            extra={"word/media/image1.emf": b"FAKEEMF",
+                                   "word/media/image2.png": b"CORRUPT"})
+            scan(mgr1, j3)
+            self.assertEqual(j3.coverage.get("covered_embedded_images"), 2)
+            self.assertIn("embedded_images_covered", j3.warnings)
+            apply(mgr1, j3)
+            with zipfile.ZipFile(io.BytesIO(out_bytes(mgr1, j3))) as zout:
+                for mname in ("word/media/image1.emf", "word/media/image2.png"):
+                    with Image.open(io.BytesIO(zout.read(mname))) as pim:
+                        self.assertEqual(pim.getpixel((10, 10)), vr._FILL)
+
+            # 4. OCR 不可用 → 跳过内嵌图并告警，但正文照常脱敏
+            fc._ocr_ready = lambda cfg=None: (False, "ocr_runtime_missing")
+            j4 = ready_docx(mgr1, filename="无OCR.docx",
+                            extra={"word/media/image1.png": b"RAWIMG"})
+            scan(mgr1, j4)
+            self.assertEqual(j4.status, fw.ST_REVIEW)
+            self.assertGreater(j4.hit_count, 0)
+            self.assertEqual(j4.coverage.get("skipped_embedded_images"), 1)
+            self.assertIn("embedded_images_ocr_unavailable", j4.warnings)
+            apply(mgr1, j4)
+            self.assertEqual(j4.coverage.get("skipped_embedded_images"), 1)
+        finally:
+            fc._ocr_ready = old_ready
+            vr.available = old_vr_avail
+            vr.detect_blocks = old_vr_blocks
+            __import__("ocr_engine").available = old_eng_avail
 
     def test_custom_words_cold_start_and_hot_reload_from_config(self):
         """冷启动与运行期改写 config.json 后，文件脱敏无需预调 reload 即时复用敏感词与白名单且不污染全局表。"""

@@ -554,6 +554,25 @@ finally:
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
 
+    def test_preview_boxes_and_manifest_strip_plaintext(self):
+        """preview_boxes 必须返回脱敏页级检测框且 staged.bin 清单不得残留 orig 原文。"""
+        mgr = make_mgr(self.tmp)
+        job = ready(mgr, "含框.pdf", "pdf", lambda s: make_pdf(s, pages=1, text="Phone " + PHONE))
+        scan(mgr, job, mode="manual")
+        manifest = json.loads((mgr.job_dir(job.id) / "staged.bin").read_text(encoding="utf-8"))
+        for p in manifest.get("pages") or []:
+            for b in p.get("boxes") or []:
+                self.assertNotIn("orig", b)
+        boxes = fv.preview_boxes(job, 1)
+        self.assertTrue(boxes)
+        self.assertEqual(boxes[0]["kind"], "rect")
+        self.assertEqual(boxes[0]["source"], "text_layer")
+        self.assertIn("hit_id", boxes[0])
+        self.assertEqual(len(boxes[0]["rect"]), 4)
+        self.assertNotIn("orig", boxes[0])
+        apply(mgr, job)
+        self.assertEqual(fv.preview_boxes(job, 1), [])
+
 
 if __name__ == "__main__":
     unittest.main()

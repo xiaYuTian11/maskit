@@ -818,21 +818,24 @@ def _scan_fail_result(reason, cover, image_bytes, sid, tr, *, hint_name="", extr
 
 
 def redact_image_bytes(image_bytes, sid, tr, *, deadline=None, hint_name="",
-                       max_tokens=None, allow_cover=False, cover_on_scan_fail=False):
+                       max_tokens=None, allow_cover=False, cover_on_scan_fail=False,
+                       use_cache=True):
     """核心入口。优先查验 LRU 脱敏缓存，未命中则执行完整脱敏管线。"""
     if not image_bytes:
         return {"mode": MODE_BLOCKED, "reason": BLOCK_DECODE, "stats": {},
                 "hit_count": 0, "bytes": b""}
     cache_key = (hashlib.sha256(image_bytes).hexdigest(), bool(allow_cover), bool(cover_on_scan_fail))
-    cached = _get_image_cache(cache_key)
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = _get_image_cache(cache_key)
+        if cached is not None:
+            return cached
 
     res = _redact_image_bytes_uncached(image_bytes, sid, tr, deadline=deadline,
                                        hint_name=hint_name, max_tokens=max_tokens,
                                        allow_cover=allow_cover,
                                        cover_on_scan_fail=cover_on_scan_fail)
-    _put_image_cache(cache_key, res)
+    if use_cache:
+        _put_image_cache(cache_key, res)
     return res
 
 

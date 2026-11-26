@@ -287,14 +287,15 @@ class JobManager:
         job.position = len(self._queue)
         return False, job.position
 
-    def request_scan(self, job_id, mode="auto", scan_embedded=False):
+    def request_scan(self, job_id, mode="auto", scan_embedded=True):
         with self._lock:
             job = self._require(job_id)
             self._check_op(job, "scan")
             job.mode = mode
+            job._scan_embedded = bool(scan_embedded)
             run_now, position = self._admit(job)
         if run_now:
-            self._executor(lambda: self._run_scan(job_id, scan_embedded))
+            self._executor(lambda: self._run_scan(job_id, job._scan_embedded))
         return job
 
     def _run_scan(self, job_id, scan_embedded):
@@ -357,7 +358,8 @@ class JobManager:
                     self._active += 1
                     j.status = ST_SCANNING
                     j.position = None
-                    self._executor(lambda: self._run_scan(nxt, False))
+                    se = bool(getattr(j, "_scan_embedded", True))
+                    self._executor(lambda jid=nxt, _se=se: self._run_scan(jid, _se))
             # 重排剩余排位
             for i, qid in enumerate(self._queue, 1):
                 q = self._jobs.get(qid)
@@ -406,7 +408,10 @@ class JobManager:
                                         redactions or [], options or {})
             with self._lock:
                 job = self._require(job_id)
-                job.coverage = coverage or job.coverage
+                if isinstance(coverage, dict):
+                    merged_cov = dict(job.coverage or {})
+                    merged_cov.update(coverage)
+                    job.coverage = merged_cov
                 if isinstance(coverage, dict) and coverage.get("warnings"):
                     merged = list(job.warnings or [])
                     for w in coverage["warnings"]:

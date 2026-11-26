@@ -4,6 +4,24 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.20.1] - 2026-11-26
+
+### 更新摘要 / Summary
+- Word、PPT、Excel 文件脱敏现在会默认扫描文档里的内嵌图片并自动打码；未安装文字识别组件时会跳过内嵌图片并给出明确提示，不影响正文文字脱敏。
+- PDF 和图片预览现在会直接标出自动识别到的敏感区域，装好文字识别组件后默认开启自动识别，常见失败原因也改为易懂提示。
+- Word, PowerPoint, and Excel scans now redact embedded images by default, or skip them with a clear notice when OCR is not installed.
+- PDF and image previews now highlight detected regions, default to Auto detect when OCR is ready, and show plain failure messages.
+
+### 新增与优化
+- Word / PowerPoint / Excel 文件脱敏工作台默认开启内嵌图片识别与像素打码（支持自定义敏感词与白名单）；不支持或无法定位的图片格式（如矢量图/动图）会替换为灰色遮盖占位图，本机未安装文字识别组件时自动跳过内嵌图片并给出提醒，确保正文文本脱敏正常完成。
+- Word, PowerPoint, and Excel file workbench scans now enable embedded image OCR and redaction by default (respecting custom words and allowlists), replace unsupported or unlocalized media formats (such as vector graphics or animated images) with gray placeholders, and skip embedded images with a clear notice when OCR is unavailable so text masking completes normally.
+- PDF 与图片预览在待确认阶段直接叠加展示自动识别到的敏感区域框（切换「保留原文」时同步隐藏），能力探测发现本机文字识别组件就绪后默认选用「自动识别」，并将常见错误码翻译为可读的双语提示；生成脱敏文件后的覆盖统计保留扫描阶段记录，排队任务的扫描选项也能正确传递。
+- PDF and image previews now overlay auto-detected redaction boxes during review (syncing with keep-original toggles), default visual scans to Auto detect when OCR is ready, translate internal error codes into readable messages, preserve scan coverage stats after build, and retain scan options across queued jobs.
+
+### 修复
+- 修复配置热重载时在代理视觉开关关闭场景下未同步清理图片脱敏缓存、导致修改敏感词或白名单后内嵌图片仍命中旧缓存的问题，并清理待确认视觉清单中的临时原文残留。
+- Fixed config hot-reload not clearing the image redaction cache when proxy vision is off so embedded image scans immediately reflect custom word or allowlist updates, and stripped temporary plaintext fields from staged visual manifests.
+
 ## [0.20.0] - 2026-11-26
 
 ### 更新摘要 / Summary

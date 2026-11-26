@@ -30,6 +30,7 @@ import math
 import os
 import random
 import re
+import sys
 import time
 import secrets
 import uuid
@@ -14695,9 +14696,9 @@ def _maybe_reload(force=False):
     NER_ENABLED = bool(s.get("ner_enabled", False))
     global VISION_OCR_ENABLED
     VISION_OCR_ENABLED = bool(s.get("multimodal_vision", False))
-    # 端点下发给 visual_redactor（它自己不读盘）。只在能力开着时注入：
-    # 关着时连这个模块都不必加载，免得给每个请求多背一次 import。
-    if VISION_OCR_ENABLED:
+    # 端点下发给 visual_redactor（它自己不读盘）。只在能力开着或模块已加载时注入，
+    # 确保敏感词/白名单变更或视觉配置更新时能同步并清理缓存，未加载时仍零开销。
+    if VISION_OCR_ENABLED or "visual_redactor" in sys.modules:
         try:
             import visual_redactor
             visual_redactor.configure(ocr_endpoint=s.get("ocr_endpoint"),

@@ -8573,9 +8573,12 @@ def api_files_capabilities():
     cfg = load_config()
     mgr = _file_manager()
     carriers = sorted(mgr._carriers.keys())
+    import file_carriers
+    ocr_ok, _ = file_carriers._ocr_ready(cfg)
     return jsonify({"ok": True, "enabled": bool(cfg.get("files_enabled", True)),
                     "carriers": carriers, "extensions": sorted(_FILE_EXT_CARRIER.keys()),
                     "text_extensions": sorted(k for k, v in _FILE_EXT_CARRIER.items() if v == "text"),
+                    "ocr_available": bool(ocr_ok),
                     "path_source": bool(cfg.get("files_path_source", True)) and not REMOTE_MODE,
                     "max_size_mb": cfg.get("files_max_size_mb", 1024),
                     "max_text_mb": cfg.get("files_max_text_mb", 128)})
@@ -8687,7 +8690,7 @@ def api_files_scan(job_id):
     try:
         body = request.get_json(silent=True) or {}
         job = _file_manager().request_scan(job_id, body.get("mode", "auto"),
-                                           bool(body.get("scan_embedded", False)))
+                                           bool(body.get("scan_embedded", True)))
         # G742：进队回 201 + position；队满由内核抛 429。
         return jsonify({"ok": True, "job": job.snapshot(), "position": job.position}), 201
     except Exception as e:
@@ -8726,8 +8729,10 @@ def api_files_preview(job_id):
         mgr = _file_manager()
         job = mgr.get_job(job_id)
         import file_visual
-        url = file_visual.preview_data_url(job, request.args.get("page", 1))
-        return jsonify({"ok": True, "data": url})
+        page = request.args.get("page", 1)
+        url = file_visual.preview_data_url(job, page)
+        boxes = file_visual.preview_boxes(job, page)
+        return jsonify({"ok": True, "data": url, "boxes": boxes})
     except Exception as e:
         return _file_err(e)
 

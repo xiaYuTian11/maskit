@@ -451,13 +451,12 @@ def scan_pdf(job, src, staged, opts, cancel):
                   if getattr(h, "_orig", None)}
     for page in page_meta:
         for box in page["boxes"]:
-            orig = box.get("orig")
+            orig = box.pop("orig", None)
             if box.get("source") == "text_layer" and not orig:
                 # 文本层整页覆盖时无法精确归属：标到页内全部文本命中 id
                 continue
             if orig and orig in orig_to_id:
                 box["hit_id"] = orig_to_id[orig]
-                box["orig"] = ""
         page["text_hit_ids"] = [orig_to_id[o] for o in page["text_hit_origs"]
                                 if o in orig_to_id]
         page.pop("text_hit_origs", None)
@@ -784,8 +783,9 @@ def scan_image(job, src, staged, opts, cancel):
     orig_to_id = {getattr(h, "_orig", None): h.hit_id for h in hits
                   if getattr(h, "_orig", None)}
     for box in boxes:
-        if box.get("orig") and box["orig"] in orig_to_id:
-            box["hit_id"] = orig_to_id[box["orig"]]
+        orig = box.pop("orig", None)
+        if orig and orig in orig_to_id:
+            box["hit_id"] = orig_to_id[orig]
     manifest = {"kind": "image", "pages": [{"page": 1, "w": img.size[0], "h": img.size[1],
                                             "preview": "page-0001.jpg", "boxes": boxes,
                                             "text_hit_ids": []}],
@@ -884,6 +884,49 @@ def preview_data_url(job, page=1):
     with open(path, "rb") as f:
         data = f.read()
     return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
+def preview_boxes(job, page=1):
+    """返回指定页的自动检测脱敏框（不含任何明文 `orig`，仅待确认阶段读取）。"""
+    if job.status != fw.ST_REVIEW:
+        return []
+    try:
+        page = int(page)
+    except Exception:
+        return []
+    mgr = getattr(job, "_mgr", None)
+    if mgr is None:
+        return []
+    staged = os.path.join(str(mgr.job_dir(job.id)), "staged.bin")
+    if not os.path.isfile(staged):
+        return []
+    try:
+        with open(staged, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception:
+        return []
+    pages = manifest.get("pages") or []
+    target = next((p for p in pages if int(p.get("page") or 0) == page), None)
+    if target is None:
+        return []
+    out = []
+    for idx, box in enumerate(target.get("boxes") or []):
+        kind = box.get("kind") or "rect"
+        if kind not in ("rect", "full"):
+            continue
+        item = {
+            "id": "auto-%d-%d" % (page, idx),
+            "kind": kind,
+            "source": box.get("source") or "auto",
+        }
+        if kind == "rect" and box.get("rect"):
+            item["rect"] = box["rect"]
+        if box.get("label"):
+            item["label"] = box["label"]
+        if box.get("hit_id"):
+            item["hit_id"] = box["hit_id"]
+        out.append(item)
+    return out
 
 
 def _lazy_preview(job, job_dir, page):

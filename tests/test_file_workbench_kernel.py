@@ -243,6 +243,56 @@ class KernelTests(unittest.TestCase):
         self.assertEqual(entries[-1]["id"], j2.id)
         self.assertEqual(entries[-1]["status"], fw.ST_FAILED)
 
+    def test_queued_scan_preserves_scan_embedded_and_apply_merges_coverage(self):
+        """排队任务出队时须保留各自的 scan_embedded 参数，且 apply 后不能覆盖扫描期 coverage。"""
+        gate = threading.Event()
+        seen_opts = {}
+
+        def gated_scan(job, src, staged, opts, cancel):
+            if job.filename == "first.txt":
+                gate.wait(5)
+            seen_opts[job.filename] = dict(opts)
+            Path(staged).write_bytes(b"staged")
+            return {"hits": [_stub_hit()],
+                    "coverage": {"scanned": 2, "scanned_embedded_images": 1},
+                    "warnings": []}
+
+        def patch_apply(job, staged, out, edits, redactions, options):
+            Path(out).write_bytes(b"masked")
+            return {"embedded_objects_stripped": 3}
+
+        mgr = fw.JobManager(self.tmp, history=fjs.HistoryStore(self.tmp),
+                            concurrency=1, queue_max=4)
+        mgr.register_carrier("text", gated_scan, patch_apply)
+        try:
+            j1 = _ready_job(mgr, filename="first.txt")
+            j2 = _ready_job(mgr, filename="second.txt")
+            mgr.request_scan(j1.id, scan_embedded=False)
+            time.sleep(0.05)
+            mgr.request_scan(j2.id, scan_embedded=True)
+            self.assertEqual(mgr.get_job(j2.id).status, fw.ST_QUEUED)
+            gate.set()
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if mgr.get_job(j2.id).status == fw.ST_REVIEW:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(seen_opts.get("first.txt", {}).get("scan_embedded"), False)
+            self.assertEqual(seen_opts.get("second.txt", {}).get("scan_embedded"), True)
+            mgr.request_apply(j2.id)
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if mgr.get_job(j2.id).status == fw.ST_DONE:
+                    break
+                time.sleep(0.05)
+            cov = mgr.get_job(j2.id).coverage
+            self.assertEqual(cov.get("scanned"), 2)
+            self.assertEqual(cov.get("scanned_embedded_images"), 1)
+            self.assertEqual(cov.get("embedded_objects_stripped"), 3)
+        finally:
+            gate.set()
+            mgr.stop()
+
 
 class IsolationTests(unittest.TestCase):
     def test_g745_zero_pollution(self):

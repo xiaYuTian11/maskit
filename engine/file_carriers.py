@@ -75,7 +75,118 @@ def _part_label(fn):
 
 def _is_media(fn):
     fn = fn.lower()
-    return "/media/" in fn and fn.rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "gif", "bmp", "webp", "emf", "wmf")
+    if "/media/" not in fn or "." not in fn:
+        return False
+    return fn.rsplit(".", 1)[-1] in (
+        "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "emf", "wmf", "svg",
+    )
+
+
+def _sync_visual_cfg(cfg, vr):
+    if not isinstance(cfg, dict):
+        return
+    kw = {}
+    if "ocr_endpoint" in cfg:
+        ep = str(cfg.get("ocr_endpoint") or "").strip()
+        if ep != vr._CONFIGURED_ENDPOINT:
+            kw["ocr_endpoint"] = ep
+    if "ocr_allow_remote" in cfg:
+        ar = bool(cfg.get("ocr_allow_remote", False))
+        if ar != bool(vr._ALLOW_REMOTE):
+            kw["allow_remote"] = ar
+    if "ocr_engine" in cfg:
+        eng = str(cfg.get("ocr_engine") or "auto").strip().lower()
+        eng = eng if eng in ("auto", "local", "http") else "auto"
+        if eng != vr._ENGINE_PREF:
+            kw["engine"] = eng
+    if kw:
+        vr.configure(**kw)
+
+
+def _ocr_ready(cfg=None):
+    """判定工作台视觉/内嵌图 OCR 是否可用。不把默认环回占位地址误当已配置。"""
+    try:
+        import visual_redactor as vr
+    except Exception:
+        return False, "ocr_unavailable"
+    img_mod, _draw = vr._pil()
+    if img_mod is None:
+        return False, vr.BLOCK_PILLOW_MISSING
+    _sync_visual_cfg(cfg, vr)
+    pref = vr.engine_pref()
+    if pref in ("auto", "local"):
+        try:
+            import ocr_engine
+            ok, why = ocr_engine.available()
+            if ok:
+                return True, ""
+            if pref == "local":
+                return False, why or vr.BLOCK_RUNTIME_MISSING
+        except Exception:
+            if pref == "local":
+                return False, vr.BLOCK_RUNTIME_MISSING
+    has_explicit_http = bool(
+        (os.environ.get(vr.OCR_ENDPOINT_ENV) or "").strip()
+        or str((cfg or {}).get("ocr_endpoint") or "").strip()
+        or vr._CONFIGURED_ENDPOINT
+    )
+    if pref == "http" or has_explicit_http:
+        url, why = vr.ocr_endpoint()
+        if url:
+            return True, ""
+        return False, why or vr.BLOCK_UNAVAILABLE
+    return False, vr.BLOCK_RUNTIME_MISSING
+
+
+def _placeholder_image_bytes(image_bytes, fn, vr):
+    """为无法识别、损坏、动图或矢量内嵌媒体生成中性灰占位图（剥离元数据）。"""
+    img_mod, _draw = vr._pil()
+    if img_mod is None:
+        raise fw.FileWorkbenchError(E_SCAN, 422)
+    ext = os.path.splitext(fn or "")[1].lower().lstrip(".")
+    size = (480, 320)
+    fmt = vr._EXT_TO_FORMAT.get(ext, "PNG")
+    if ("." + ext) in vr.RASTER_IMAGE_EXTS:
+        decoded, _why, _meta, _frames = vr._load_image_ex(image_bytes)
+        if decoded is not None:
+            size = (max(1, decoded.size[0]), max(1, decoded.size[1]))
+            fmt = vr._output_format(decoded, fn)
+    placeholder = img_mod.new("RGB", size, vr._FILL)
+    buf = io.BytesIO()
+    placeholder.save(buf, fmt)
+    return buf.getvalue()
+
+
+def _mask_embedded_image(content, fn, job, cfg):
+    """在嵌套任务作用域内脱敏 OOXML 内嵌图，返回 `(bytes, hits, status)`。"""
+    import visual_redactor as vr
+    _sync_visual_cfg(cfg, vr)
+    ext = os.path.splitext(fn or "")[1].lower()
+    if ext and ext not in vr.RASTER_IMAGE_EXTS:
+        return _placeholder_image_bytes(content, fn, vr), 1, vr.ST_COVER_UNSUPPORTED
+
+    sub_id = job.id + ":media"
+    try:
+        with tr.file_store_scope(sub_id):
+            res = vr.redact_image_bytes(
+                content, sub_id, tr, deadline=None, hint_name=fn,
+                allow_cover=True, cover_on_scan_fail=False, use_cache=False,
+            )
+    finally:
+        tr.file_suffix_unregister(sub_id)
+
+    mode = res.get("mode")
+    if mode == vr.MODE_CLEAN:
+        return content, 0, vr.ST_CLEAN
+    if mode == vr.MODE_REDACTED:
+        stats = res.get("stats") or {}
+        status = vr.ST_COVER_UNLOCALIZED if stats.get("covered") else vr.ST_MASKED
+        return res.get("bytes") or content, int(res.get("hit_count") or 1), status
+
+    reason = res.get("reason") or vr.BLOCK_GEOMETRY
+    if reason in (vr.BLOCK_UNAVAILABLE, vr.BLOCK_RUNTIME_MISSING, vr.BLOCK_NOT_LOOPBACK):
+        return content, 0, reason
+    return _placeholder_image_bytes(content, fn, vr), 1, vr.ST_COVER_UNSUPPORTED
 
 
 def _is_embedding(fn):
@@ -255,10 +366,20 @@ def scan_ooxml(job, src, staged, opts, cancel):
     # @guard G763 隔离内产已打码 staged + 注册表，token 落单叶子，scan 不改原文件
     # @guard G772 覆盖声明计数（skipped 内嵌图 / 嵌入对象）
     ext = os.path.splitext(job.filename)[1].lstrip(".").lower()
+    cfg = job_cfg(job)
+    scan_embedded = bool(opts.get("scan_embedded", True))
     locations, counts = {}, {}
     skipped_images = 0
+    scanned_images = 0
+    masked_images = 0
+    covered_images = 0
+    embedded_image_hits = 0
     embedded_present = 0
     masked_entries = 0
+    media_modified = False
+    warnings = []
+    ocr_checked = False
+    ocr_ok = False
     with zipfile.ZipFile(src) as zin, \
             zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
@@ -269,8 +390,35 @@ def scan_ooxml(job, src, staged, opts, cancel):
             if _is_embedding(fn):
                 embedded_present += 1
             elif _is_media(fn):
-                if not opts.get("scan_embedded"):
+                if not scan_embedded:
                     skipped_images += 1
+                else:
+                    if not ocr_checked:
+                        ocr_ok, _ = _ocr_ready(cfg)
+                        ocr_checked = True
+                    if not ocr_ok:
+                        skipped_images += 1
+                        if "embedded_images_ocr_unavailable" not in warnings:
+                            warnings.append("embedded_images_ocr_unavailable")
+                    else:
+                        new_img, img_hits, status = _mask_embedded_image(content, fn, job, cfg)
+                        if status in ("ocr_unavailable", "ocr_runtime_missing", "ocr_not_loopback"):
+                            skipped_images += 1
+                            if "embedded_images_ocr_unavailable" not in warnings:
+                                warnings.append("embedded_images_ocr_unavailable")
+                        else:
+                            scanned_images += 1
+                            if status == "masked":
+                                masked_images += 1
+                                embedded_image_hits += int(img_hits or 0)
+                                content = new_img
+                                media_modified = True
+                            elif status in ("full_cover_unlocalized", "full_cover_unsupported"):
+                                covered_images += 1
+                                content = new_img
+                                media_modified = True
+                                if "embedded_images_covered" not in warnings:
+                                    warnings.append("embedded_images_covered")
             elif _should_mask(fn, ext):
                 try:
                     new = _mask_xml(content, ext, fn, locations, counts, job.id)
@@ -283,20 +431,25 @@ def scan_ooxml(job, src, staged, opts, cancel):
                     raise fw.FileWorkbenchError("office_parse_failed", 422)
             zout.writestr(item, content)
     tables = tr._tables()
-    max_hits = int(job_cfg(job).get("files_max_hits", 20000))
+    max_hits = int(cfg.get("files_max_hits", 20000))
     hits = _build_hits(tables, locations, counts, max_hits)
-    # 零命中：staged 直接用原文件字节（G768 字节一致的前提）。
-    if not hits:
+    # 零命中且内嵌图片未改动：staged 直接用原文件字节（G768 字节一致的前提）。
+    if not hits and not media_modified:
         with open(src, "rb") as f:
             data = f.read()
         with open(staged, "wb") as f:
             f.write(data)
     coverage = {
-        "scanned": masked_entries, "masked": len(hits),
+        "scanned": masked_entries,
+        "masked": len(hits),
+        "scanned_embedded_images": scanned_images,
+        "masked_embedded_images": masked_images,
+        "covered_embedded_images": covered_images,
+        "embedded_image_hits": embedded_image_hits,
         "skipped_embedded_images": skipped_images,
         "embedded_objects_present": embedded_present,
     }
-    return {"hits": hits, "coverage": coverage, "warnings": []}
+    return {"hits": hits, "coverage": coverage, "warnings": warnings}
 
 
 def job_cfg(job):

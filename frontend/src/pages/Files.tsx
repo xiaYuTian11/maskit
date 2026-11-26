@@ -40,12 +40,19 @@ import {
   applyJob, cancelJob, createJob, deleteJob, downloadJob, getCapabilities, getHits,
   getJob, getPreview, listJobs, scanJob,
   type ApplyOptions, type FileHitView, type FileJobView, type FilesCapabilities,
-  type Redaction, type TextEdit,
+  type PreviewBox, type Redaction, type TextEdit,
 } from '@/api/files'
 
 const NON_TERMINAL = new Set(['created', 'probing', 'ready', 'queued', 'scanning', 'applying', 'canceling'])
 const VISUAL = new Set(['pdf', 'image'])
 const TEXT_CARRIERS = new Set(['ooxml', 'text'])
+
+const defaultOptions = (): ApplyOptions => ({
+  clear_docinfo: true,
+  keep_attachments: false,
+  keep_embedded_objects: false,
+  keep_icc: false,
+})
 
 function statusTone(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (status === 'done') return 'default'
@@ -55,6 +62,38 @@ function statusTone(status: string): 'default' | 'secondary' | 'destructive' | '
 }
 
 type TranslateF = ReturnType<typeof useI18n>['tf']
+
+const ERROR_KEYS: Record<string, string> = {
+  FILE_7401: 'files.err.state',
+  FILE_7402: 'files.err.queueFull',
+  FILE_7403: 'files.err.tooLarge',
+  FILE_7410: 'files.err.failClosed',
+  FILE_7601: 'files.err.officeUnsupported',
+  FILE_7602: 'files.err.zipBomb',
+  FILE_7610: 'files.err.tooManyHits',
+  FILE_7801: 'files.err.visualUnsupported',
+  FILE_7802: 'files.err.diskFull',
+  FILE_7803: 'files.err.badCoords',
+  FILE_7804: 'files.err.ocrUnavailable',
+  FILE_7808: 'files.err.rasterFailed',
+  FILE_7811: 'files.err.imageMetaFailed',
+  office_parse_failed: 'files.err.parseFailed',
+  pdf_parse_failed: 'files.err.parseFailed',
+  file_type_unsupported: 'files.err.typeUnsupported',
+  engine_restart: 'files.err.engineRestart',
+}
+
+function describeError(code: string, tf: TranslateF): string {
+  const key = ERROR_KEYS[code]
+  if (key) return tf(key)
+  return tf('files.error', { code })
+}
+
+function describeRequestError(err: unknown, tf: TranslateF): string {
+  const code = (err as { code?: string })?.code
+  if (code && ERROR_KEYS[code]) return describeError(code, tf)
+  return String((err as Error)?.message || err)
+}
 
 // 引擎的覆盖计数是按载体各报一份的字典（text: scanned/masked，pdf: rendered_pages/…）；
 // 直接 JSON.stringify 给用户看等于把内部字段名糊在界面上。这里只保留非零项并翻成人话，
@@ -84,6 +123,9 @@ function describeCoverage(
   add('text_layer_hits', 'files.cov.textLayerHits')
   add('hidden_hits', 'files.cov.hiddenHits')
   add('skipped_ocr_pages', 'files.cov.skippedOcr')
+  add('scanned_embedded_images', 'files.cov.scannedEmbeddedImages')
+  add('masked_embedded_images', 'files.cov.maskedEmbeddedImages')
+  add('covered_embedded_images', 'files.cov.coveredEmbeddedImages')
   add('skipped_embedded_images', 'files.cov.skippedEmbeddedImages')
   add('embedded_objects_present', 'files.cov.embeddedPresent')
   add('embedded_objects_stripped', 'files.cov.embeddedStripped')
@@ -101,6 +143,8 @@ function describeWarnings(warnings: string[], tf: TranslateF): string[] {
   return (warnings || []).map((code) => {
     if (code === 'embedded_objects_kept_unscanned') return tf('files.warn.embeddedKept')
     if (code === 'attachments_kept_unscanned') return tf('files.warn.attachmentsKept')
+    if (code === 'embedded_images_ocr_unavailable') return tf('files.warn.embeddedOcrUnavailable')
+    if (code === 'embedded_images_covered') return tf('files.warn.embeddedCovered')
     if (code === 'image_ocr_failed_full_cover') return tf('files.warn.imageOcrFailed')
     if (code === 'page_kept_with_unmasked_hits') return tf('files.warn.pagesKeptUnmasked')
     const m = PAGE_WARN_RX.exec(code)
@@ -129,14 +173,14 @@ export default function FilesPage() {
   const [redactions, setRedactions] = useState<Redaction[]>([])
   const [page, setPage] = useState(1)
   const [preview, setPreview] = useState('')
+  const [autoBoxes, setAutoBoxes] = useState<PreviewBox[]>([])
   const [previewError, setPreviewError] = useState('')
   const [previewBusy, setPreviewBusy] = useState(false)
   const [previewTick, setPreviewTick] = useState(0)
   const [tool, setTool] = useState<'rect' | 'brush'>('rect')
   const [mode, setMode] = useState<'manual' | 'auto'>('manual')
-  const [options, setOptions] = useState<ApplyOptions>({
-    clear_docinfo: true, keep_attachments: false, keep_icc: false,
-  })
+  const modeTouchedRef = useRef(false)
+  const [options, setOptions] = useState<ApplyOptions>(defaultOptions)
   const [notice, setNotice] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -154,6 +198,9 @@ export default function FilesPage() {
       .then((res) => {
         setCaps(res)
         setCapsError('')
+        if (!modeTouchedRef.current) {
+          setMode(res.ocr_available ? 'auto' : 'manual')
+        }
       })
       .catch((e: unknown) => {
         setCaps(null)
@@ -215,27 +262,34 @@ export default function FilesPage() {
   useEffect(() => {
     if (!jobId || !jobCarrier || !VISUAL.has(jobCarrier) || jobStatus !== 'awaiting_review') {
       setPreview('')
+      setAutoBoxes([])
       return
     }
     if (!jobPages || page < 1 || page > Number(jobPages)) return
     setPreviewBusy(true)
     setPreviewError('')
     getPreview(jobId, page)
-      .then((res) => setPreview(res.data))
+      .then((res) => {
+        setPreview(res.data)
+        setAutoBoxes(res.boxes || [])
+      })
       .catch((e: unknown) => {
         setPreview('')
-        setPreviewError(String((e as Error)?.message || e))
+        setAutoBoxes([])
+        setPreviewError(describeRequestError(e, tf))
       })
       .finally(() => setPreviewBusy(false))
-  }, [jobId, jobStatus, jobCarrier, jobPages, page, previewTick])
+  }, [jobId, jobStatus, jobCarrier, jobPages, page, previewTick, tf])
 
   const select = (job: FileJobView) => {
     setSelected(job)
     setPage(1)
     setRedactions([])
+    setOptions(defaultOptions())
     setNotice('')
     setHits([])
     setPreview('')
+    setAutoBoxes([])
   }
 
   const upload = async (file: File) => {
@@ -264,7 +318,7 @@ export default function FilesPage() {
       select(res.job)
       refreshJobs()
     } catch (e: unknown) {
-      setUploadError(String((e as Error)?.message || e))
+      setUploadError(describeRequestError(e, tf))
     } finally {
       setUploading(false)
     }
@@ -288,7 +342,7 @@ export default function FilesPage() {
       setSelected(res.job)
       refreshJobs()
     } catch (e: unknown) {
-      setNotice(String((e as Error)?.message || e))
+      setNotice(describeRequestError(e, tf))
     } finally {
       setBusy(false)
     }
@@ -319,7 +373,7 @@ export default function FilesPage() {
       setSelected(res.job)
       refreshJobs()
     } catch (e: unknown) {
-      setNotice(String((e as Error)?.message || e))
+      setNotice(describeRequestError(e, tf))
     } finally {
       setBusy(false)
     }
@@ -333,7 +387,7 @@ export default function FilesPage() {
       setSelected(res.job)
       refreshJobs()
     } catch (e: unknown) {
-      setNotice(String((e as Error)?.message || e))
+      setNotice(describeRequestError(e, tf))
     }
   }
 
@@ -345,7 +399,7 @@ export default function FilesPage() {
       setSelected(null)
       setJobs((prev) => prev.filter((j) => j.id !== selected.id))
     } catch (e: unknown) {
-      setNotice(String((e as Error)?.message || e))
+      setNotice(describeRequestError(e, tf))
     }
   }
 
@@ -360,7 +414,7 @@ export default function FilesPage() {
         : `${selected.filename}-${suffix}`
       await downloadJob(selected.id, name)
     } catch (e: unknown) {
-      setNotice(String((e as Error)?.message || e))
+      setNotice(describeRequestError(e, tf))
     }
   }
 
@@ -377,6 +431,14 @@ export default function FilesPage() {
     () => redactions.filter((r) => r.page === page),
     [redactions, page],
   )
+  const visibleAutoBoxes = useMemo(() => {
+    if (!selected || !autoBoxes.length) return []
+    return autoBoxes.filter((b) => {
+      if (!b.hit_id || !keeps[b.hit_id]) return true
+      if (selected.carrier === 'pdf') return b.source !== 'text_layer'
+      return false
+    })
+  }, [autoBoxes, keeps, selected])
   const hasFull = pageAreas.some((r) => r.kind === 'full')
 
   const onDown = (e: MouseEvent<SVGSVGElement>) => {
@@ -432,10 +494,17 @@ export default function FilesPage() {
 
   const canScan = selected?.status === 'ready'
   const canApply = selected?.status === 'awaiting_review'
+  const showApplyOptions = canApply && (
+    selected?.carrier === 'pdf'
+    || selected?.carrier === 'image'
+    || (selected?.carrier === 'ooxml' && Number(selected.coverage?.embedded_objects_present || 0) > 0)
+  )
   const canDownload = selected?.status === 'done'
   const canCancel = selected ? ['queued', 'scanning', 'applying'].includes(selected.status) : false
   const coverageLines = selected ? describeCoverage(selected.coverage || {}, selected.carrier, tf) : []
   const warningLines = selected ? describeWarnings(selected.warnings || [], tf) : []
+  const embeddedHandled = Number(selected?.coverage?.masked_embedded_images || 0) > 0
+    || Number(selected?.coverage?.covered_embedded_images || 0) > 0
 
   if (loading) {
     // @guard G809 加载态有骨架/文案，不渲染空白表格
@@ -558,7 +627,7 @@ export default function FilesPage() {
                   </CardHeader>
                   <CardContent className="space-y-3">
                     {selected.status === 'failed' && selected.error ? (
-                      <p className="text-[12px] text-destructive">{tf('files.error', { code: selected.error })}</p>
+                      <p className="text-[12px] text-destructive">{describeError(selected.error, tf)}</p>
                     ) : null}
                     {notice ? <p className="text-[12px] text-destructive">{notice}</p> : null}
                     <div className="flex flex-wrap items-center gap-2">
@@ -569,7 +638,13 @@ export default function FilesPage() {
                       ) : null}
                       {VISUAL.has(selected.carrier) && canScan ? (
                         <>
-                          <Select value={mode} onValueChange={(v) => setMode(v as 'manual' | 'auto')}>
+                          <Select
+                            value={mode}
+                            onValueChange={(v) => {
+                              modeTouchedRef.current = true
+                              setMode(v as 'manual' | 'auto')
+                            }}
+                          >
                             <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
                             <SelectContent>
                               <SelectItem value="manual">{t('files.scanManual')}</SelectItem>
@@ -600,7 +675,7 @@ export default function FilesPage() {
                         <Trash2 className="mr-1.5 h-4 w-4" /> {t('files.delete')}
                       </Button>
                     </div>
-                    {canApply ? (
+                    {showApplyOptions ? (
                       <div className="flex flex-wrap items-center gap-4 rounded-lg bg-muted/40 px-3 py-2 text-[12px]">
                         {selected.carrier === 'pdf' ? (
                           <label className="flex items-center gap-2">
@@ -614,6 +689,13 @@ export default function FilesPage() {
                             <Switch checked={!!options.keep_attachments}
                               onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_attachments: v }))} />
                             {t('files.keepAttachments')}
+                          </label>
+                        ) : null}
+                        {selected.carrier === 'ooxml' && Number(selected.coverage?.embedded_objects_present || 0) > 0 ? (
+                          <label className="flex items-center gap-2">
+                            <Switch checked={!!options.keep_embedded_objects}
+                              onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_embedded_objects: v }))} />
+                            {t('files.keepEmbeddedObjects')}
                           </label>
                         ) : null}
                         {selected.carrier === 'image' ? (
@@ -670,46 +752,70 @@ export default function FilesPage() {
                           </Button>
                         </div>
                       ) : preview ? (
-                        <div className="relative overflow-hidden rounded-lg border border-border/60">
-                          {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
-                          <img src={preview} alt="" className="block w-full select-none" draggable={false} />
-                          <svg
-                            className="absolute inset-0 h-full w-full cursor-crosshair"
-                            viewBox="0 0 1 1"
-                            preserveAspectRatio="none"
-                            onMouseDown={onDown}
-                            onMouseMove={onMove}
-                            onMouseUp={onUp}
-                            onMouseLeave={onUp}
-                          >
-                            {[...pageAreas, ...(draft ? [draft] : [])].map((r) => {
-                              if (r.kind === 'full') {
-                                return <rect key={r.id} x={0} y={0} width={1} height={1} fill="rgba(15,23,42,0.55)" />
-                              }
-                              if (r.kind === 'path') {
+                        <>
+                          {visibleAutoBoxes.length > 0 ? (
+                            <p className="text-[11px] text-muted-foreground">
+                              {tf('files.autoBoxesCount', { n: visibleAutoBoxes.length })}
+                            </p>
+                          ) : null}
+                          <div className="relative overflow-hidden rounded-lg border border-border/60">
+                            {/* eslint-disable-next-line jsx-a11y/img-redundant-alt */}
+                            <img src={preview} alt="" className="block w-full select-none" draggable={false} />
+                            <svg
+                              className="absolute inset-0 h-full w-full cursor-crosshair"
+                              viewBox="0 0 1 1"
+                              preserveAspectRatio="none"
+                              onMouseDown={onDown}
+                              onMouseMove={onMove}
+                              onMouseUp={onUp}
+                              onMouseLeave={onUp}
+                            >
+                              {visibleAutoBoxes.map((b) => {
+                                if (b.kind === 'full') {
+                                  return <rect key={b.id} x={0} y={0} width={1} height={1} fill="rgba(245,158,11,0.22)" />
+                                }
                                 return (
-                                  <polyline
-                                    key={r.id}
-                                    points={(r.points || []).map((p) => `${p[0]},${p[1]}`).join(' ')}
-                                    stroke="rgba(15,23,42,0.75)"
-                                    strokeWidth={r.width || 0.006}
-                                    fill="none"
+                                  <rect
+                                    key={b.id}
+                                    x={b.rect?.[0] || 0}
+                                    y={b.rect?.[1] || 0}
+                                    width={b.rect?.[2] || 0}
+                                    height={b.rect?.[3] || 0}
+                                    fill="rgba(239,68,68,0.26)"
+                                    stroke="rgba(220,38,38,0.85)"
+                                    strokeWidth={0.0025}
                                   />
                                 )
-                              }
-                              return (
-                                <rect
-                                  key={r.id}
-                                  x={r.rect?.[0] || 0}
-                                  y={r.rect?.[1] || 0}
-                                  width={r.rect?.[2] || 0}
-                                  height={r.rect?.[3] || 0}
-                                  fill="rgba(15,23,42,0.65)"
-                                />
-                              )
-                            })}
-                          </svg>
-                        </div>
+                              })}
+                              {[...pageAreas, ...(draft ? [draft] : [])].map((r) => {
+                                if (r.kind === 'full') {
+                                  return <rect key={r.id} x={0} y={0} width={1} height={1} fill="rgba(15,23,42,0.55)" />
+                                }
+                                if (r.kind === 'path') {
+                                  return (
+                                    <polyline
+                                      key={r.id}
+                                      points={(r.points || []).map((p) => `${p[0]},${p[1]}`).join(' ')}
+                                      stroke="rgba(15,23,42,0.75)"
+                                      strokeWidth={r.width || 0.006}
+                                      fill="none"
+                                    />
+                                  )
+                                }
+                                return (
+                                  <rect
+                                    key={r.id}
+                                    x={r.rect?.[0] || 0}
+                                    y={r.rect?.[1] || 0}
+                                    width={r.rect?.[2] || 0}
+                                    height={r.rect?.[3] || 0}
+                                    fill="rgba(15,23,42,0.65)"
+                                  />
+                                )
+                              })}
+                            </svg>
+                          </div>
+                        </>
                       ) : (
                         <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
                           {t('files.noPreview')}
@@ -743,7 +849,9 @@ export default function FilesPage() {
                       ) : hitsError ? (
                         <div className="text-[12px] text-destructive">{hitsError}</div>
                       ) : hits.length === 0 ? (
-                        <div className="text-[13px] text-muted-foreground">{t('files.noHits')}</div>
+                        <div className="text-[13px] text-muted-foreground">
+                          {embeddedHandled ? t('files.noTextHitsEmbeddedMasked') : t('files.noHits')}
+                        </div>
                       ) : (
                         <div className="space-y-2">
                           {hits.map((hit) => (

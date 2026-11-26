@@ -7,6 +7,7 @@ export interface FilesCapabilities {
   carriers: string[]
   extensions: string[]
   text_extensions: string[]
+  ocr_available?: boolean
   path_source: boolean
   max_size_mb: number
   max_text_mb: number
@@ -61,6 +62,15 @@ export interface Redaction {
   label?: string
 }
 
+export interface PreviewBox {
+  id: string
+  kind: 'rect' | 'full'
+  rect?: [number, number, number, number]
+  source: string
+  label?: string
+  hit_id?: string
+}
+
 export interface ApplyOptions {
   clear_docinfo?: boolean
   keep_embedded_objects?: boolean
@@ -100,7 +110,7 @@ export function getHits(id: string) {
 }
 
 export function getPreview(id: string, page: number) {
-  return shieldFetch<Json<{ data: string }>>(`/api/files/jobs/${id}/preview?page=${page}`)
+  return shieldFetch<Json<{ data: string; boxes?: PreviewBox[] }>>(`/api/files/jobs/${id}/preview?page=${page}`)
 }
 
 export function applyJob(
