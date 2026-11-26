@@ -11,27 +11,26 @@
 再加上外层 `_watchdog` / `_restart_proxy_locked` 在 `start_proxy()` 返回 False 后又写一份，
 于是 5 次失败产出 10 份同样空的文件。
 
-## 为什么是源码断言
+## 静态时序与隔离行为回归
 
-落盘是纯 IO，真起 mitmdump 失败的成本与不确定性都太高（要真的占住端口或让二进制崩），
-而这些守卫错位的形态是「文件里少一段」，只有对着真实现场才知道。这里钉的是代码结构：
-采集时机、写入模式、去重、fail-safe。
+源码断言钉住采集时机；行为测试只编译原始诊断函数及其常量，在临时目录实际落盘。
+不导入完整 panel，不读用户配置或事件库，不启动进程，不扫描真实端口与命令行。
+同一次启动失败按代次复用现场，不同启动尝试不能因时间接近而合并。
 
 错误码是本仓既定格式：`<MODULE>_<4位>`，仅作台账标识（诊断落盘不产生 HTTP 响应）。
 """
 
+import ast
+import datetime
 import re
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PANEL_PY = ROOT / "engine" / "panel.py"
-# `import panel` 需要 engine/ 在 sys.path（与 tests/test_attribution.py 同法）
-sys.path.insert(0, str(ROOT / "engine"))
-sys.path.insert(0, str(ROOT))
 
 
 def _read(path):
@@ -130,25 +129,40 @@ class CrashDumpBehaviorTests(unittest.TestCase):
     """真跑一次落盘 —— 源码断言只能证明「代码里有这两行」，证明不了文件里多了那段。"""
 
     def setUp(self):
-        import panel
-
-        self.panel = panel
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self._patches = [
-            mock.patch.object(panel, "DATA_ROOT", self.root),
-            mock.patch.object(panel, "_listening_port_pids", lambda *a, **k: {}),
-            mock.patch.object(panel, "_emit_log", lambda *a, **k: None),
+        self.clock = mock.Mock()
+        self.clock.time.return_value = 1000.0
+        self.panel = ModuleType("panel_crash_test")
+        self.panel.__dict__.update(
+            DATA_ROOT=self.root,
+            PROXY_PORT=18899,
+            state={"generation": 1},
+            proc={},
+            time=self.clock,
+            _listening_port_pids=mock.Mock(return_value={}),
+            _run_console=mock.Mock(side_effect=AssertionError("真实命令行采集不得执行")),
+            _is_mitmdump_pid=mock.Mock(return_value=False),
+            _is_shield_panel_pid=mock.Mock(return_value=False),
+            _emit_log=mock.Mock(),
+        )
+        names = {"_CRASH_DUMP_DEDUP_S", "_LAST_CRASH_DUMP"}
+        functions = {"_dump_crash_context", "_append_crash_tail"}
+        tree = ast.parse(_read(PANEL_PY), filename=str(PANEL_PY))
+        nodes = [
+            node for node in tree.body
+            if (isinstance(node, ast.FunctionDef) and node.name in functions)
+            or (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id in names for target in node.targets))
         ]
-        for p in self._patches:
-            p.start()
-        panel._LAST_CRASH_DUMP.update(ts=0.0, reason="", path=None)
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        self._tmp.cleanup()
-        self.panel._LAST_CRASH_DUMP.update(ts=0.0, reason="", path=None)
+        self.assertEqual(len(nodes), len(names) + len(functions), "必须加载原始函数与全部诊断常量")
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(PANEL_PY), "exec"), self.panel.__dict__)
+        real_datetime = datetime.datetime
+        patcher = mock.patch("datetime.datetime", wraps=real_datetime)
+        fake_datetime = patcher.start()
+        self.addCleanup(patcher.stop)
+        fake_datetime.now.side_effect = lambda: real_datetime.fromtimestamp(self.clock.time())
 
     def test_dump_then_append_writes_tail_into_same_file(self):
         path = self.panel._dump_crash_context("selftest")
@@ -177,6 +191,105 @@ class CrashDumpBehaviorTests(unittest.TestCase):
         self.panel._append_crash_tail(path, "")
         self.panel._append_crash_tail(None, "x")
         self.assertEqual(Path(path).read_text(encoding="utf-8"), before, "空输出不得留下空标题段")
+
+
+    def test_nearby_start_attempts_keep_separate_context_and_output(self):
+        first = self.panel._dump_crash_context("startfail")
+        self.panel._append_crash_tail(first, "first startup output")
+        self.panel.state["generation"] = 2
+        self.clock.time.return_value += 2.0
+        second = self.panel._dump_crash_context("startfail")
+        self.panel._append_crash_tail(second, "second startup output")
+        self.assertNotEqual(first, second, "不同启动尝试不得复用上一代现场")
+        first_text = Path(first).read_text(encoding="utf-8")
+        second_text = Path(second).read_text(encoding="utf-8")
+        self.assertIn("generation=1", first_text)
+        self.assertIn("first startup output", first_text)
+        self.assertNotIn("second startup output", first_text)
+        self.assertIn("generation=2", second_text)
+        self.assertIn("second startup output", second_text)
+        self.assertNotIn("first startup output", second_text)
+
+    def test_same_timestamp_start_attempts_do_not_overwrite(self):
+        first = self.panel._dump_crash_context("startfail")
+        self.panel._append_crash_tail(first, "first startup output")
+        self.panel.state["generation"] = 2
+        second = self.panel._dump_crash_context("startfail")
+        self.assertNotEqual(first, second, "同一时间戳的不同代次也必须保留独立文件")
+        self.assertIn("first startup output", Path(first).read_text(encoding="utf-8"))
+        self.assertEqual(len(list((self.root / "crash-dumps").glob("crash-*.txt"))), 2)
+
+    def test_same_start_attempt_reuses_context_after_window(self):
+        first = self.panel._dump_crash_context("startfail")
+        self.clock.time.return_value += self.panel._CRASH_DUMP_DEDUP_S + 20.0
+        second = self.panel._dump_crash_context("startfail")
+        self.assertEqual(first, second, "等待 kill 和读取输出不能把同一次失败拆成两份")
+        self.panel._listening_port_pids.assert_called_once()
+
+    def test_same_start_attempt_reuses_slow_collection(self):
+        def slow_scan(*args, **kwargs):
+            self.clock.time.return_value += 8.0
+            return {}
+
+        self.panel._listening_port_pids.side_effect = slow_scan
+        first = self.panel._dump_crash_context("startfail")
+        self.clock.time.return_value += 10.0
+        self.assertEqual(first, self.panel._dump_crash_context("startfail"))
+        self.panel._listening_port_pids.assert_called_once()
+
+    def test_other_reason_window_starts_after_slow_collection(self):
+        def slow_scan(*args, **kwargs):
+            self.clock.time.return_value += 8.0
+            return {}
+
+        self.panel._listening_port_pids.side_effect = slow_scan
+        first = self.panel._dump_crash_context("crash")
+        self.assertEqual(self.panel._LAST_CRASH_DUMP["ts"], 1008.0)
+        self.clock.time.return_value += 3.0
+        self.assertEqual(first, self.panel._dump_crash_context("crash"))
+        self.panel._listening_port_pids.assert_called_once()
+
+    def test_other_reasons_keep_the_bounded_window(self):
+        first = self.panel._dump_crash_context("crash")
+        self.clock.time.return_value += self.panel._CRASH_DUMP_DEDUP_S
+        self.assertEqual(first, self.panel._dump_crash_context("crash"))
+        self.clock.time.return_value += 0.1
+        self.assertNotEqual(first, self.panel._dump_crash_context("crash"))
+
+    def test_other_reasons_do_not_merge_across_generations(self):
+        first = self.panel._dump_crash_context("crash")
+        self.panel.state["generation"] = 2
+        self.assertNotEqual(first, self.panel._dump_crash_context("crash"))
+
+    def test_dump_write_failure_does_not_cache_a_missing_file(self):
+        before = dict(self.panel._LAST_CRASH_DUMP)
+        with mock.patch.object(Path, "write_text", side_effect=OSError("synthetic write failure")):
+            self.assertIsNone(self.panel._dump_crash_context("startfail"))
+        self.assertEqual(self.panel._LAST_CRASH_DUMP, before)
+        path = self.panel._dump_crash_context("startfail")
+        self.assertTrue(path and Path(path).is_file())
+
+    def test_append_write_failure_does_not_escape(self):
+        path = self.panel._dump_crash_context("startfail")
+        before = Path(path).read_text(encoding="utf-8")
+        with mock.patch.object(self.panel, "open", create=True, side_effect=OSError("synthetic append failure")):
+            self.panel._append_crash_tail(path, "unwritten output")
+        self.assertEqual(Path(path).read_text(encoding="utf-8"), before)
+
+    def test_clock_failure_does_not_escape_the_diagnostic_path(self):
+        self.clock.time.side_effect = OSError("synthetic clock failure")
+        self.assertIsNone(self.panel._dump_crash_context("startfail"))
+
+    def test_retains_only_the_ten_newest_context_files(self):
+        paths = []
+        for generation in range(1, 13):
+            self.panel.state["generation"] = generation
+            self.clock.time.return_value += 1.0
+            paths.append(self.panel._dump_crash_context("startfail"))
+        self.assertTrue(all(paths), "每次独立失败都应写入现场")
+        self.assertEqual(len(list((self.root / "crash-dumps").glob("crash-*.txt"))), 10)
+        self.assertTrue(all(not Path(path).exists() for path in paths[:2]))
+        self.assertTrue(all(Path(path).is_file() for path in paths[2:]))
 
 
 if __name__ == "__main__":

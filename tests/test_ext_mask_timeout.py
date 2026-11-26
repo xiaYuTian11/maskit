@@ -7,11 +7,11 @@
 改造前文本链路正好是反的：页桥 6s < SW 15s。第 6 秒页面放弃并发起重试，于是引擎侧同时
 有两个同负载请求争抢 `_MASK_POOL` 的全局锁；两次都超时后按直通处理，原文上行且回复不还原。
 
-## 为什么是源码断言
+## 静态契约与行为回归
 
-扩展是纯 JS，没有可挂进 `verify-all.py` 的运行时测试框架（`check-extension.mjs` 只做静态
-一致性检查）。这些常量关系与分支顺序出错的形态是「页面上看不出来，只是偶尔变成明文」，
-只能靠源码契约钉住。理由与 `tests/test_event_flagged_explain.py` 同源。
+这里钉住常量关系与分支顺序；`scripts/check-extension.mjs` 另用原始 JS 函数和模拟引擎
+验证超时、重试与阻断行为，不依赖真实浏览器或用户配置。短文本的内层预算必须保持后台
+原有的 15s，不能为了「外 > 内」把它压成 3s，导致本可完成的调用提前直通。
 """
 
 import re
@@ -66,6 +66,21 @@ class G711OuterGreaterThanInnerTests(unittest.TestCase):
             r"bridge\.call\(\s*'mask'[^)]*pageMs\s*\)",
             "bridge.call 的第二个参数（页桥超时）必须传 pageMs（EXT_7101）",
         )
+
+
+class ShortTextTimeoutBudgetTests(unittest.TestCase):
+    def test_short_text_keeps_the_background_default_budget(self):
+        main = _read(BRIDGE_MAIN)
+        inner_ms = _const(main, "MASK_TIMEOUT_MS") - _const(main, "SW_MARGIN_MS")
+        self.assertEqual(
+            inner_ms,
+            _const(_read(BACKGROUND), "CALL_TIMEOUT_MS"),
+            "短文本必须保留后台默认预算，不能提前中止本可完成的脱敏",
+        )
+
+    def test_short_text_still_has_a_smaller_budget_than_large_text(self):
+        main = _read(BRIDGE_MAIN)
+        self.assertLess(_const(main, "MASK_TIMEOUT_MS"), _const(main, "MASK_TIMEOUT_MS_LARGE"))
 
 
 class G712LargeTierCoversEngineBudgetTests(unittest.TestCase):

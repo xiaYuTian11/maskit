@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * 浏览器扩展（extension/）静态门禁。
+ * 浏览器扩展（extension/）静态门禁与隔离行为回归。
  *
  * **为什么需要**：扩展侧此前**没有任何自动化门禁**——单测（python）碰不到它，
  * `e2e_ext_bridge.py` 要真浏览器且不进 verify-all（SPEC §6.2 定为可选）。于是
@@ -21,10 +21,12 @@
  *   8. STATIC_SITES 与 manifest 的静态 content_scripts 必须对得上；
  *   9. SW 必须 `importScripts('shared.js')`（否则 MASKIT_SHARED 未定义，扩展加载即死）；
  *  10. JS 里 `$('id')` / `getElementById('id')` 引用的 id 必须在对应 HTML 里存在
- *      （缺失会让初始化在绑定按钮事件前抛错 —— 「刷新 / 设置」全成死键，见 §3b）。
+ *      （缺失会让初始化在绑定按钮事件前抛错 —— 「刷新 / 设置」全成死键，见 §3b）；
+ *  11. 文本 mask 的原函数行为：超时预算、分档边界、有限重试与用户阻断选择。
  *
  * 用法：`node scripts/check-extension.mjs`（失败退出码 1）
  */
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
@@ -607,6 +609,189 @@ if (!/chrome\.action\.setBadgeText/.test(bg)) {
 }
 if (!/renderProto\(/.test(popupSrc)) {
   fail('popup.js 没有 renderProto —— 协议不匹配时用户看不到任何提示')
+}
+
+
+// ── 文本打码：原函数隔离回归 ───────────────────────────────────────────────
+// 只替换网络、存储和状态呈现依赖；不执行扩展生命周期或读取真实配置。
+// 引擎延迟按虚拟时间计，避免每次门禁都等完整超时；不是浏览器端到端验证。
+try {
+  function constDecl(src, name) {
+    const match = src.match(new RegExp(`\\bconst\\s+${name}\\s*=\\s*[^;\\n]+;`))
+    if (!match) throw new Error(`找不到常量 ${name}`)
+    return match[0]
+  }
+  function functionDecl(src, name) {
+    const match = src.match(new RegExp(`^(?:async )?function ${name}\\b[\\s\\S]*?^}`, 'm'))
+    if (!match) throw new Error(`找不到函数 ${name}`)
+    return match[0]
+  }
+  const pageConstants = ['MASK_TIMEOUT_MS', 'MASK_TIMEOUT_MS_LARGE', 'MASK_LARGE_CHARS', 'SW_MARGIN_MS']
+  const workerConstants = ['CALL_TIMEOUT_MS', 'CALL_TIMEOUT_MS_MAX', 'DOWN_WINDOW_MS', 'PING_TTL_MS',
+    'SID_TTL_MS', 'PRUNE_INTERVAL_MS', 'BLOCK_ON_DOWN_KEY', 'AUTH_HOLD_MS', 'AUTH_PROBE_MS']
+  const workerFunctions = ['safeCall', 'handleMask', 'isBlocking', 'isTypingProbe', 'isBlockOnDown',
+    'restoreBlockWhenDownOnce', 'findRecentSid', 'rememberSid', 'pruneSids']
+  const fixtureCode = [
+    ...pageConstants.map((name) => constDecl(mainSrc, name)),
+    ...workerConstants.map((name) => constDecl(bg, name)),
+    ...workerFunctions.map((name) => functionDecl(bg, name)),
+    constDecl(mainSrc, 'isLargeText'),
+    `const maskOnce = (text) => ${extractObjectLiteral(mainSrc, 'maskOnce')};`,
+    `const callMask = async (text) => ${extractObjectLiteral(mainSrc, 'callMask')};`,
+    `let downUntil = 0, authHoldUntil = 0, authProbeAt = 0, authHoldErr = '';
+     let blockRestorePromise = null, cacheFromPing = false;
+     let cache = { at: Date.now(), blockWhenDown: false };
+     globalThis.maskTiming = { callMask, handleMask, isLargeText,
+       downUntil: () => downUntil, defaultMs: CALL_TIMEOUT_MS, maxMs: CALL_TIMEOUT_MS_MAX };`,
+  ].join('\n')
+
+  function fixture({ delayMs = 0, bridgeResults, engineResult, blockWhenDown } = {}) {
+    const pageCalls = [], engineCalls = [], statuses = []
+    const epochMs = 1_800_000_000_000
+    let elapsedMs = 0
+    const storage = { 'maskit:pruneAt': epochMs }
+    if (typeof blockWhenDown === 'boolean') storage['maskit:blockWhenDown'] = blockWhenDown
+    const ctx = {
+      Date: { now: () => epochMs + elapsedMs },
+      chrome: { storage: { session: {
+        async get(key) { return key == null ? { ...storage } : { [key]: storage[key] } },
+        async set(values) { Object.assign(storage, values) },
+        async remove(keys) { for (const key of keys) delete storage[key] },
+      } } },
+      getConfig: async () => ({ enabled: true, enabledSites: ['chatgpt.com'] }),
+      siteCovers: SHARED.siteCovers,
+      setStatus: async (...args) => { statuses.push(args) },
+      pushRecent: async () => {},
+      refreshPing: async () => { throw new Error('测试不应触发真实 ping') },
+      async callPanel(requestPath, body, method, timeoutMs) {
+        engineCalls.push({ requestPath, body, method, timeoutMs })
+        elapsedMs += Math.min(delayMs, timeoutMs)
+        if (delayMs > timeoutMs) {
+          const error = new Error('synthetic request aborted')
+          error.name = 'AbortError'
+          throw error
+        }
+        return engineResult || { http: 200, data: { ok: true, sid: 'ext:unit-test' } }
+      },
+      bridge: { async call(action, payload, pageMs) {
+        pageCalls.push({ action, payload, pageMs })
+        if (bridgeResults) {
+          const index = pageCalls.length - 1
+          assert.ok(index < bridgeResults.length, '发生了超出约定次数的桥重试')
+          return bridgeResults[index]
+        }
+        return ctx.maskTiming.handleMask(payload, 1, 'chatgpt.com')
+      } },
+    }
+    vm.runInNewContext(fixtureCode, ctx, { filename: 'mask-timeout-fixture', timeout: 1000 })
+    return { api: ctx.maskTiming, pageCalls, engineCalls, statuses, elapsedMs: () => elapsedMs }
+  }
+  let passed = 0, total = 0
+  async function check(name, fn) {
+    total++
+    try { await fn(); passed++ } catch (e) { fail(`文本 mask / ${name}：${e.message}`) }
+  }
+  const shortText = JSON.stringify({ message: 'short synthetic input' })
+  await check('4s 短消息保留 15s 引擎预算', async () => {
+    const f = fixture({ delayMs: 4000 })
+    assert.equal((await f.api.callMask(shortText)).ok, true)
+    assert.equal(f.elapsedMs(), 4000)
+    assert.equal(f.pageCalls.length, 1)
+    assert.equal(f.engineCalls.length, 1)
+    assert.equal(f.engineCalls[0].requestPath, '/api/ext/mask')
+    assert.equal(f.engineCalls[0].body.text, shortText)
+    assert.equal(f.engineCalls[0].timeoutMs, f.api.defaultMs)
+    assert.equal(f.pageCalls[0].pageMs, 18000)
+  })
+  for (const [length, pageMs, innerMs] of [[4095, 18000, 15000], [4096, 18000, 15000], [4097, 30000, 27000]]) {
+    await check(`${length} 字符分档与外 > 内`, async () => {
+      const f = fixture()
+      const text = 'x'.repeat(length)
+      assert.equal(f.api.isLargeText(text), length > 4096)
+      assert.equal((await f.api.callMask(text)).ok, true)
+      assert.equal(f.pageCalls[0].pageMs, pageMs)
+      assert.equal(f.engineCalls[0].timeoutMs, innerMs)
+      assert.ok(pageMs > innerMs)
+      assert.equal(pageMs - innerMs, 3000)
+    })
+  }
+  const success = { ok: true, sid: 'ext:unit-test' }
+  await check('小文本 null 后只重试一次', async () => {
+    const f = fixture({ bridgeResults: [null, success] })
+    assert.equal(await f.api.callMask(shortText), success)
+    assert.equal(f.pageCalls.length, 2)
+  })
+  await check('小文本两次 null 后停止', async () => {
+    const f = fixture({ bridgeResults: [null, null] })
+    assert.equal(await f.api.callMask(shortText), null)
+    assert.equal(f.pageCalls.length, 2)
+  })
+  for (const response of [success, { ok: false, passthrough: true, error: 'engine_timeout' },
+    { ok: false, blocking: true, error: 'synthetic_rejection' }]) {
+    await check(`明确响应不重试 (${response.error || 'success'})`, async () => {
+      const f = fixture({ bridgeResults: [response] })
+      assert.equal(await f.api.callMask(shortText), response)
+      assert.equal(f.pageCalls.length, 1)
+    })
+  }
+  await check('大文本 null 不重试', async () => {
+    const f = fixture({ bridgeResults: [null] })
+    assert.equal(await f.api.callMask('x'.repeat(4097)), null)
+    assert.equal(f.pageCalls.length, 1)
+  })
+  await check('引擎明确拒绝保持阻断，不重试', async () => {
+    const f = fixture({ engineResult: { http: 503, data: { blocking: true, error: 'synthetic_rejection' } },
+      blockWhenDown: false })
+    const result = await f.api.callMask(shortText)
+    assert.equal(result.ok, false)
+    assert.equal(result.blocking, true)
+    assert.equal(result.error, 'synthetic_rejection')
+    assert.equal(f.pageCalls.length, 1)
+    assert.equal(f.engineCalls.length, 1)
+  })
+  for (const choice of [false, true, undefined]) {
+    await check(`引擎超时保持用户选择 (${String(choice)}) 且不全局熔断`, async () => {
+      const f = fixture({ delayMs: 20000, blockWhenDown: choice })
+      const result = await f.api.callMask(shortText)
+      assert.equal(result.ok, false)
+      assert.equal(result.error, 'engine_timeout')
+      if (choice === true) assert.equal(result.blocking, true)
+      else assert.equal(result.passthrough, true)
+      assert.equal(f.api.downUntil(), 0)
+      assert.equal(f.pageCalls.length, 1)
+      assert.equal(f.engineCalls.length, 1)
+      assert.ok(f.statuses.some((entry) => entry[1] === 'engine_timeout'))
+    })
+  }
+  await check('超上限预算仍钳到 60s', async () => {
+    const f = fixture()
+    assert.equal((await f.api.handleMask({ text: shortText, timeoutMs: f.api.maxMs + 1000 }, 1, 'chatgpt.com')).ok, true)
+    assert.equal(f.engineCalls[0].timeoutMs, 60000)
+  })
+  await check('已有 1s 下界不变', async () => {
+    const f = fixture()
+    await f.api.handleMask({ text: shortText, timeoutMs: 1000 }, 1, 'chatgpt.com')
+    assert.equal(f.engineCalls[0].timeoutMs, 1000)
+  })
+  for (const requested of [undefined, 0, 999, -1, 'invalid', NaN, Infinity]) {
+    await check(`无效预算回退默认 (${String(requested)})`, async () => {
+      const f = fixture()
+      await f.api.handleMask({ text: shortText, timeoutMs: requested }, 1, 'chatgpt.com')
+      assert.equal(f.engineCalls[0].timeoutMs, f.api.defaultMs)
+    })
+  }
+  await check('文件图片原有两层预算不变', () => {
+    const ctx = vm.runInNewContext(`${constDecl(mainSrc, 'HEAVY_CALL_TIMEOUT_MS')};
+      ({ pageMs: HEAVY_CALL_TIMEOUT_MS })`, {}, { timeout: 1000 })
+    const sw = vm.runInNewContext(`${constDecl(bg, 'HEAVY_CALL_TIMEOUT_MS')};
+      ({ innerMs: HEAVY_CALL_TIMEOUT_MS })`, {}, { timeout: 1000 })
+    assert.equal(ctx.pageMs, 180000)
+    assert.equal(sw.innerMs, 150000)
+    assert.ok(ctx.pageMs > sw.innerMs)
+  })
+  notes.push(`文本 mask 原函数隔离回归：${passed}/${total}（延迟/网络/存储为模拟）`)
+} catch (e) {
+  fail(`文本 mask 隔离回归无法执行：${e.message}`)
 }
 
 // ── 结论 ────────────────────────────────────────────────────────────────────

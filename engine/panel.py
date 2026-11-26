@@ -3225,7 +3225,7 @@ def _start_proxy_locked():
         except Exception:
             pass
         # @guard G722 输出尾部必须进**同一份**现场：进程还活着时上面已落过盘（为了拿端口表），
-        # 这里命中 5s 去重拿到同一个路径再追加；进程已退出时这里才第一次落盘（端口表仍可查）。
+        # 这里按启动代次复用同一个路径再追加；进程已退出时这里才第一次落盘（端口表仍可查）。
         # 这段输出原先只进 return 值、作为 API 返回给前端 toast，用户关掉提示就永久丢失。
         _append_crash_tail(_dump_crash_context("startfail"), out)
         _start_fallback("启动失败")
@@ -3808,17 +3808,16 @@ def _cancel_pending_restart():
             pass
 
 
-# 同一次启动失败的内外层重复落盘窗口（秒）：实测两次调用相隔约 3s（现场文件时间戳
-# 20261119-174152 / 174155），取 5s 留余量。超过窗口才认为是另一轮真失败。
+# 非启动失败现场的短时重复采集窗口（秒）；启动失败直接按启停代次区分。
 _CRASH_DUMP_DEDUP_S = 5.0
-# 上一次落盘的现场（reason → 路径），供 `_dump_crash_context` 去重时复用。
-_LAST_CRASH_DUMP = {"ts": 0.0, "reason": "", "path": None}
+# 上一次成功落盘的现场（reason + generation → 路径），时间从采集完成后计算。
+_LAST_CRASH_DUMP = {"ts": 0.0, "reason": "", "generation": None, "path": None}
 
 
 def _dump_crash_context(reason="crash"):
     """mitmdump 退出/启动失败时把完整现场落盘（崩溃现场），避免被 800 行环形缓冲冲掉。
 
-    写独立文件 crash-dumps/crash-<时间戳>-<reason>.txt：退出码、进程状态、上游端口占用表
+    写独立文件 crash-dumps/crash-<时间戳>-g<代次>-<reason>.txt：退出码、进程状态、上游端口占用表
     （每端口 PID + 可执行名 + 命令行 + 是否 Shield 相关）、crash log 尾部。
     保留最近 10 份。曾只有 log_buf 尾部且混在 proxy-crash.log 里：掉网时
     mitmdump 静默退出无任何输出，现场文件是唯一能归因的线索。
@@ -3828,23 +3827,28 @@ def _dump_crash_context(reason="crash"):
     # @guard G723 同一次启动失败会被写两遍：`_start_proxy_locked` 内部一次（进程还活着，
     # 能抓端口表），外层 watchdog / `_restart_proxy_locked` 在 `start_proxy()` 返回 False 后
     # 又调一次（此时进程已死、端口表与输出都已丢，写出来必然全空）。
-    # 窗口内同 reason 直接复用第一份 —— 5 秒取自实测（两份空文件的时间戳相隔 3 秒）。
-    now = time.time()
-    if (reason == _LAST_CRASH_DUMP["reason"]
-            and now - _LAST_CRASH_DUMP["ts"] <= _CRASH_DUMP_DEDUP_S):
-        return _LAST_CRASH_DUMP["path"]
+    # 同一次启动失败无论采集或终止进程耗时多久都复用；不同代次即使紧邻也必须分开。
+    # 其他原因仍限于短窗口，避免长期复用旧现场。
     try:
+        now = time.time()
+        generation = state.get("generation", 0)
+        if (_LAST_CRASH_DUMP["path"]
+                and reason == _LAST_CRASH_DUMP["reason"]
+                and generation == _LAST_CRASH_DUMP["generation"]
+                and (reason == "startfail"
+                     or 0 <= now - _LAST_CRASH_DUMP["ts"] <= _CRASH_DUMP_DEDUP_S)):
+            return _LAST_CRASH_DUMP["path"]
         import datetime
         dump_dir = DATA_ROOT / "crash-dumps"
         dump_dir.mkdir(exist_ok=True)
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        fname = dump_dir / f"crash-{ts}-{reason}.txt"
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        fname = dump_dir / f"crash-{ts}-g{generation}-{reason}.txt"
         p = proc.get("p")
         poll = p.poll() if p else None
         lines = [
             f"==== {datetime.datetime.now().isoformat(timespec='seconds')} ====",
             f"proxy_running={state.get('proxy_running')} pid={state.get('proxy_pid')} "
-            f"generation={state.get('generation')} restarts={state.get('restarts')} "
+            f"generation={generation} restarts={state.get('restarts')} "
             f"stop_requested={state.get('stop_requested')} fallback={state.get('fallback_mode')}",
             f"popen={'present' if p else 'none'} poll={poll} "
             f"returncode={p.returncode if p and poll is not None else 'n/a'}",
@@ -3880,7 +3884,7 @@ def _dump_crash_context(reason="crash"):
         except Exception:
             pass
         fname.write_text("\n".join(lines), encoding="utf-8")
-        _LAST_CRASH_DUMP.update(ts=now, reason=reason, path=str(fname))
+        _LAST_CRASH_DUMP.update(ts=time.time(), reason=reason, generation=generation, path=str(fname))
         _emit_log(f"[panel] 崩溃现场已写入 {fname}")
         try:  # 只留最近 10 份，防堆积
             for o in sorted(dump_dir.glob("crash-*.txt"))[:-10]:
