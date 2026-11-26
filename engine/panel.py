@@ -8434,7 +8434,8 @@ def _file_manager():
                 DATA_ROOT, cfg=cfg, history=hist,
                 concurrency=cfg.get("files_worker_concurrency", 1),
                 queue_max=cfg.get("files_queue_max", 8),
-                review_ttl_min=cfg.get("files_review_ttl_min", 60))
+                review_ttl_min=cfg.get("files_review_ttl_min", 60),
+                cfg_loader=load_config)
             import file_carriers
             file_carriers.register(_FILE_MGR)      # T2 文字类载体
             import file_visual

@@ -259,13 +259,35 @@ def _paint(img, boxes):
 
 
 # ── 注册表 ─────────────────────────────────────────────────────────────────
+def _find_orig_spans(text, orig):
+    """查找原文在文本中的全部区间；精确无命中时回退大小写不敏感匹配（自定义词变体）。"""
+    if not text or not orig:
+        return []
+    spans = []
+    start = 0
+    while True:
+        pos = text.find(orig, start)
+        if pos < 0:
+            break
+        spans.append((pos, pos + len(orig)))
+        start = pos + len(orig)
+    if spans:
+        return spans
+    return [(m.start(), m.end()) for m in re.finditer(re.escape(orig), text, re.I)]
+
+
 def _collect_new(tables, before, text, loc, locations, counts):
     for orig in tables.fwd.keys() - before:
         locations.setdefault(orig, set()).add(loc)
     if text:
         for orig in tables.fwd:
-            if orig and orig in text:
-                counts[orig] = counts.get(orig, 0) + text.count(orig)
+            if not orig:
+                continue
+            cnt = text.count(orig)
+            if cnt == 0:
+                cnt = len(re.findall(re.escape(orig), text, re.I))
+            if cnt:
+                counts[orig] = counts.get(orig, 0) + cnt
 
 
 def _final_text(hit, edit):
@@ -362,23 +384,14 @@ def scan_pdf(job, src, staged, opts, cancel):
                 # 否则第 2 页起文本层不建框、不栅格化，导致明文泄露。
                 page_matched_origs = [
                     orig for orig, rec in tables.fwd.items()
-                    if orig and rec[0] in masked and orig in text
+                    if orig and rec[0] in masked
                 ]
                 loc_label = "第%d页文本层" % (index + 1)
                 full_warn = "page_%d_full_cover" % (index + 1)
                 for orig in page_matched_origs:
                     locations.setdefault(orig, set()).add(loc_label)
-                    orig_spans = []
-                    start = 0
-                    while True:
-                        pos = text.find(orig, start)
-                        if pos < 0:
-                            break
-                        orig_spans.append((pos, pos + len(orig)))
-                        start = pos + len(orig)
-                    if not orig_spans:
-                        continue
-                    rects = pr._text_rects_px(orig_spans, char_boxes, page, scale)
+                    orig_spans = _find_orig_spans(text, orig)
+                    rects = pr._text_rects_px(orig_spans, char_boxes, page, scale) if orig_spans else None
                     if rects is None:
                         boxes.append({"kind": "full", "source": "auto"})
                         if full_warn not in warnings:
@@ -662,8 +675,10 @@ def _apply_hidden(writer, finals):
 
     def repl(text):
         for orig, new in ordered:
-            if orig and orig in text:
-                text = text.replace(orig, new)
+            if not orig:
+                continue
+            if orig in text or orig.lower() in text.lower():
+                text = re.sub(re.escape(orig), lambda _m, _new=new: _new, text, flags=re.I)
         return text
 
     masker = pr._HiddenMasker(repl)

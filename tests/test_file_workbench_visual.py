@@ -496,6 +496,64 @@ class VisualTests(unittest.TestCase):
         self.assertEqual(img_job.status, fw.ST_FAILED)
         self.assertEqual(img_job.error, fv.E_COORD)
 
+    def test_pdf_custom_word_case_variant_masked_in_text_layer_and_outline(self):
+        """PDF 文本层与书签中的自定义敏感词大小写变体必须无需预热即可命中、栅格化并替换。"""
+        import subprocess
+        script = r"""
+import io, json, os, sys, tempfile, shutil
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(tempfile.mkdtemp(prefix="fw-pdfcw-"))
+try:
+    (tmp / "config.json").write_text(json.dumps({
+        "custom_words": {"AcmeCorp": "COMPANY"}
+    }, ensure_ascii=False), encoding="utf-8")
+    os.environ["LLM_SHIELD_DATA_DIR"] = str(tmp)
+    sys.path.insert(0, str(root / "engine"))
+    sys.path.insert(0, str(root))
+
+    import file_workbench as fw
+    import file_visual as fv
+    import file_job_store as fjs
+    from pypdf import PdfReader
+    from tests.test_file_workbench_visual import make_pdf
+
+    mgr = fw.JobManager(tmp, cfg={}, history=fjs.HistoryStore(tmp), executor=lambda fn: fn())
+    fv.register(mgr)
+    job = mgr.create_job("cw.pdf", 128, "pdf")
+    src = mgr.job_dir(job.id) / "src.bin"
+    make_pdf(src, pages=1, text="Client acmecorp report", outline=["acmecorp summary"])
+    ok, pc, err = fv.probe(str(src), "pdf")
+    assert ok, err
+    mgr.probe_result(job.id, ok, page_count=pc, error=err)
+    mgr.request_scan(job.id, mode="manual")
+    hs = mgr.hits(job.id)
+    assert any(h.get("original") == "AcmeCorp" and h.get("source") == "custom" for h in hs), hs
+
+    mgr.request_apply(job.id)
+    out_files = list((mgr.job_dir(job.id) / "out").glob("*"))
+    r = PdfReader(io.BytesIO(out_files[0].read_bytes()))
+    assert (r.pages[0].extract_text() or "").strip() == "", "含自定义词变体的页必须整页栅格化"
+    titles = []
+    def walk(node):
+        if isinstance(node, list):
+            for x in node:
+                walk(x)
+            return
+        if hasattr(node, "get") and node.get("/Title"):
+            titles.append(str(node["/Title"]))
+        if hasattr(node, "get") and node.get("/First"):
+            walk(node["/First"])
+    walk(r.outline)
+    assert titles and all("acmecorp" not in t.lower() for t in titles), f"书签未脱敏: {titles}"
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+"""
+        proc = subprocess.run([sys.executable, "-c", script, str(ROOT)],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

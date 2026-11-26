@@ -13,6 +13,7 @@ OOXML（docx/xlsx/pptx）与纯文本的两阶段 scan/apply：
 
 import os
 import io
+import re
 import zipfile
 import hashlib
 import shutil
@@ -159,6 +160,7 @@ def probe(src_path, carrier, cfg=None):
 def _build_hits(tables, locations, counts, max_hits):
     # @guard G771 凭据只 preview+digest、不可编辑保留
     # @guard G770 超上限失败
+    cw_keys = set(getattr(tr, "CUSTOM_WORDS", None) or ())
     hits = []
     for orig, rec in tables.fwd.items():
         token, label = rec[0], rec[1]
@@ -166,7 +168,8 @@ def _build_hits(tables, locations, counts, max_hits):
         locs = sorted(locations.get(orig, set())) or ["正文"]
         h = fw.FileHit(
             hit_id="h%d" % (len(hits) + 1), token=token, label=label,
-            source="builtin", original=orig, count=counts.get(orig, 1),
+            source="custom" if orig in cw_keys else "builtin",
+            original=orig, count=counts.get(orig, 1),
             locations=locs, editable=not cred, can_keep=not cred, credential=cred,
         )
         if cred:
@@ -183,8 +186,14 @@ def _accumulate(tables, before, orig_text, loc, locations, counts):
     for orig in tables.fwd.keys() - before:
         locations.setdefault(orig, set()).add(loc)
     for orig in tables.fwd:
-        if orig and orig in orig_text:
-            counts[orig] = counts.get(orig, 0) + orig_text.count(orig)
+        if not orig:
+            continue
+        cnt = orig_text.count(orig)
+        if cnt == 0:
+            cnt = len(re.findall(re.escape(orig), orig_text, re.I))
+        if cnt:
+            locations.setdefault(orig, set()).add(loc)
+            counts[orig] = counts.get(orig, 0) + cnt
 
 
 def _mask_xml(content, ext, fn, locations, counts, sid):
@@ -292,6 +301,8 @@ def scan_ooxml(job, src, staged, opts, cancel):
 
 def job_cfg(job):
     mgr = getattr(job, "_mgr", None)
+    if mgr is not None and hasattr(mgr, "current_cfg"):
+        return mgr.current_cfg()
     return getattr(mgr, "cfg", {}) or {}
 
 

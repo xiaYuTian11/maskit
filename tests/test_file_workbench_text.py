@@ -299,6 +299,84 @@ class CarrierTests(unittest.TestCase):
         apply(mgr, job)
         self.assertEqual(mgr.get_job(job.id).coverage.get("embedded_objects_stripped"), 1)
 
+    def test_custom_words_cold_start_and_hot_reload_from_config(self):
+        """冷启动与运行期改写 config.json 后，文件脱敏无需预调 reload 即时复用敏感词与白名单且不污染全局表。"""
+        import json
+        import subprocess
+        script = r"""
+import json, os, sys, tempfile, shutil
+from pathlib import Path
+
+root = Path(sys.argv[1])
+tmp = Path(tempfile.mkdtemp(prefix="fw-cw-"))
+try:
+    cfg_path = tmp / "config.json"
+    cfg_path.write_text(json.dumps({
+        "custom_words": {
+            "AcmeCorp": "COMPANY",
+            "re:PROJ-\\d{4}": "PROJECT",
+        }
+    }, ensure_ascii=False), encoding="utf-8")
+    os.environ["LLM_SHIELD_DATA_DIR"] = str(tmp)
+    sys.path.insert(0, str(root / "engine"))
+
+    import transparent as tr
+    import file_workbench as fw
+    import file_carriers as fc
+    import file_job_store as fjs
+
+    assert tr.CUSTOM_WORDS == {}, f"import 期不应预载 config: {tr.CUSTOM_WORDS}"
+    mgr = fw.JobManager(tmp, cfg={}, history=fjs.HistoryStore(tmp), executor=lambda fn: fn())
+    fc.register(mgr)
+
+    # 1. 冷启动：未手工调用 _maybe_reload，直接扫描即命中大小写变体、正则自定义词与内置规则
+    j1 = mgr.create_job("c1.txt", 64, "text")
+    (mgr.job_dir(j1.id) / "src.bin").write_bytes("客户 acmecorp 项目 PROJ-2026 电话 13800000000".encode("utf-8"))
+    mgr.probe_result(j1.id, True)
+    mgr.request_scan(j1.id)
+    hits1 = mgr.hits(j1.id)
+    origs1 = {h["original"]: h for h in hits1}
+    assert "AcmeCorp" in origs1, f"冷启动未命中自定义词变体: {hits1}"
+    assert origs1["AcmeCorp"]["source"] == "custom", origs1["AcmeCorp"]
+    assert origs1["AcmeCorp"]["count"] == 1, origs1["AcmeCorp"]
+    assert "PROJ-2026" in origs1, f"冷启动未命中正则自定义词: {hits1}"
+    assert "13800000000" in origs1, f"冷启动未命中内置规则: {hits1}"
+    # _maybe_reload 会把配置里的自定义词预同步进 _RECENT_FWD，但文件内容本身扫描到的原文绝不能进全局表
+    assert "PROJ-2026" not in tr._RECENT_FWD, f"文件命中原文泄漏进全局表: {tr._RECENT_FWD}"
+    assert "13800000000" not in tr._RECENT_FWD, f"文件命中号码泄漏进全局表: {tr._RECENT_FWD}"
+
+    # 2. 运行期改配置：新增敏感词 + 白名单放行，不重启即生效
+    cfg_path.write_text(json.dumps({
+        "custom_words": {
+            "AcmeCorp": "COMPANY",
+            "BlueWhaleKey": "PROJECT",
+        },
+        "allow_values": ["AcmeCorp", "acmecorp"],
+    }, ensure_ascii=False), encoding="utf-8")
+    j2 = mgr.create_job("c2.txt", 64, "text")
+    (mgr.job_dir(j2.id) / "src.bin").write_bytes("放行 acmecorp 拦截 BlueWhaleKey".encode("utf-8"))
+    mgr.probe_result(j2.id, True)
+    mgr.request_scan(j2.id)
+    hits2 = mgr.hits(j2.id)
+    origs2 = {h["original"]: h for h in hits2}
+    assert "BlueWhaleKey" in origs2, f"热更新后未命中新敏感词: {hits2}"
+    assert origs2["BlueWhaleKey"]["source"] == "custom", origs2["BlueWhaleKey"]
+    assert "AcmeCorp" not in origs2, f"白名单词未放行: {hits2}"
+
+    # 3. 配置未变时的后续扫描，全局 _RECENT_FWD 一条不增
+    snap_recent = dict(tr._RECENT_FWD)
+    j3 = mgr.create_job("c3.txt", 64, "text")
+    (mgr.job_dir(j3.id) / "src.bin").write_bytes("二次 13900000000".encode("utf-8"))
+    mgr.probe_result(j3.id, True)
+    mgr.request_scan(j3.id)
+    assert tr._RECENT_FWD == snap_recent, "隔离扫描改变了全局 _RECENT_FWD"
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+"""
+        proc = subprocess.run([sys.executable, "-c", script, str(ROOT)],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stdout + "\n" + proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,7 +165,7 @@ class JobManager:
     """任务内核。线程安全：任务态由 _lock 保护；扫描重活在工作线程，不持任务锁。"""
 
     def __init__(self, data_root, cfg=None, history=None, concurrency=1, queue_max=8,
-                 review_ttl_min=60, executor=None):
+                 review_ttl_min=60, executor=None, cfg_loader=None):
         self._lock = threading.RLock()
         self._jobs = {}
         self._registries = {}      # job_id -> {orig: FileHit}（内存，不落盘）
@@ -176,6 +176,7 @@ class JobManager:
         self.data_root = Path(data_root)
         self.jobs_dir = self.data_root / "file-jobs"
         self.cfg = cfg or {}
+        self._cfg_loader = cfg_loader
         self.history = history
         self.concurrency = max(1, min(2, int(concurrency)))   # G742 钳制 [1,2]
         self.queue_max = int(queue_max)
@@ -186,6 +187,14 @@ class JobManager:
         self._sweep_stop = threading.Event()
         self._sweeper = threading.Thread(target=self._sweep_loop, daemon=True)
         self._sweeper.start()
+
+    def current_cfg(self):
+        if self._cfg_loader is not None:
+            try:
+                return self._cfg_loader() or {}
+            except Exception:
+                return self.cfg or {}
+        return self.cfg or {}
 
     def _sweep_loop(self):
         while not self._sweep_stop.wait(60):
@@ -292,7 +301,12 @@ class JobManager:
         import transparent as tr
         cancel = None
         try:
+            # 每次扫描前强制热重载配置（与扩展/试验台同口径），确保冷启动及面板修改的
+            # 敏感词/白名单/规则开关即时生效；必须在进入隔离作用域之前执行。
+            tr._maybe_reload(force=True)
+            cfg_now = self.current_cfg()
             with self._lock:
+                self.cfg = cfg_now
                 job = self._require(job_id)
                 carrier = self._carriers.get(job.carrier)
             # G750：未注册载体一律失败，绝不产出原文件冒充成品。
@@ -321,7 +335,8 @@ class JobManager:
                 job.coverage = outcome.get("coverage") or {}
                 job.warnings = outcome.get("warnings") or []
                 job.status = ST_REVIEW
-                job.expires_at = time.time() + self.review_ttl_min * 60
+                ttl_min = int(self.cfg.get("files_review_ttl_min", self.review_ttl_min) or self.review_ttl_min)
+                job.expires_at = time.time() + ttl_min * 60
         except Exception as e:
             if cancel is not None and cancel.is_set():
                 self._finish_cancel(job_id)
