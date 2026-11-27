@@ -8742,9 +8742,8 @@ def api_files_export_zip():
             if mgr.find_job(jid) is None:
                 continue
             job = mgr.check_download(jid)
-            out_dir = mgr.job_dir(jid) / "out"
-            files = list(out_dir.glob("*")) if out_dir.exists() else []
-            if not files:
+            out = mgr.output_path(jid)
+            if out is None:
                 return jsonify({"ok": False, "error": "no_output"}), 404
             base = os.path.basename(job.filename) or ("masked-%s.bin" % jid)
             stem, ext = os.path.splitext(base)
@@ -8754,7 +8753,7 @@ def api_files_export_zip():
                 arc = "%s (%d)%s" % (stem, idx, ext)
                 idx += 1
             used_names.add(arc)
-            items.append((str(files[0]), arc))
+            items.append((str(out), arc))
         if not items:
             return jsonify({"ok": False, "error": "no_output"}), 404
         # 落磁盘临时文件再流式下发：成品单文件上限 1 GiB，100 个任务全塞进 BytesIO
@@ -8848,11 +8847,10 @@ def api_files_download(job_id):
         _file_nonce_take(job_id, request.args.get("nonce"), request.args.get("exp"),
                          request.args.get("sig"))
         job = mgr.check_download(job_id)
-        out_dir = mgr.job_dir(job_id) / "out"
-        files = list(out_dir.glob("*")) if out_dir.exists() else []
-        if not files:
+        out = mgr.output_path(job_id)
+        if out is None:
             return jsonify({"ok": False, "error": "no_output"}), 404
-        return send_file(str(files[0]), as_attachment=True,
+        return send_file(str(out), as_attachment=True,
                          download_name=os.path.basename(job.filename) or "masked.bin")
     except Exception as e:
         return _file_err(e)
@@ -8870,12 +8868,11 @@ def api_files_save(job_id):
         job = mgr.check_download(job_id)
         body = request.get_json(silent=True) or {}
         target = _file_save_guard(job, body.get("dest_dir", ""), bool(body.get("overwrite", False)))
-        out_dir = mgr.job_dir(job_id) / "out"
-        files = list(out_dir.glob("*")) if out_dir.exists() else []
-        if not files:
+        out = mgr.output_path(job_id)
+        if out is None:
             return jsonify({"ok": False, "error": "no_output"}), 404
         import shutil
-        shutil.copyfile(files[0], target)
+        shutil.copyfile(out, target)
         _emit_log("[file] %s 另存为 %s" % (job_id, target))
         return jsonify({"ok": True, "path": target})
     except Exception as e:

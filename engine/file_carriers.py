@@ -13,7 +13,6 @@ OOXML（docx/xlsx/pptx）与纯文本的两阶段 scan/apply：
 
 import os
 import io
-import re
 import time
 import zipfile
 import hashlib
@@ -356,58 +355,43 @@ def _build_hits(tables, locations, counts, max_hits, only_observed=False):
     return hits
 
 
-def _accumulate(tables, before, orig_text, loc, locations, counts, masked_text=None):
-    if isinstance(before, (set, frozenset)):
-        new_keys = tables.fwd.keys() - before
-    else:
-        before_n = int(before or 0)
-        if len(tables.fwd) > before_n:
-            new_keys = list(tables.fwd.keys())[before_n:]
-        else:
-            new_keys = ()
+def _accumulate(tables, before, orig_text, loc, locations, counts, masked_text):
+    """登记一段文本的命中位置与出现次数。
 
-    if masked_text is not None:
-        if masked_text == orig_text and not new_keys:
-            return
-        rev_map = getattr(tables, "rev", None) or {}
-        tok_counts = Counter(tr._PLACEHOLDER_RX.findall(masked_text))
-        if tok_counts and "{{" in orig_text:
-            orig_toks = Counter(tr._PLACEHOLDER_RX.findall(orig_text))
-            for t, c in orig_toks.items():
-                if t in tok_counts:
-                    tok_counts[t] -= c
-        seen_origs = set()
-        for tok, delta in tok_counts.items():
-            if delta <= 0:
-                continue
-            rec = rev_map.get(tok)
-            if not rec:
-                continue
-            orig = rec[0]
-            if not orig:
-                continue
-            seen_origs.add(orig)
-            locations.setdefault(orig, set()).add(loc)
-            counts[orig] = counts.get(orig, 0) + delta
-        for orig in new_keys:
-            if not orig:
-                continue
-            locations.setdefault(orig, set()).add(loc)
-            if orig not in seen_origs:
-                counts[orig] = counts.get(orig, 0) + 1
+    计数口径是 **masked_text 里占位符的出现次数**，不是原文子串匹配：后者在大小写变体
+    与首尾空白差异下会重复计数，也覆盖不到 NER 改写。`before` 是调用前的
+    `len(tables.fwd)`；同批次多文件共享表时按插入序取尾部新增键。
+    """
+    before_n = int(before or 0)
+    new_keys = list(tables.fwd.keys())[before_n:] if len(tables.fwd) > before_n else ()
+    if masked_text == orig_text and not new_keys:
         return
-
-    for orig in new_keys:
-        locations.setdefault(orig, set()).add(loc)
-    for orig in tables.fwd:
+    rev_map = getattr(tables, "rev", None) or {}
+    tok_counts = Counter(tr._PLACEHOLDER_RX.findall(masked_text))
+    if tok_counts and "{{" in orig_text:
+        orig_toks = Counter(tr._PLACEHOLDER_RX.findall(orig_text))
+        for t, c in orig_toks.items():
+            if t in tok_counts:
+                tok_counts[t] -= c
+    seen_origs = set()
+    for tok, delta in tok_counts.items():
+        if delta <= 0:
+            continue
+        rec = rev_map.get(tok)
+        if not rec:
+            continue
+        orig = rec[0]
         if not orig:
             continue
-        cnt = orig_text.count(orig)
-        if cnt == 0:
-            cnt = len(re.findall(re.escape(orig), orig_text, re.I))
-        if cnt:
-            locations.setdefault(orig, set()).add(loc)
-            counts[orig] = counts.get(orig, 0) + cnt
+        seen_origs.add(orig)
+        locations.setdefault(orig, set()).add(loc)
+        counts[orig] = counts.get(orig, 0) + delta
+    for orig in new_keys:
+        if not orig:
+            continue
+        locations.setdefault(orig, set()).add(loc)
+        if orig not in seen_origs:
+            counts[orig] = counts.get(orig, 0) + 1
 
 
 def _mask_xml(content, ext, fn, locations, counts, sid, cancel=None, progress_cb=None):

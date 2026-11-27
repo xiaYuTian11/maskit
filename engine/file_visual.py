@@ -285,7 +285,7 @@ def _find_orig_spans(text, orig):
     return [(m.start(), m.end()) for m in re.finditer(re.escape(orig), text, re.I)]
 
 
-def _collect_new(tables, before, text, loc, locations, counts, masked_text=None):
+def _collect_new(tables, before, text, loc, locations, counts, masked_text):
     fc._accumulate(tables, before, text or "", loc, locations, counts, masked_text=masked_text)
 
 

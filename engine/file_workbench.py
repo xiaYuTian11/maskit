@@ -157,6 +157,11 @@ def name_preview(filename):
     return ("***." + ext) if ext else "***"
 
 
+def _output_name(filename):
+    """成品文件名：`masked` + 原扩展名（无扩展名退化 `.bin`）。"""
+    return "masked" + (os.path.splitext(filename or "")[1] or ".bin")
+
+
 def file_digest(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -220,6 +225,19 @@ class JobManager:
     # ---- 目录 ----
     def job_dir(self, job_id):
         return self.jobs_dir / job_id
+
+    def output_path(self, job_id):
+        """成品在磁盘上的固定路径（`out/masked<ext>`），不存在返回 None。
+
+        单点定义：调用方一律经此取路径，不要各自 glob out 目录——一旦目录里
+        多出附属产物，glob 取首个就会静默打包/下载错文件。
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return None
+        path = self.job_dir(job_id) / "out" / _output_name(job.filename)
+        return path if path.is_file() else None
 
     # ---- 创建与预检 ----
     def create_job(self, filename, size, carrier, source_path="", job_id=None, batch_id=""):
@@ -419,8 +437,13 @@ class JobManager:
         if not batch_id:
             return
         with self._lock:
+            # ST_DONE 必须算 alive：成品已落盘，用户可能把内容贴进聊天，此时释放后缀
+            # 会被全局签发复用，成品随后被跨会话还原成别人的值——那正是
+            # `_FILE_SUFFIX_ACTIVE` 存在的唯一理由。FAILED/CANCELED/EXPIRED 没有成品，
+            # 也不再需要共享映射表，可直接释放。
             still_alive = any(
-                j.batch_id == batch_id and j.status not in (ST_CANCELED, ST_EXPIRED)
+                j.batch_id == batch_id
+                and j.status not in (ST_CANCELED, ST_EXPIRED, ST_FAILED)
                 for j in self._jobs.values()
             )
             if still_alive:
@@ -545,13 +568,18 @@ class JobManager:
                     q.position = i
 
     def _fail(self, job_id, code):
+        batch_id = ""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None and job.status not in _TERMINAL:
                 job.status = ST_FAILED
                 job.error = code
                 job.expires_at = time.time() + FAILED_TTL_MIN * 60   # 失败档 10 分钟
+                batch_id = job.batch_id
         self._record_history(job_id)
+        # 失败任务不再需要共享映射表与后缀保护：同一个批次全部失败时立刻还回去，
+        # 不等 FAILED 档 TTL（否则后缀会白占 10 分钟，挤压全局签发空间）。
+        self._maybe_release_batch(batch_id)
 
     def _finish_cancel(self, job_id):
         batch_id = ""
@@ -584,7 +612,7 @@ class JobManager:
             staged = self.job_dir(job_id) / "staged.bin"
             out_dir = self.job_dir(job_id) / "out"
             out_dir.mkdir(parents=True, exist_ok=True)
-            out = out_dir / ("masked" + (os.path.splitext(job.filename)[1] or ".bin"))
+            out = out_dir / _output_name(job.filename)
             coverage = carrier["apply"](job, str(staged), str(out), edits or [],
                                         redactions or [], options or {})
             with self._lock:
