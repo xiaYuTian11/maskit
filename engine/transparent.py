@@ -3716,14 +3716,22 @@ def _current_file_job():
     return _TABLES_TLS.__dict__.get("file_job_id")
 
 
+def new_file_token_tables():
+    """创建供文件脱敏工作台单任务或同批次多文件共享的空表组。"""
+    return _TokenTables(fwd={}, rev={}, suffix={}, cw_fwd={}, cw_rev={})
+
+
 @contextlib.contextmanager
-def file_store_scope(job_id):
+def file_store_scope(job_id, shared_tables=None):
     """把当前工作线程切到文件任务专用**空表组**（退出必然还原，异常也一样）。
 
     与 demo_store_scope 的区别：不种子（空表），并置 isolated 标记旁路全局副作用。
+    当传入 shared_tables 时，同批次多文件共享同一份映射表以保持占位符一致性。
     嵌套时逐层还原（与 demo 同口径），不删外层属性。
     """
-    tables = _TokenTables(fwd={}, rev={}, suffix={}, cw_fwd={}, cw_rev={})
+    tables = shared_tables if shared_tables is not None else _TokenTables(
+        fwd={}, rev={}, suffix={}, cw_fwd={}, cw_rev={}
+    )
     prev_cur = _TABLES_TLS.__dict__.get("cur")
     prev_iso = _TABLES_TLS.__dict__.get("isolated")
     prev_job = _TABLES_TLS.__dict__.get("file_job_id")

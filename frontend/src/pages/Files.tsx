@@ -11,6 +11,7 @@
 // @guard G812 只依赖 @/api/files，链路隔离
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent, MouseEvent } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   UploadCloud,
   RefreshCw,
@@ -28,6 +29,11 @@ import {
   ChevronRight,
   AlertTriangle,
   Loader2,
+  Search,
+  X,
+  Layers,
+  Archive,
+  Play,
 } from 'lucide-react'
 import { PageHeader } from '@/components/patterns/PageHeader'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -41,13 +47,16 @@ import {
 import { useI18n } from '@/lib/i18n'
 import {
   applyJob, cancelJob, createJob, createJobFromPath, deleteJob, downloadJob,
-  getCapabilities, getHits, getJob, getPreview, isDesktopApp, listHistory,
-  listJobs, pickDesktopDirectory, pickDesktopFile, saveJob, scanJob,
+  downloadJobsZip, getCapabilities, getHits, getJob, getMergedHits, getPreview,
+  isDesktopApp, listHistory, listJobs, pickDesktopDirectory, pickDesktopFiles,
+  saveJob, scanJob,
   type ApplyOptions, type FileHistoryEntry, type FileHitView, type FileJobView,
-  type FilesCapabilities, type PreviewBox, type Redaction, type TextEdit,
+  type FilesCapabilities, type MergedFileHitView, type PreviewBox,
+  type Redaction, type TextEdit,
 } from '@/api/files'
 
 const NON_TERMINAL = new Set(['created', 'probing', 'ready', 'queued', 'scanning', 'applying', 'canceling'])
+const TERMINAL = new Set(['done', 'failed', 'canceled', 'expired'])
 const VISUAL = new Set(['pdf', 'image'])
 const TEXT_CARRIERS = new Set(['ooxml', 'text'])
 const PROGRESS_STAGES = new Set([
@@ -62,6 +71,11 @@ const defaultOptions = (): ApplyOptions => ({
   strip_non_image_media: false,
   dismissed_boxes: [],
 })
+
+const EMPTY_STR_MAP: Record<string, string> = {}
+const EMPTY_BOOL_MAP: Record<string, boolean> = {}
+const EMPTY_REDACTIONS: Redaction[] = []
+const DEFAULT_APPLY_OPTIONS: ApplyOptions = defaultOptions()
 
 function statusTone(status: string): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (status === 'done') return 'default'
@@ -92,6 +106,9 @@ const ERROR_KEYS: Record<string, string> = {
   pdf_parse_failed: 'files.err.parseFailed',
   file_type_unsupported: 'files.err.typeUnsupported',
   engine_restart: 'files.err.engineRestart',
+  invalid_batch_id: 'files.err.invalidBatch',
+  invalid_job_ids: 'files.err.invalidJobs',
+  no_output: 'files.err.noOutput',
 }
 
 function describeError(code: string, tf: TranslateF): string {
@@ -124,7 +141,6 @@ function describeCoverage(
     if (n(k) > 0) lines.push(tf(key, { n: n(k) }))
   }
   if (has('scanned')) {
-    // 纯文本是整文件一次扫完，说「1 个部分」反而费解
     if (carrier === 'text') lines.push(tf('files.cov.fullText'))
     else if (n('scanned') > 0) lines.push(tf('files.cov.scanned', { n: n('scanned') }))
   }
@@ -176,6 +192,24 @@ function describeWarnings(warnings: string[], tf: TranslateF): string[] {
   })
 }
 
+function calcProgressPct(progress: Record<string, unknown> | undefined): {
+  stage: string
+  cur: number
+  total: number
+  pct: number
+  indeterminate: boolean
+} {
+  const stage = typeof progress?.stage === 'string' ? progress.stage : ''
+  const cur = Number(progress?.current || 0)
+  const total = Number(progress?.total || 0)
+  const indeterminate = Boolean(progress?.indeterminate)
+  const rawPct = progress?.pct
+  const pct = typeof rawPct === 'number' && Number.isFinite(rawPct)
+    ? Math.max(0, Math.min(99, Math.round(rawPct)))
+    : (total > 0 ? Math.max(0, Math.min(99, Math.round((cur / total) * 100))) : 0)
+  return { stage, cur, total, pct, indeterminate }
+}
+
 export default function FilesPage() {
   const { t, tf } = useI18n()
   const [caps, setCaps] = useState<FilesCapabilities | null>(null)
@@ -183,34 +217,64 @@ export default function FilesPage() {
   const [loading, setLoading] = useState(true)
   const [jobs, setJobs] = useState<FileJobView[]>([])
   const [selected, setSelected] = useState<FileJobView | null>(null)
+  const [viewMode, setViewMode] = useState<'single' | 'merged'>('single')
+
+  // 单文件命中与跨文件去重命中
   const [hits, setHits] = useState<FileHitView[]>([])
   const [hitsBusy, setHitsBusy] = useState(false)
   const [hitsError, setHitsError] = useState('')
-  const [replaces, setReplaces] = useState<Record<string, string>>({})
-  const [keeps, setKeeps] = useState<Record<string, boolean>>({})
-  const [redactions, setRedactions] = useState<Redaction[]>([])
+  const [mergedHits, setMergedHits] = useState<MergedFileHitView[]>([])
+  const [mergedTotalOcc, setMergedTotalOcc] = useState(0)
+  const [mergedBusy, setMergedBusy] = useState(false)
+  const [mergedError, setMergedError] = useState('')
+
+  // 按 jobId 持久化编辑态，切换任务或往返统一视图不丢改动
+  const [replacesByJob, setReplacesByJob] = useState<Record<string, Record<string, string>>>({})
+  const [keepsByJob, setKeepsByJob] = useState<Record<string, Record<string, boolean>>>({})
+  const [redactionsByJob, setRedactionsByJob] = useState<Record<string, Redaction[]>>({})
+  const [dismissedByJob, setDismissedByJob] = useState<Record<string, Record<string, boolean>>>({})
+  const [optionsByJob, setOptionsByJob] = useState<Record<string, ApplyOptions>>({})
+
+  // 命中清单筛选
+  const [hitSearch, setHitSearch] = useState('')
+  const [hitLabelFilter, setHitLabelFilter] = useState('ALL')
+  const [hitStatusFilter, setHitStatusFilter] = useState<'all' | 'edited' | 'kept'>('all')
+
   const [page, setPage] = useState(1)
   const [preview, setPreview] = useState('')
   const [autoBoxes, setAutoBoxes] = useState<PreviewBox[]>([])
-  const [dismissedBoxes, setDismissedBoxes] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState('')
   const [previewBusy, setPreviewBusy] = useState(false)
   const [previewTick, setPreviewTick] = useState(0)
   const [tool, setTool] = useState<'rect' | 'brush'>('rect')
   const [mode, setMode] = useState<'manual' | 'auto'>('manual')
   const modeTouchedRef = useRef(false)
-  const [options, setOptions] = useState<ApplyOptions>(defaultOptions)
+
   const [notice, setNotice] = useState('')
   const [savedPath, setSavedPath] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState<{ cur: number; total: number } | null>(null)
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState<FileHistoryEntry[]>([])
   const [historyOpen, setHistoryOpen] = useState(false)
+
   const dragRef = useRef<{ x: number; y: number } | null>(null)
   const brushRef = useRef<[number, number][]>([])
   const [draft, setDraft] = useState<Redaction | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const hitScrollRef = useRef<HTMLDivElement | null>(null)
+
+  // 自动批量扫描队列与自动进入统一清单开关
+  const autoScanIdsRef = useRef<Set<string>>(new Set())
+  const dispatchingIdsRef = useRef<Set<string>>(new Set())
+  const retryTimerRef = useRef<number | null>(null)
+  const autoSwitchMergedRef = useRef(false)
+  const [queueTick, setQueueTick] = useState(0)
+
+  useEffect(() => () => {
+    if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
+  }, [])
 
   // 能力探测（G801）
   // @guard G801 关闭/探测失败只给空态，不渲染上传与列表
@@ -241,8 +305,12 @@ export default function FilesPage() {
 
   const refreshJobs = useCallback(() => {
     listJobs()
-      .then((res) => setJobs(res.jobs || []))
-      .catch(() => { /* 列表失败保留旧值，错误由 selected 区呈现 */ })
+      .then((res) => {
+        const nextJobs = res.jobs || []
+        setJobs(nextJobs)
+        setSelected((prev) => (prev ? nextJobs.find((j) => j.id === prev.id) || prev : prev))
+      })
+      .catch(() => { /* 列表失败保留旧值 */ })
     refreshHistory()
   }, [refreshHistory])
 
@@ -251,7 +319,7 @@ export default function FilesPage() {
     refreshJobs()
   }, [caps?.enabled, refreshJobs])
 
-  // 轮询：非终态 1s；终态停止（G803）
+  // 轮询选中任务：非终态 1s；终态停止（G803）
   // @guard G803 状态徽标 + 终态停轮询
   const jobId = selected?.id
   const jobStatus = selected?.status
@@ -271,6 +339,95 @@ export default function FilesPage() {
     return () => window.clearInterval(timer)
   }, [jobId, jobStatus, refreshHistory])
 
+  // 后台其他活跃任务同步轮询（仅当存在排队/扫描/生成中任务或本地待派发队列时运行）
+  const hasActiveJobs = jobs.some((j) => NON_TERMINAL.has(j.status) && j.status !== 'ready')
+    || autoScanIdsRef.current.size > 0
+    || dispatchingIdsRef.current.size > 0
+  useEffect(() => {
+    if (!caps?.enabled || !hasActiveJobs) return
+    const timer = window.setInterval(() => {
+      listJobs()
+        .then((res) => {
+          const nextJobs = res.jobs || []
+          setJobs(nextJobs)
+          setSelected((prev) => (prev ? nextJobs.find((j) => j.id === prev.id) || prev : prev))
+          if (!nextJobs.some((j) => NON_TERMINAL.has(j.status) && j.status !== 'ready')) {
+            refreshHistory()
+          }
+        })
+        .catch(() => {})
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [caps?.enabled, hasActiveJobs, refreshHistory])
+
+  // 自动队列调度：同时计入本地在飞 POST /scan，避免并发刷新触发后端 queue_max 429 误报
+  useEffect(() => {
+    if (!caps?.enabled) return
+    const queueLimit = Math.max(1, Number(caps.queue_max || 8))
+    const activeIds = new Set<string>(dispatchingIdsRef.current)
+    for (const j of jobs) {
+      if (j.status === 'queued' || j.status === 'scanning') activeIds.add(j.id)
+    }
+    const avail = queueLimit - activeIds.size
+    if (avail <= 0) return
+    const readyToStart = jobs
+      .filter((j) => j.status === 'ready' && autoScanIdsRef.current.has(j.id) && !dispatchingIdsRef.current.has(j.id))
+      .slice(0, avail)
+    if (readyToStart.length === 0) return
+    for (const j of readyToStart) {
+      autoScanIdsRef.current.delete(j.id)
+      dispatchingIdsRef.current.add(j.id)
+      let rateLimited = false
+      void scanJob(j.id, mode)
+        .then((res) => {
+          setJobs((prev) => prev.map((x) => (x.id === res.job.id ? res.job : x)))
+          setSelected((prev) => (prev?.id === res.job.id ? res.job : prev))
+        })
+        .catch((e: unknown) => {
+          if ((e as { code?: string })?.code === 'FILE_7402') {
+            rateLimited = true
+            autoScanIdsRef.current.add(j.id)
+            if (retryTimerRef.current === null) {
+              retryTimerRef.current = window.setTimeout(() => {
+                retryTimerRef.current = null
+                setQueueTick((n) => n + 1)
+              }, 1000)
+            }
+            return
+          }
+          setNotice(describeRequestError(e, tf))
+        })
+        .finally(() => {
+          dispatchingIdsRef.current.delete(j.id)
+          if (!rateLimited && autoScanIdsRef.current.size > 0) {
+            setQueueTick((n) => n + 1)
+          }
+        })
+    }
+  }, [caps?.enabled, caps?.queue_max, jobs, mode, queueTick, tf])
+
+  const reviewJobs = useMemo(() => jobs.filter((j) => j.status === 'awaiting_review'), [jobs])
+  const readyJobs = useMemo(() => jobs.filter((j) => j.status === 'ready'), [jobs])
+  const doneJobs = useMemo(() => jobs.filter((j) => j.status === 'done'), [jobs])
+  const finishedJobs = useMemo(() => jobs.filter((j) => TERMINAL.has(j.status)), [jobs])
+
+  // 批次自动扫描全部完成后，自动展开跨文件统一清单
+  useEffect(() => {
+    if (!autoSwitchMergedRef.current) return
+    const stillPending = jobs.some((j) => ['created', 'probing', 'ready', 'queued', 'scanning'].includes(j.status))
+    if (!stillPending && reviewJobs.length >= 2) {
+      autoSwitchMergedRef.current = false
+      setViewMode('merged')
+    }
+  }, [jobs, reviewJobs.length])
+
+  // 当待确认文件不足 2 个时，如果停在统一视图则回到单文件视图
+  useEffect(() => {
+    if (viewMode === 'merged' && reviewJobs.length < 2) {
+      setViewMode('single')
+    }
+  }, [viewMode, reviewJobs.length])
+
   // 命中清单（G804）
   // @guard G804 凭据只读，非凭据才渲染输入与保留开关
   useEffect(() => {
@@ -280,17 +437,37 @@ export default function FilesPage() {
     getHits(jobId)
       .then((res) => {
         setHits(res.hits || [])
-        setReplaces({})
-        setKeeps({})
       })
       .catch((e: unknown) => setHitsError(String((e as Error)?.message || e)))
       .finally(() => setHitsBusy(false))
   }, [jobId, jobStatus])
 
+  // 跨文件统一去重命中清单
+  const reviewJobIdsKey = useMemo(() => reviewJobs.map((j) => j.id).join(','), [reviewJobs])
+  useEffect(() => {
+    if (viewMode !== 'merged' || reviewJobs.length === 0) return
+    const ids = reviewJobIdsKey ? reviewJobIdsKey.split(',') : []
+    if (ids.length === 0) return
+    setMergedBusy(true)
+    setMergedError('')
+    getMergedHits(ids)
+      .then((res) => {
+        setMergedHits(res.hits || [])
+        setMergedTotalOcc(Number(res.total_occurrences || 0))
+      })
+      .catch((e: unknown) => setMergedError(describeRequestError(e, tf)))
+      .finally(() => setMergedBusy(false))
+  }, [viewMode, reviewJobIdsKey, reviewJobs.length, tf])
+
+  // 切换任务或视图模式时重置标签筛选，防旧标签把新文件清空
+  useEffect(() => {
+    setHitLabelFilter('ALL')
+  }, [jobId, viewMode])
+
   // 预览（G805）
   // @guard G805 页码夹在 1..page_count，失败给占位
   useEffect(() => {
-    if (!jobId || !jobCarrier || !VISUAL.has(jobCarrier) || jobStatus !== 'awaiting_review') {
+    if (viewMode !== 'single' || !jobId || !jobCarrier || !VISUAL.has(jobCarrier) || jobStatus !== 'awaiting_review') {
       setPreview('')
       setAutoBoxes([])
       return
@@ -309,14 +486,55 @@ export default function FilesPage() {
         setPreviewError(describeRequestError(e, tf))
       })
       .finally(() => setPreviewBusy(false))
-  }, [jobId, jobStatus, jobCarrier, jobPages, page, previewTick, tf])
+  }, [viewMode, jobId, jobStatus, jobCarrier, jobPages, page, previewTick, tf])
+
+  const replaces = useMemo(
+    () => (jobId ? replacesByJob[jobId] || EMPTY_STR_MAP : EMPTY_STR_MAP),
+    [jobId, replacesByJob],
+  )
+  const keeps = useMemo(
+    () => (jobId ? keepsByJob[jobId] || EMPTY_BOOL_MAP : EMPTY_BOOL_MAP),
+    [jobId, keepsByJob],
+  )
+  const redactions = useMemo(
+    () => (jobId ? redactionsByJob[jobId] || EMPTY_REDACTIONS : EMPTY_REDACTIONS),
+    [jobId, redactionsByJob],
+  )
+  const dismissedBoxes = useMemo(
+    () => (jobId ? dismissedByJob[jobId] || EMPTY_BOOL_MAP : EMPTY_BOOL_MAP),
+    [jobId, dismissedByJob],
+  )
+  const options = useMemo(
+    () => (jobId ? optionsByJob[jobId] || DEFAULT_APPLY_OPTIONS : DEFAULT_APPLY_OPTIONS),
+    [jobId, optionsByJob],
+  )
+
+  const setJobReplace = (jid: string, hitId: string, val: string) => {
+    setReplacesByJob((prev) => ({
+      ...prev,
+      [jid]: { ...(prev[jid] || {}), [hitId]: val },
+    }))
+  }
+  const setJobKeep = (jid: string, hitId: string, val: boolean) => {
+    setKeepsByJob((prev) => ({
+      ...prev,
+      [jid]: { ...(prev[jid] || {}), [hitId]: val },
+    }))
+  }
+  const setSelectedOptions = (updater: (cur: ApplyOptions) => ApplyOptions) => {
+    if (!selected) return
+    const jid = selected.id
+    setOptionsByJob((prev) => ({
+      ...prev,
+      [jid]: updater(prev[jid] || defaultOptions()),
+    }))
+  }
 
   const select = (job: FileJobView) => {
+    autoSwitchMergedRef.current = false
+    setViewMode('single')
     setSelected(job)
     setPage(1)
-    setRedactions([])
-    setDismissedBoxes({})
-    setOptions(defaultOptions())
     setNotice('')
     setSavedPath('')
     setHits([])
@@ -324,53 +542,119 @@ export default function FilesPage() {
     setAutoBoxes([])
   }
 
-  const pickLocalFile = async () => {
-    if (!caps || uploading) return
-    setUploadError('')
-    try {
-      const path = await pickDesktopFile(caps.extensions || [])
-      if (!path) return
-      setUploading(true)
-      const res = await createJobFromPath(path)
-      setJobs((prev) => [res.job, ...prev])
-      select(res.job)
-      refreshJobs()
-    } catch (e: unknown) {
-      setUploadError(describeRequestError(e, tf))
-    } finally {
-      setUploading(false)
-    }
-  }
-
-  const upload = async (file: File) => {
-    if (!caps) return
-    setUploadError('')
+  const validateClientFile = (file: File): string | null => {
+    if (!caps) return null
     // @guard G802 超上限前端先拦，不发请求
     const limit = (caps.max_size_mb || 1024) * 1024 * 1024
     if (file.size > limit) {
-      setUploadError(tf('files.tooLarge', { mb: caps.max_size_mb }))
-      return
+      return `${file.name}: ${tf('files.tooLarge', { mb: caps.max_size_mb })}`
     }
-    // 纯文本载体单独更紧的上限：引擎侧 scan_text 整文件读入，超限必失败
     const dot = file.name.lastIndexOf('.')
     const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : ''
     if ((caps.text_extensions || []).includes(ext)) {
       const textLimit = (caps.max_text_mb || 128) * 1024 * 1024
       if (file.size > textLimit) {
-        setUploadError(tf('files.textTooLarge', { mb: caps.max_text_mb }))
-        return
+        return `${file.name}: ${tf('files.textTooLarge', { mb: caps.max_text_mb })}`
       }
     }
+    return null
+  }
+
+  const makeBatchId = () => `fb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+
+  const enqueueBatchCreated = (created: FileJobView[], autoScan: boolean) => {
+    if (created.length === 0) return
+    setJobs((prev) => {
+      const seen = new Set(created.map((c) => c.id))
+      return [...created, ...prev.filter((j) => !seen.has(j.id))]
+    })
+    setSelected(created[0])
+    setPage(1)
+    setNotice('')
+    setSavedPath('')
+    if (autoScan) {
+      autoSwitchMergedRef.current = created.length >= 2
+      for (const j of created) {
+        if (j.status === 'ready') autoScanIdsRef.current.add(j.id)
+      }
+      setQueueTick((n) => n + 1)
+    } else {
+      setViewMode('single')
+    }
+    refreshJobs()
+  }
+
+  const uploadFiles = async (fileList: File[]) => {
+    if (!caps || uploading || fileList.length === 0) return
+    setUploadError('')
     setUploading(true)
+    const isMulti = fileList.length > 1
+    const batchId = isMulti ? makeBatchId() : undefined
+    const created: FileJobView[] = []
+    const errs: string[] = []
     try {
-      const res = await createJob(file)
-      setJobs((prev) => [res.job, ...prev])
-      select(res.job)
-      refreshJobs()
+      for (let i = 0; i < fileList.length; i++) {
+        const file = fileList[i]
+        setUploadProgress(isMulti ? { cur: i + 1, total: fileList.length } : null)
+        const vErr = validateClientFile(file)
+        if (vErr) {
+          errs.push(vErr)
+          continue
+        }
+        try {
+          const res = await createJob(file, batchId)
+          created.push(res.job)
+        } catch (e: unknown) {
+          errs.push(`${file.name}: ${describeRequestError(e, tf)}`)
+        }
+      }
+      enqueueBatchCreated(created, isMulti)
+      if (errs.length > 0) {
+        setUploadError(
+          errs.length === 1 && created.length === 0
+            ? errs[0]
+            : tf('files.uploadPartialFail', { msg: errs.slice(0, 3).join('; ') }),
+        )
+      }
+    } finally {
+      setUploading(false)
+      setUploadProgress(null)
+    }
+  }
+
+  const pickLocalFiles = async () => {
+    if (!caps || uploading) return
+    setUploadError('')
+    try {
+      const paths = await pickDesktopFiles(caps.extensions || [])
+      if (paths.length === 0) return
+      setUploading(true)
+      const isMulti = paths.length > 1
+      const batchId = isMulti ? makeBatchId() : undefined
+      const created: FileJobView[] = []
+      const errs: string[] = []
+      for (let i = 0; i < paths.length; i++) {
+        setUploadProgress(isMulti ? { cur: i + 1, total: paths.length } : null)
+        try {
+          const res = await createJobFromPath(paths[i], batchId)
+          created.push(res.job)
+        } catch (e: unknown) {
+          errs.push(describeRequestError(e, tf))
+        }
+      }
+      enqueueBatchCreated(created, isMulti)
+      if (errs.length > 0) {
+        setUploadError(
+          errs.length === 1 && created.length === 0
+            ? errs[0]
+            : tf('files.uploadPartialFail', { msg: errs.slice(0, 3).join('; ') }),
+        )
+      }
     } catch (e: unknown) {
       setUploadError(describeRequestError(e, tf))
     } finally {
       setUploading(false)
+      setUploadProgress(null)
     }
   }
 
@@ -379,14 +663,48 @@ export default function FilesPage() {
   }
   const onDrop = (e: DragEvent) => {
     e.preventDefault()
-    const file = e.dataTransfer.files?.[0]
-    if (file) void upload(file)
+    const files = Array.from(e.dataTransfer.files || [])
+    if (files.length > 0) void uploadFiles(files)
+  }
+
+  const clearJobDraft = (jid: string) => {
+    setReplacesByJob((prev) => {
+      if (!(jid in prev)) return prev
+      const next = { ...prev }
+      delete next[jid]
+      return next
+    })
+    setKeepsByJob((prev) => {
+      if (!(jid in prev)) return prev
+      const next = { ...prev }
+      delete next[jid]
+      return next
+    })
+    setRedactionsByJob((prev) => {
+      if (!(jid in prev)) return prev
+      const next = { ...prev }
+      delete next[jid]
+      return next
+    })
+    setDismissedByJob((prev) => {
+      if (!(jid in prev)) return prev
+      const next = { ...prev }
+      delete next[jid]
+      return next
+    })
+    setOptionsByJob((prev) => {
+      if (!(jid in prev)) return prev
+      const next = { ...prev }
+      delete next[jid]
+      return next
+    })
   }
 
   const doScan = async () => {
     if (!selected) return
     setBusy(true)
     setNotice('')
+    clearJobDraft(selected.id)
     try {
       const res = await scanJob(selected.id, mode)
       setSelected(res.job)
@@ -396,6 +714,39 @@ export default function FilesPage() {
     } finally {
       setBusy(false)
     }
+  }
+
+  const doScanAllReady = () => {
+    if (readyJobs.length === 0) return
+    setNotice('')
+    autoSwitchMergedRef.current = readyJobs.length + reviewJobs.length >= 2
+    for (const j of readyJobs) {
+      autoScanIdsRef.current.add(j.id)
+    }
+    setQueueTick((n) => n + 1)
+  }
+
+  const buildEditsForJob = (jid: string): { edits: TextEdit[]; valid: boolean } => {
+    const rep = replacesByJob[jid] || {}
+    const kp = keepsByJob[jid] || {}
+    const edits: TextEdit[] = []
+    const seenIds = new Set<string>()
+    for (const [hid, kept] of Object.entries(kp)) {
+      if (kept) {
+        edits.push({ hit_id: hid, action: 'keep' })
+        seenIds.add(hid)
+      }
+    }
+    for (const [hid, rawText] of Object.entries(rep)) {
+      if (seenIds.has(hid)) continue
+      const text = (rawText || '').trim()
+      if (!text) continue
+      if (text.length > 64 || /[\r\n]/.test(text) || text.includes('{{') || text.includes('}}')) {
+        return { edits: [], valid: false }
+      }
+      edits.push({ hit_id: hid, action: 'replace', text })
+    }
+    return { edits, valid: true }
   }
 
   const doApply = async () => {
@@ -429,9 +780,56 @@ export default function FilesPage() {
     }
   }
 
+  const doApplyAll = async () => {
+    if (reviewJobs.length === 0) return
+    const payloads: { job: FileJobView; edits: TextEdit[] }[] = []
+    for (const j of reviewJobs) {
+      const built = buildEditsForJob(j.id)
+      if (!built.valid) {
+        setNotice(t('files.badReplacement'))
+        return
+      }
+      payloads.push({ job: j, edits: built.edits })
+    }
+    setBusy(true)
+    setNotice('')
+    setSavedPath('')
+    let okCount = 0
+    const errs: string[] = []
+    try {
+      for (const { job, edits } of payloads) {
+        try {
+          const res = await applyJob(
+            job.id,
+            edits,
+            redactionsByJob[job.id] || [],
+            optionsByJob[job.id] || defaultOptions(),
+          )
+          okCount += 1
+          setJobs((prev) => prev.map((x) => (x.id === res.job.id ? res.job : x)))
+          setSelected((prev) => (prev?.id === res.job.id ? res.job : prev))
+        } catch (e: unknown) {
+          errs.push(`${job.filename}: ${describeRequestError(e, tf)}`)
+        }
+      }
+      refreshJobs()
+      if (errs.length > 0) {
+        setNotice(tf('files.batchApplyPartial', {
+          ok: okCount,
+          fail: errs.length,
+          msg: errs.slice(0, 2).join('; '),
+        }))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const doCancel = async () => {
     // @guard G811 仅允许态可取消，取消后轮询自然停止
     if (!selected) return
+    autoScanIdsRef.current.delete(selected.id)
+    dispatchingIdsRef.current.delete(selected.id)
     try {
       const res = await cancelJob(selected.id)
       setSelected(res.job)
@@ -444,13 +842,36 @@ export default function FilesPage() {
   const doDelete = async () => {
     if (!selected) return
     if (!window.confirm(t('files.deleteConfirm'))) return
+    const delId = selected.id
+    autoScanIdsRef.current.delete(delId)
+    dispatchingIdsRef.current.delete(delId)
     try {
-      await deleteJob(selected.id)
+      await deleteJob(delId)
+      clearJobDraft(delId)
       setSelected(null)
-      setJobs((prev) => prev.filter((j) => j.id !== selected.id))
+      setJobs((prev) => prev.filter((j) => j.id !== delId))
     } catch (e: unknown) {
       setNotice(describeRequestError(e, tf))
     }
+  }
+
+  const doClearFinished = async () => {
+    if (finishedJobs.length === 0) return
+    if (!window.confirm(t('files.clearFinishedConfirm'))) return
+    const targetIds = finishedJobs.map((j) => j.id)
+    for (const jid of targetIds) {
+      try {
+        await deleteJob(jid)
+        clearJobDraft(jid)
+      } catch {
+        // 单个清理失败继续其余任务
+      }
+    }
+    setJobs((prev) => prev.filter((j) => !targetIds.includes(j.id)))
+    if (selected && targetIds.includes(selected.id)) {
+      setSelected(null)
+    }
+    refreshJobs()
   }
 
   const doDownload = async () => {
@@ -468,6 +889,16 @@ export default function FilesPage() {
     }
   }
 
+  const doDownloadZip = async () => {
+    if (doneJobs.length === 0) return
+    setNotice('')
+    try {
+      await downloadJobsZip(doneJobs.map((j) => j.id))
+    } catch (e: unknown) {
+      setNotice(describeRequestError(e, tf))
+    }
+  }
+
   const doSaveAs = async () => {
     if (!selected || selected.status !== 'done') return
     setNotice('')
@@ -476,7 +907,39 @@ export default function FilesPage() {
       const dir = await pickDesktopDirectory()
       if (!dir) return
       const res = await saveJob(selected.id, dir, false)
-      setSavedPath(res.path || dir)
+      setSavedPath(tf('files.savedTo', { path: res.path || dir }))
+    } catch (e: unknown) {
+      setNotice(describeRequestError(e, tf))
+    }
+  }
+
+  const doSaveAllAs = async () => {
+    if (doneJobs.length === 0) return
+    setNotice('')
+    setSavedPath('')
+    try {
+      const dir = await pickDesktopDirectory()
+      if (!dir) return
+      let okCount = 0
+      const errs: string[] = []
+      for (const j of doneJobs) {
+        try {
+          await saveJob(j.id, dir, false)
+          okCount += 1
+        } catch (e: unknown) {
+          errs.push(`${j.filename}: ${describeRequestError(e, tf)}`)
+        }
+      }
+      if (errs.length === 0) {
+        setSavedPath(tf('files.savedBatch', { ok: okCount, path: dir }))
+      } else {
+        setNotice(tf('files.savedBatchPartial', {
+          ok: okCount,
+          path: dir,
+          fail: errs.length,
+          msg: errs.slice(0, 2).join('; '),
+        }))
+      }
     } catch (e: unknown) {
       setNotice(describeRequestError(e, tf))
     }
@@ -538,23 +1001,34 @@ export default function FilesPage() {
   }
 
   const toggleDismissAutoBox = (boxId: string) => {
-    setDismissedBoxes((prev) => {
-      const next = { ...prev, [boxId]: !prev[boxId] }
-      const list = Object.keys(next).filter((k) => next[k])
-      setOptions((o) => ({ ...o, dismissed_boxes: list }))
-      return next
+    if (!selected) return
+    const jid = selected.id
+    setDismissedByJob((prev) => {
+      const cur = prev[jid] || {}
+      const nextJob = { ...cur, [boxId]: !cur[boxId] }
+      const list = Object.keys(nextJob).filter((k) => nextJob[k])
+      setOptionsByJob((opPrev) => ({
+        ...opPrev,
+        [jid]: { ...(opPrev[jid] || defaultOptions()), dismissed_boxes: list },
+      }))
+      return { ...prev, [jid]: nextJob }
     })
   }
 
   const restorePageAutoBoxes = () => {
-    setDismissedBoxes((prev) => {
-      const next = { ...prev }
+    if (!selected) return
+    const jid = selected.id
+    setDismissedByJob((prev) => {
+      const nextJob = { ...(prev[jid] || {}) }
       for (const b of visibleAutoBoxes) {
-        delete next[b.id]
+        delete nextJob[b.id]
       }
-      const list = Object.keys(next).filter((k) => next[k])
-      setOptions((o) => ({ ...o, dismissed_boxes: list }))
-      return next
+      const list = Object.keys(nextJob).filter((k) => nextJob[k])
+      setOptionsByJob((opPrev) => ({
+        ...opPrev,
+        [jid]: { ...(opPrev[jid] || defaultOptions()), dismissed_boxes: list },
+      }))
+      return { ...prev, [jid]: nextJob }
     })
   }
 
@@ -564,10 +1038,12 @@ export default function FilesPage() {
     const startPt = dragRef.current
     const hadRectDraft = draft?.kind === 'rect' && (draft.rect?.[2] || 0) > 0.002 && (draft.rect?.[3] || 0) > 0.002
     const hadPathDraft = draft?.kind === 'path' && (draft.points?.length || 0) >= 2
-    if (hadRectDraft && draft) {
-      setRedactions((prev) => [...prev, { ...draft, id: 'r' + (prev.length + 1) }])
-    } else if (hadPathDraft && draft) {
-      setRedactions((prev) => [...prev, { ...draft, id: 'r' + (prev.length + 1) }])
+    if (selected && (hadRectDraft || hadPathDraft) && draft) {
+      const jid = selected.id
+      setRedactionsByJob((prev) => {
+        const list = prev[jid] || []
+        return { ...prev, [jid]: [...list, { ...draft, id: 'r' + (list.length + 1) }] }
+      })
     } else if (allowClick && startPt) {
       const matched = visibleAutoBoxes.filter((b) => {
         if (b.kind !== 'rect' || b.can_dismiss === false || !b.rect) return false
@@ -584,7 +1060,183 @@ export default function FilesPage() {
     brushRef.current = []
   }
 
-  const clearAreas = () => setRedactions((prev) => prev.filter((r) => r.page !== page))
+  const clearAreas = () => {
+    if (!selected) return
+    const jid = selected.id
+    setRedactionsByJob((prev) => ({
+      ...prev,
+      [jid]: (prev[jid] || []).filter((r) => r.page !== page),
+    }))
+  }
+
+  // 单文件 / 统一视图的当前命中列表与双向同步读写
+  const isMergedView = viewMode === 'merged' && reviewJobs.length >= 2
+
+  const getSingleReplace = useCallback(
+    (h: FileHitView) => replaces[h.hit_id] || '',
+    [replaces],
+  )
+  const getSingleKeep = useCallback(
+    (h: FileHitView) => !!keeps[h.hit_id],
+    [keeps],
+  )
+
+  const getMergedReplace = useCallback((m: MergedFileHitView) => {
+    for (const f of m.files) {
+      const v = replacesByJob[f.job_id]?.[f.hit_id]
+      if (v) return v
+    }
+    return ''
+  }, [replacesByJob])
+
+  const getMergedKeep = useCallback(
+    (m: MergedFileHitView) => m.files.length > 0 && m.files.every((f) => !!keepsByJob[f.job_id]?.[f.hit_id]),
+    [keepsByJob],
+  )
+
+  const setMergedReplace = (m: MergedFileHitView, val: string) => {
+    setReplacesByJob((prev) => {
+      const next = { ...prev }
+      for (const f of m.files) {
+        next[f.job_id] = { ...(next[f.job_id] || {}), [f.hit_id]: val }
+      }
+      return next
+    })
+  }
+
+  const setMergedKeep = (m: MergedFileHitView, val: boolean) => {
+    setKeepsByJob((prev) => {
+      const next = { ...prev }
+      for (const f of m.files) {
+        next[f.job_id] = { ...(next[f.job_id] || {}), [f.hit_id]: val }
+      }
+      return next
+    })
+  }
+
+  const labelCounts = useMemo(() => {
+    const map = new Map<string, number>()
+    const list = isMergedView ? mergedHits : hits
+    for (const item of list) {
+      const lbl = item.label || '—'
+      map.set(lbl, (map.get(lbl) || 0) + 1)
+    }
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1])
+  }, [isMergedView, mergedHits, hits])
+
+  const filteredSingleHits = useMemo(() => {
+    if (isMergedView) return []
+    const q = hitSearch.trim().toLowerCase()
+    return hits.filter((hit) => {
+      const lbl = hit.label || '—'
+      if (hitLabelFilter !== 'ALL' && lbl !== hitLabelFilter) return false
+      const rep = getSingleReplace(hit)
+      const kept = getSingleKeep(hit)
+      if (hitStatusFilter === 'kept' && !kept) return false
+      if (hitStatusFilter === 'edited' && (kept || !rep.trim())) return false
+      if (!q) return true
+      const hay = [
+        hit.original || '',
+        hit.preview || '',
+        lbl,
+        rep,
+        ...(hit.locations || []),
+      ].join(' ').toLowerCase()
+      return hay.includes(q)
+    })
+  }, [isMergedView, hits, hitSearch, hitLabelFilter, hitStatusFilter, getSingleReplace, getSingleKeep])
+
+  const filteredMergedHits = useMemo(() => {
+    if (!isMergedView) return []
+    const q = hitSearch.trim().toLowerCase()
+    return mergedHits.filter((hit) => {
+      const lbl = hit.label || '—'
+      if (hitLabelFilter !== 'ALL' && lbl !== hitLabelFilter) return false
+      const rep = getMergedReplace(hit)
+      const kept = getMergedKeep(hit)
+      if (hitStatusFilter === 'kept' && !kept) return false
+      if (hitStatusFilter === 'edited' && (kept || !rep.trim())) return false
+      if (!q) return true
+      const hay = [
+        hit.original || '',
+        hit.preview || '',
+        lbl,
+        rep,
+        ...(hit.locations || []),
+        ...hit.files.map((f) => f.filename),
+      ].join(' ').toLowerCase()
+      return hay.includes(q)
+    })
+  }, [isMergedView, mergedHits, hitSearch, hitLabelFilter, hitStatusFilter, getMergedReplace, getMergedKeep])
+
+  const activeTotalCount = isMergedView ? mergedHits.length : hits.length
+  const activeFilteredCount = isMergedView ? filteredMergedHits.length : filteredSingleHits.length
+  const singleTotalOcc = useMemo(
+    () => hits.reduce((sum, h) => sum + Number(h.count || 1), 0),
+    [hits],
+  )
+
+  const hitVirtualizer = useVirtualizer({
+    count: activeFilteredCount,
+    getScrollElement: () => hitScrollRef.current,
+    estimateSize: () => 56,
+    overscan: 8,
+  })
+
+  const bulkUpdateFiltered = (action: 'keep' | 'mask' | 'clear') => {
+    if (isMergedView) {
+      const targets = filteredMergedHits.filter((h) => h.editable)
+      if (targets.length === 0) return
+      if (action === 'clear') {
+        setReplacesByJob((prev) => {
+          const next = { ...prev }
+          for (const h of targets) {
+            for (const f of h.files) {
+              if (!next[f.job_id]) continue
+              const copy = { ...next[f.job_id] }
+              delete copy[f.hit_id]
+              next[f.job_id] = copy
+            }
+          }
+          return next
+        })
+        return
+      }
+      const keepVal = action === 'keep'
+      setKeepsByJob((prev) => {
+        const next = { ...prev }
+        for (const h of targets) {
+          if (keepVal && !h.can_keep) continue
+          for (const f of h.files) {
+            next[f.job_id] = { ...(next[f.job_id] || {}), [f.hit_id]: keepVal }
+          }
+        }
+        return next
+      })
+      return
+    }
+    if (!selected) return
+    const jid = selected.id
+    const targets = filteredSingleHits.filter((h) => h.editable)
+    if (targets.length === 0) return
+    if (action === 'clear') {
+      setReplacesByJob((prev) => {
+        const copy = { ...(prev[jid] || {}) }
+        for (const h of targets) delete copy[h.hit_id]
+        return { ...prev, [jid]: copy }
+      })
+      return
+    }
+    const keepVal = action === 'keep'
+    setKeepsByJob((prev) => {
+      const copy = { ...(prev[jid] || {}) }
+      for (const h of targets) {
+        if (keepVal && !h.can_keep) continue
+        copy[h.hit_id] = keepVal
+      }
+      return { ...prev, [jid]: copy }
+    })
+  }
 
   const desktopMode = isDesktopApp()
   const canScan = selected?.status === 'ready'
@@ -603,12 +1255,7 @@ export default function FilesPage() {
   const warningLines = selected ? describeWarnings(selected.warnings || [], tf) : []
   const embeddedHandled = Number(selected?.coverage?.masked_embedded_images || 0) > 0
     || Number(selected?.coverage?.covered_embedded_images || 0) > 0
-  const progressStage = typeof selected?.progress?.stage === 'string' ? selected.progress.stage : ''
-  const progressCur = Number(selected?.progress?.current || 0)
-  const progressTotal = Number(selected?.progress?.total || 0)
-  const progressPct = progressTotal > 0
-    ? Math.max(0, Math.min(100, Math.round((progressCur / progressTotal) * 100)))
-    : 0
+  const selProg = calcProgressPct(selected ? selected.progress : undefined)
 
   if (loading) {
     // @guard G809 加载态有骨架/文案，不渲染空白表格
@@ -642,22 +1289,121 @@ export default function FilesPage() {
 
   const accept = (caps.extensions || []).map((x) => '.' + x).join(',')
 
+  const renderHitFilterBar = () => (
+    <div className="space-y-2 pb-2">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            className="h-8 pl-8 pr-7 text-[12px]"
+            placeholder={t('files.searchPlaceholder')}
+            value={hitSearch}
+            onChange={(e) => setHitSearch(e.target.value)}
+          />
+          {hitSearch ? (
+            <button
+              type="button"
+              onClick={() => setHitSearch('')}
+              className="absolute right-2 top-2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </div>
+        <Select value={hitStatusFilter} onValueChange={(v) => setHitStatusFilter(v as 'all' | 'edited' | 'kept')}>
+          <SelectTrigger className="h-8 w-[124px] text-[12px]"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t('files.filterStatusAll')}</SelectItem>
+            <SelectItem value="edited">{t('files.filterStatusEdited')}</SelectItem>
+            <SelectItem value="kept">{t('files.filterStatusKept')}</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex flex-wrap items-center gap-1">
+          <Button type="button" variant="outline" size="sm" className="h-8 px-2 text-[11px]"
+            onClick={() => bulkUpdateFiltered('keep')}>
+            {t('files.bulkKeepAll')}
+          </Button>
+          <Button type="button" variant="outline" size="sm" className="h-8 px-2 text-[11px]"
+            onClick={() => bulkUpdateFiltered('mask')}>
+            {t('files.bulkMaskAll')}
+          </Button>
+          <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-[11px]"
+            onClick={() => bulkUpdateFiltered('clear')}>
+            {t('files.bulkClearReplace')}
+          </Button>
+        </div>
+      </div>
+
+      {labelCounts.length > 1 ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setHitLabelFilter('ALL')}
+            className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+              hitLabelFilter === 'ALL'
+                ? 'border-primary bg-primary/10 font-medium text-primary-ink'
+                : 'border-border/70 text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+            }`}
+          >
+            {t('files.filterAll')} ({activeTotalCount})
+          </button>
+          {labelCounts.map(([lbl, cnt]) => (
+            <button
+              key={lbl}
+              type="button"
+              onClick={() => setHitLabelFilter(lbl)}
+              className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                hitLabelFilter === lbl
+                  ? 'border-primary bg-primary/10 font-medium text-primary-ink'
+                  : 'border-border/70 text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+              }`}
+            >
+              {lbl} ({cnt})
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+
   return (
     <div className="space-y-4">
       <PageHeader
         title={t('nav.files')}
         subtitle={t('files.subtitle')}
         actions={(
-          <Button variant="outline" size="sm" onClick={() => { refreshJobs(); loadCaps() }}>
-            <RefreshCw className="mr-1.5 h-4 w-4" /> {t('files.refresh')}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {readyJobs.length >= 2 ? (
+              <Button variant="outline" size="sm" onClick={doScanAllReady}>
+                <Play className="mr-1.5 h-3.5 w-3.5" /> {tf('files.scanAll', { n: readyJobs.length })}
+              </Button>
+            ) : null}
+            {reviewJobs.length >= 2 ? (
+              <Button size="sm" onClick={doApplyAll} disabled={busy}>
+                <ShieldCheck className="mr-1.5 h-4 w-4" /> {tf('files.applyAll', { n: reviewJobs.length })}
+              </Button>
+            ) : null}
+            {doneJobs.length >= 2 ? (
+              <Button variant="outline" size="sm" onClick={doDownloadZip}>
+                <Archive className="mr-1.5 h-4 w-4" /> {tf('files.downloadZip', { n: doneJobs.length })}
+              </Button>
+            ) : null}
+            {doneJobs.length >= 2 && caps.path_source && desktopMode ? (
+              <Button variant="outline" size="sm" onClick={doSaveAllAs}>
+                <FolderOpen className="mr-1.5 h-4 w-4" /> {tf('files.saveAllAs', { n: doneJobs.length })}
+              </Button>
+            ) : null}
+            <Button variant="outline" size="sm" onClick={() => { refreshJobs(); loadCaps() }}>
+              <RefreshCw className="mr-1.5 h-4 w-4" /> {t('files.refresh')}
+            </Button>
+          </div>
         )}
       />
 
-      <Card>
+      <Card data-feature-id="files-dropzone">
         <CardContent className="p-4">
           <div
-            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-8 text-center transition hover:bg-muted/40"
+            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-6 text-center transition hover:bg-muted/40"
             onDragOver={onDragOver}
             onDrop={onDrop}
             onClick={() => inputRef.current?.click()}
@@ -675,22 +1421,32 @@ export default function FilesPage() {
                 disabled={uploading}
                 onClick={(e) => {
                   e.stopPropagation()
-                  void pickLocalFile()
+                  void pickLocalFiles()
                 }}
               >
                 <FolderOpen className="mr-1.5 h-4 w-4" /> {t('files.pickLocalFile')}
               </Button>
             ) : null}
-            {uploading ? <div className="text-[12px]">{t('files.uploading')}</div> : null}
+            {uploading ? (
+              <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <span>
+                  {uploadProgress
+                    ? tf('files.uploadingProgress', uploadProgress)
+                    : t('files.uploading')}
+                </span>
+              </div>
+            ) : null}
             {uploadError ? <div className="text-[12px] text-destructive">{uploadError}</div> : null}
             <input
               ref={inputRef}
               type="file"
+              multiple
               className="hidden"
               accept={accept}
               onChange={(e) => {
-                const f = e.target.files?.[0]
-                if (f) void upload(f)
+                const files = Array.from(e.target.files || [])
+                if (files.length > 0) void uploadFiles(files)
                 e.currentTarget.value = ''
               }}
             />
@@ -703,43 +1459,211 @@ export default function FilesPage() {
           {t('files.empty')}
         </CardContent></Card>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-12">
-          <Card className="lg:col-span-4">
-            <CardHeader className="pb-2"><CardTitle className="text-sm">{t('files.list')}</CardTitle></CardHeader>
-            <CardContent className="space-y-1 p-2">
-              {jobs.map((job) => (
+        <div className="grid items-start gap-4 lg:grid-cols-12">
+          <Card className="flex flex-col lg:sticky lg:top-4 lg:col-span-4 lg:max-h-[calc(100vh-11rem)]">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <span>{t('files.list')}</span>
+                <Badge variant="outline">{jobs.length}</Badge>
+              </CardTitle>
+              {finishedJobs.length > 0 ? (
+                <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px] text-muted-foreground"
+                  onClick={doClearFinished}>
+                  {t('files.clearFinished')}
+                </Button>
+              ) : null}
+            </CardHeader>
+            <CardContent className="flex-1 space-y-1.5 overflow-y-auto p-2">
+              {reviewJobs.length >= 2 ? (
                 <button
-                  key={job.id}
                   type="button"
-                  onClick={() => select(job)}
-                  className={`w-full rounded-lg px-3 py-2 text-left transition ${selected?.id === job.id ? 'bg-muted' : 'hover:bg-muted/50'}`}
+                  onClick={() => setViewMode('merged')}
+                  className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+                    isMergedView
+                      ? 'border-primary/50 bg-primary/10'
+                      : 'border-border/60 bg-muted/30 hover:bg-muted/60'
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-[13px] font-medium">{job.filename}</span>
-                    <Badge variant={statusTone(job.status)}>{t(`files.status.${job.status}`)}</Badge>
+                    <span className="flex items-center gap-1.5 text-[13px] font-semibold text-primary-ink">
+                      <Layers className="h-3.5 w-3.5 shrink-0" />
+                      {t('files.unifiedEntry')}
+                    </span>
+                    <Badge variant="secondary">{reviewJobs.length}</Badge>
                   </div>
-                  <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
-                    <span>{tf('files.size', { n: (job.size / 1024).toFixed(0) })}</span>
-                    {job.page_count ? <span>{tf('files.pages', { n: job.page_count })}</span> : null}
-                    {job.hit_count ? <span>{tf('files.hitCount', { n: job.hit_count })}</span> : null}
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    {tf('files.unifiedEntryDesc', { files: reviewJobs.length })}
                   </div>
                 </button>
-              ))}
+              ) : null}
+
+              {jobs.map((job) => {
+                const jp = calcProgressPct(job.progress)
+                const active = !isMergedView && selected?.id === job.id
+                return (
+                  <button
+                    key={job.id}
+                    type="button"
+                    onClick={() => select(job)}
+                    className={`w-full rounded-lg px-3 py-2 text-left transition ${active ? 'bg-muted' : 'hover:bg-muted/50'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{job.filename}</span>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {job.status === 'scanning' && !jp.indeterminate && jp.pct > 0 ? (
+                          <span className="tabular-nums text-[10px] text-muted-foreground">{jp.pct}%</span>
+                        ) : null}
+                        <Badge variant={statusTone(job.status)}>{t(`files.status.${job.status}`)}</Badge>
+                      </div>
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <span>{tf('files.size', { n: (job.size / 1024).toFixed(0) })}</span>
+                      {job.page_count ? <span>{tf('files.pages', { n: job.page_count })}</span> : null}
+                      {job.hit_count ? <span>{tf('files.hitCount', { n: job.hit_count })}</span> : null}
+                    </div>
+                  </button>
+                )
+              })}
             </CardContent>
           </Card>
 
-          <div className="space-y-4 lg:col-span-8">
-            {!selected ? (
-              <Card><CardContent className="p-8 text-center text-sm text-muted-foreground">
-                {t('files.selectJob')}
+          <div className="min-w-0 space-y-4 lg:col-span-8">
+            {isMergedView ? (
+              <Card>
+                <CardHeader className="space-y-2 pb-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <CardTitle className="flex items-center gap-2 text-sm">
+                      <Layers className="h-4 w-4 text-primary-ink" />
+                      <span>{t('files.unifiedTitle')}</span>
+                      <Badge variant="secondary">
+                        {tf('files.hitsSummaryMerged', {
+                          items: mergedHits.length,
+                          occ: mergedTotalOcc,
+                          files: reviewJobs.length,
+                        })}
+                      </Badge>
+                    </CardTitle>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selected ? (
+                        <Button variant="outline" size="sm" onClick={() => setViewMode('single')}>
+                          {t('files.backToSingle')}
+                        </Button>
+                      ) : null}
+                      <Button size="sm" onClick={doApplyAll} disabled={busy}>
+                        <ShieldCheck className="mr-1.5 h-4 w-4" /> {tf('files.applyAll', { n: reviewJobs.length })}
+                      </Button>
+                    </div>
+                  </div>
+                  <p className="text-[12px] text-muted-foreground">
+                    {tf('files.unifiedSubtitle', { n: reviewJobs.length })}
+                  </p>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {notice ? <p className="text-[12px] text-destructive">{notice}</p> : null}
+                  {savedPath ? (
+                    <p className="text-[12px] text-emerald-600 dark:text-emerald-400">{savedPath}</p>
+                  ) : null}
+                  {mergedBusy ? (
+                    <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+                      <Loader2 className="h-4 w-4 animate-spin" /> {t('files.loading')}
+                    </div>
+                  ) : mergedError ? (
+                    <div className="text-[12px] text-destructive">{mergedError}</div>
+                  ) : mergedHits.length === 0 ? (
+                    <div className="py-6 text-[13px] text-muted-foreground">{t('files.noHits')}</div>
+                  ) : (
+                    <>
+                      {renderHitFilterBar()}
+                      {filteredMergedHits.length === 0 ? (
+                        <div className="rounded-lg border border-border/60 p-6 text-center text-[12px] text-muted-foreground">
+                          {t('files.noFilteredHits')}
+                        </div>
+                      ) : (
+                        <div
+                          ref={hitScrollRef}
+                          className="max-h-[520px] min-h-[120px] overflow-y-auto rounded-lg border border-border/60"
+                        >
+                          <div className="relative" style={{ height: hitVirtualizer.getTotalSize() }}>
+                            {hitVirtualizer.getVirtualItems().map((vi) => {
+                              const hit = filteredMergedHits[vi.index]
+                              if (!hit) return null
+                              const repVal = getMergedReplace(hit)
+                              const kept = getMergedKeep(hit)
+                              const filesTitle = hit.files.map((f) => `${f.filename} (×${f.count})`).join('\n')
+                              return (
+                                <div
+                                  key={hit.merge_id}
+                                  data-index={vi.index}
+                                  ref={hitVirtualizer.measureElement}
+                                  className="absolute left-0 top-0 flex w-full flex-wrap items-center gap-2 border-b border-border/50 bg-card px-3 py-2"
+                                  style={{ transform: `translateY(${vi.start}px)` }}
+                                >
+                                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                                    <Badge variant="secondary" className="shrink-0 text-[10px]">{hit.label || '—'}</Badge>
+                                    <span
+                                      className="min-w-0 flex-1 truncate font-mono text-[12.5px]"
+                                      title={hit.editable ? (hit.original || '') : (hit.preview || '')}
+                                    >
+                                      {hit.editable ? (hit.original || '') : (hit.preview || '')}
+                                    </span>
+                                    <span
+                                      className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
+                                      title={filesTitle}
+                                    >
+                                      {tf('files.filesBadge', { n: hit.files.length })}
+                                    </span>
+                                    <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">×{hit.count}</span>
+                                  </div>
+                                  {hit.editable ? (
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <Input
+                                        className="h-7 w-[180px] text-[12px]"
+                                        placeholder={t('files.replacement')}
+                                        value={repVal}
+                                        disabled={kept}
+                                        onChange={(e) => setMergedReplace(hit, e.target.value)}
+                                      />
+                                      {hit.can_keep ? (
+                                        <label className="flex shrink-0 items-center gap-1.5 text-[11.5px]">
+                                          <Switch
+                                            className="scale-75"
+                                            checked={kept}
+                                            onCheckedChange={(v) => setMergedKeep(hit, v)}
+                                          />
+                                          {t('files.keep')}
+                                        </label>
+                                      ) : null}
+                                    </div>
+                                  ) : (
+                                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                                      {tf('files.credential', { digest: hit.digest || '' })}
+                                    </span>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </CardContent>
+              </Card>
+            ) : !selected ? (
+              <Card><CardContent className="space-y-2 p-8 text-center text-sm text-muted-foreground">
+                {notice ? <p className="text-[12px] text-destructive">{notice}</p> : null}
+                {savedPath ? (
+                  <p className="text-[12px] text-emerald-600 dark:text-emerald-400">{savedPath}</p>
+                ) : null}
+                <p>{doneJobs.length >= 2 ? t('files.batchZipNotice') : t('files.selectJob')}</p>
               </CardContent></Card>
             ) : (
               <>
                 <Card>
                   <CardHeader className="pb-2">
                     <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
-                      <FileLock2 className="h-4 w-4" />
-                      <span className="truncate">{selected.filename}</span>
+                      <FileLock2 className="h-4 w-4 shrink-0" />
+                      <span className="min-w-0 truncate">{selected.filename}</span>
                       <Badge variant={statusTone(selected.status)}>{t(`files.status.${selected.status}`)}</Badge>
                     </CardTitle>
                   </CardHeader>
@@ -749,23 +1673,33 @@ export default function FilesPage() {
                     ) : null}
                     {notice ? <p className="text-[12px] text-destructive">{notice}</p> : null}
                     {savedPath ? (
-                      <p className="text-[12px] text-emerald-600 dark:text-emerald-400">
-                        {tf('files.savedTo', { path: savedPath })}
-                      </p>
+                      <p className="text-[12px] text-emerald-600 dark:text-emerald-400">{savedPath}</p>
                     ) : null}
                     {selected.status === 'queued' && selected.position ? (
                       <p className="text-[12px] text-muted-foreground">
                         {tf('files.queuePos', { pos: selected.position })}
                       </p>
                     ) : null}
-                    {selected.status === 'scanning' && progressTotal > 0 && PROGRESS_STAGES.has(progressStage) ? (
+                    {selected.status === 'scanning' ? (
                       <div className="space-y-1">
                         <div className="flex items-center justify-between text-[12px] text-muted-foreground">
-                          <span>{tf(`files.progress.${progressStage}`, { cur: progressCur, total: progressTotal })}</span>
-                          <span>{progressPct}%</span>
+                          <span>
+                            {selProg.total > 0 && PROGRESS_STAGES.has(selProg.stage)
+                              ? tf(`files.progress.${selProg.stage}`, { cur: selProg.cur, total: selProg.total })
+                              : t('files.progressPreparing')}
+                          </span>
+                          <span className="tabular-nums">
+                            {selProg.indeterminate || !PROGRESS_STAGES.has(selProg.stage)
+                              ? t('files.progressIndeterminate')
+                              : `${selProg.pct}%`}
+                          </span>
                         </div>
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                          <div className="h-full bg-primary transition-all" style={{ width: `${progressPct}%` }} />
+                          {selProg.indeterminate || !PROGRESS_STAGES.has(selProg.stage) ? (
+                            <div className="h-full w-1/3 animate-[indeterminate_1.4s_ease-in-out_infinite] rounded-full bg-primary" />
+                          ) : (
+                            <div className="h-full bg-primary transition-all" style={{ width: `${selProg.pct}%` }} />
+                          )}
                         </div>
                       </div>
                     ) : null}
@@ -824,35 +1758,35 @@ export default function FilesPage() {
                         {selected.carrier === 'pdf' ? (
                           <label className="flex items-center gap-2">
                             <Switch checked={!!options.clear_docinfo}
-                              onCheckedChange={(v) => setOptions((o) => ({ ...o, clear_docinfo: v }))} />
+                              onCheckedChange={(v) => setSelectedOptions((o) => ({ ...o, clear_docinfo: v }))} />
                             {t('files.clearDocinfo')}
                           </label>
                         ) : null}
                         {selected.carrier === 'pdf' ? (
                           <label className="flex items-center gap-2">
                             <Switch checked={!!options.keep_attachments}
-                              onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_attachments: v }))} />
+                              onCheckedChange={(v) => setSelectedOptions((o) => ({ ...o, keep_attachments: v }))} />
                             {t('files.keepAttachments')}
                           </label>
                         ) : null}
                         {selected.carrier === 'ooxml' && Number(selected.coverage?.embedded_objects_present || 0) > 0 ? (
                           <label className="flex items-center gap-2">
                             <Switch checked={!!options.keep_embedded_objects}
-                              onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_embedded_objects: v }))} />
+                              onCheckedChange={(v) => setSelectedOptions((o) => ({ ...o, keep_embedded_objects: v }))} />
                             {t('files.keepEmbeddedObjects')}
                           </label>
                         ) : null}
                         {selected.carrier === 'ooxml' && Number(selected.coverage?.non_image_media_present || 0) > 0 ? (
                           <label className="flex items-center gap-2">
                             <Switch checked={!!options.strip_non_image_media}
-                              onCheckedChange={(v) => setOptions((o) => ({ ...o, strip_non_image_media: v }))} />
+                              onCheckedChange={(v) => setSelectedOptions((o) => ({ ...o, strip_non_image_media: v }))} />
                             {t('files.stripNonImageMedia')}
                           </label>
                         ) : null}
                         {selected.carrier === 'image' ? (
                           <label className="flex items-center gap-2">
                             <Switch checked={!!options.keep_icc}
-                              onCheckedChange={(v) => setOptions((o) => ({ ...o, keep_icc: v }))} />
+                              onCheckedChange={(v) => setSelectedOptions((o) => ({ ...o, keep_icc: v }))} />
                             {t('files.keepIcc')}
                           </label>
                         ) : null}
@@ -998,7 +1932,16 @@ export default function FilesPage() {
 
                 {selected.status === 'awaiting_review' ? (
                   <Card>
-                    <CardHeader className="pb-2"><CardTitle className="text-sm">{t('files.hits')}</CardTitle></CardHeader>
+                    <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                      <CardTitle className="flex items-center gap-2 text-sm">
+                        <span>{t('files.hits')}</span>
+                        {hits.length > 0 ? (
+                          <Badge variant="outline" className="font-normal">
+                            {tf('files.hitsSummary', { items: hits.length, occ: singleTotalOcc })}
+                          </Badge>
+                        ) : null}
+                      </CardTitle>
+                    </CardHeader>
                     <CardContent className="space-y-2">
                       {hitsBusy ? (
                         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1011,46 +1954,81 @@ export default function FilesPage() {
                           {embeddedHandled ? t('files.noTextHitsEmbeddedMasked') : t('files.noHits')}
                         </div>
                       ) : (
-                        <div className="space-y-2">
-                          {hits.map((hit) => (
-                            <div key={hit.hit_id} className="rounded-lg border border-border/60 p-3">
-                              <div className="flex flex-wrap items-center gap-2 text-[12px]">
-                                <Badge variant="secondary">{hit.label || '—'}</Badge>
-                                <span className="text-muted-foreground">
-                                  {(hit.locations || []).join(' / ') || '—'}
-                                </span>
-                                <span className="text-muted-foreground">×{hit.count}</span>
-                              </div>
-                              <div className="mt-2 flex flex-wrap items-center gap-2">
-                                <span className="min-w-0 flex-1 truncate text-[13px]">
-                                  {hit.editable ? (hit.original || '') : (hit.preview || '')}
-                                </span>
-                                {hit.editable ? (
-                                  <>
-                                    <Input
-                                      className="h-8 w-[220px]"
-                                      placeholder={t('files.replacement')}
-                                      value={replaces[hit.hit_id] || ''}
-                                      disabled={!!keeps[hit.hit_id]}
-                                      onChange={(e) => setReplaces((prev) => ({ ...prev, [hit.hit_id]: e.target.value }))}
-                                    />
-                                    {hit.can_keep ? (
-                                      <label className="flex items-center gap-1.5 text-[12px]">
-                                        <Switch checked={!!keeps[hit.hit_id]}
-                                          onCheckedChange={(v) => setKeeps((prev) => ({ ...prev, [hit.hit_id]: v }))} />
-                                        {t('files.keep')}
-                                      </label>
-                                    ) : null}
-                                  </>
-                                ) : (
-                                  <span className="text-[11px] text-muted-foreground">
-                                    {tf('files.credential', { digest: hit.digest || '' })}
-                                  </span>
-                                )}
+                        <>
+                          {renderHitFilterBar()}
+                          {filteredSingleHits.length === 0 ? (
+                            <div className="rounded-lg border border-border/60 p-6 text-center text-[12px] text-muted-foreground">
+                              {t('files.noFilteredHits')}
+                            </div>
+                          ) : (
+                            <div
+                              ref={hitScrollRef}
+                              className="max-h-[520px] min-h-[120px] overflow-y-auto rounded-lg border border-border/60"
+                            >
+                              <div className="relative" style={{ height: hitVirtualizer.getTotalSize() }}>
+                                {hitVirtualizer.getVirtualItems().map((vi) => {
+                                  const hit = filteredSingleHits[vi.index]
+                                  if (!hit) return null
+                                  return (
+                                    <div
+                                      key={hit.hit_id}
+                                      data-index={vi.index}
+                                      ref={hitVirtualizer.measureElement}
+                                      className="absolute left-0 top-0 flex w-full flex-wrap items-center gap-2 border-b border-border/50 bg-card px-3 py-2"
+                                      style={{ transform: `translateY(${vi.start}px)` }}
+                                    >
+                                      <div className="flex min-w-0 flex-1 items-center gap-2">
+                                        <Badge variant="secondary" className="shrink-0 text-[10px]">
+                                          {hit.label || '—'}
+                                        </Badge>
+                                        <span
+                                          className="min-w-0 flex-1 truncate font-mono text-[12.5px]"
+                                          title={hit.editable ? (hit.original || '') : (hit.preview || '')}
+                                        >
+                                          {hit.editable ? (hit.original || '') : (hit.preview || '')}
+                                        </span>
+                                        <span
+                                          className="hidden max-w-[140px] shrink-0 truncate text-[11px] text-muted-foreground sm:inline"
+                                          title={(hit.locations || []).join(' / ')}
+                                        >
+                                          {(hit.locations || []).join(' / ') || '—'}
+                                        </span>
+                                        <span className="shrink-0 tabular-nums text-[11px] text-muted-foreground">
+                                          ×{hit.count}
+                                        </span>
+                                      </div>
+                                      {hit.editable ? (
+                                        <div className="flex shrink-0 items-center gap-2">
+                                          <Input
+                                            className="h-7 w-[180px] text-[12px]"
+                                            placeholder={t('files.replacement')}
+                                            value={getSingleReplace(hit)}
+                                            disabled={getSingleKeep(hit)}
+                                            onChange={(e) => setJobReplace(selected.id, hit.hit_id, e.target.value)}
+                                          />
+                                          {hit.can_keep ? (
+                                            <label className="flex shrink-0 items-center gap-1.5 text-[11.5px]">
+                                              <Switch
+                                                className="scale-75"
+                                                checked={getSingleKeep(hit)}
+                                                onCheckedChange={(v) => setJobKeep(selected.id, hit.hit_id, v)}
+                                              />
+                                              {t('files.keep')}
+                                            </label>
+                                          ) : null}
+                                        </div>
+                                      ) : (
+                                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                                          {tf('files.credential', { digest: hit.digest || '' })}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )
+                                })}
                               </div>
                             </div>
-                          ))}
-                        </div>
+                          )}
+                        </>
                       )}
                     </CardContent>
                   </Card>

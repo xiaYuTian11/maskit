@@ -31,6 +31,7 @@ import {
   uninstallOcrRuntime,
 } from '@/api/ocr'
 import { ShieldApiError } from '@/lib/shield-fetch'
+import { isFeatureSeen, markFeatureSeen } from '@/lib/whatsNew'
 import type { ShieldConfig } from '@/types/api'
 
 interface VisualMaskingCardProps {
@@ -50,6 +51,13 @@ function ocrReasonOf(e: unknown): string {
 export function VisualMaskingCard({ cfg, toggle, saving }: VisualMaskingCardProps) {
   const { t, tf } = useI18n()
   const [ocrBusy, setOcrBusy] = useState(false)
+  const [isNew, setIsNew] = useState(() => !isFeatureSeen('visual-masking'))
+
+  const ackVisualSeen = () => {
+    if (!isNew) return
+    markFeatureSeen('visual-masking')
+    setIsNew(false)
+  }
 
   const ocrRt = useQuery({
     queryKey: ['ocrRuntime'],
@@ -115,11 +123,20 @@ export function VisualMaskingCard({ cfg, toggle, saving }: VisualMaskingCardProp
   }, [reasonText, t, tf])
 
   return (
-    <Card className="border bg-card shadow-card">
+    <Card
+      data-feature-id="settings-visual-masking"
+      onClick={ackVisualSeen}
+      className="border bg-card shadow-card"
+    >
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm font-semibold">
           <ScanText className="h-4 w-4 text-muted-foreground" />
-          {t('settings.visual.title')}
+          <span>{t('settings.visual.title')}</span>
+          {isNew ? (
+            <span className="rounded bg-primary/15 px-1.5 py-px text-[9.5px] font-semibold uppercase text-primary-ink">
+              {t('whatsNew.badge')}
+            </span>
+          ) : null}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">

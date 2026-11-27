@@ -19,6 +19,7 @@ import zipfile
 import hashlib
 import shutil
 import xml.etree.ElementTree as ET
+from collections import Counter
 
 import transparent as tr
 from credential_labels import is_credential
@@ -158,10 +159,10 @@ def _placeholder_image_bytes(image_bytes, fn, vr):
     return buf.getvalue()
 
 
-def _progress(job, stage, current, total):
+def _progress(job, stage, current, total, pct=None, indeterminate=False):
     mgr = getattr(job, "_mgr", None)
     if mgr is not None and hasattr(mgr, "set_progress"):
-        mgr.set_progress(job.id, stage, current, total)
+        mgr.set_progress(job.id, stage, current, total, pct=pct, indeterminate=indeterminate)
 
 
 def _is_non_image_media(fn):
@@ -284,33 +285,119 @@ def probe(src_path, carrier, cfg=None):
 
 
 # ── 注册表构建 ──────────────────────────────────────────────────────────────
-def _build_hits(tables, locations, counts, max_hits):
+def _build_hits(tables, locations, counts, max_hits, only_observed=False):
     # @guard G771 凭据只 preview+digest、不可编辑保留
     # @guard G770 超上限失败
     cw_keys = set(getattr(tr, "CUSTOM_WORDS", None) or ())
-    hits = []
+    groups = {}
+    order = []
     for orig, rec in tables.fwd.items():
+        if only_observed and orig not in counts and orig not in locations:
+            continue
         token, label = rec[0], rec[1]
         cred = bool(is_credential(label))
-        locs = sorted(locations.get(orig, set())) or ["正文"]
+        digest = hashlib.sha256(orig.encode("utf-8", "replace")).hexdigest()[:16] if cred else ""
+        if cred:
+            gkey = ("cred", digest)
+        else:
+            norm = (orig or "").strip().casefold()
+            gkey = ("text", norm or orig)
+        if gkey not in groups:
+            groups[gkey] = {
+                "label": label,
+                "cred": cred,
+                "digest": digest,
+                "origs": [],
+                "tokens": [],
+                "locs": set(),
+                "count": 0,
+                "custom": False,
+            }
+            order.append(gkey)
+        g = groups[gkey]
+        g["origs"].append(orig)
+        g["tokens"].append(token)
+        g["locs"].update(locations.get(orig, set()) or ())
+        occ = counts.get(orig)
+        if occ is None:
+            occ = 1 if (not only_observed or orig in locations) else 0
+        g["count"] += int(occ or 0)
+        if orig in cw_keys:
+            g["custom"] = True
+
+    hits = []
+    for gkey in order:
+        g = groups[gkey]
+        origs = g["origs"]
+        clean = [o for o in origs if o and o == o.strip()]
+        rep_orig = clean[0] if clean else ((origs[0].strip() or origs[0]) if origs else "")
+        locs = sorted(g["locs"]) or ["正文"]
+        cred = g["cred"]
         h = fw.FileHit(
-            hit_id="h%d" % (len(hits) + 1), token=token, label=label,
-            source="custom" if orig in cw_keys else "builtin",
-            original=orig, count=counts.get(orig, 1),
-            locations=locs, editable=not cred, can_keep=not cred, credential=cred,
+            hit_id="h%d" % (len(hits) + 1),
+            token=g["tokens"][0],
+            label=g["label"],
+            source="custom" if g["custom"] else "builtin",
+            original=None if cred else rep_orig,
+            count=max(1, g["count"]),
+            locations=locs,
+            editable=not cred,
+            can_keep=not cred,
+            credential=cred,
+            tokens=list(g["tokens"]),
+            orig_variants=[] if cred else list(origs),
         )
         if cred:
-            h.preview = (orig[:4] + "***") if orig else ""
-            h.digest = hashlib.sha256(orig.encode("utf-8", "replace")).hexdigest()[:16]
-            h.original = None
+            h.preview = (rep_orig[:4] + "***") if rep_orig else ""
+            h.digest = g["digest"]
         hits.append(h)
     if len(hits) > max_hits:
         raise fw.FileWorkbenchError(E_HITS, 400)
     return hits
 
 
-def _accumulate(tables, before, orig_text, loc, locations, counts):
-    for orig in tables.fwd.keys() - before:
+def _accumulate(tables, before, orig_text, loc, locations, counts, masked_text=None):
+    if isinstance(before, (set, frozenset)):
+        new_keys = tables.fwd.keys() - before
+    else:
+        before_n = int(before or 0)
+        if len(tables.fwd) > before_n:
+            new_keys = list(tables.fwd.keys())[before_n:]
+        else:
+            new_keys = ()
+
+    if masked_text is not None:
+        if masked_text == orig_text and not new_keys:
+            return
+        rev_map = getattr(tables, "rev", None) or {}
+        tok_counts = Counter(tr._PLACEHOLDER_RX.findall(masked_text))
+        if tok_counts and "{{" in orig_text:
+            orig_toks = Counter(tr._PLACEHOLDER_RX.findall(orig_text))
+            for t, c in orig_toks.items():
+                if t in tok_counts:
+                    tok_counts[t] -= c
+        seen_origs = set()
+        for tok, delta in tok_counts.items():
+            if delta <= 0:
+                continue
+            rec = rev_map.get(tok)
+            if not rec:
+                continue
+            orig = rec[0]
+            if not orig:
+                continue
+            seen_origs.add(orig)
+            locations.setdefault(orig, set()).add(loc)
+            counts[orig] = counts.get(orig, 0) + delta
+        for orig in new_keys:
+            if not orig:
+                continue
+            locations.setdefault(orig, set()).add(loc)
+            if orig not in seen_origs:
+                counts[orig] = counts.get(orig, 0) + 1
+        return
+
+    for orig in new_keys:
         locations.setdefault(orig, set()).add(loc)
     for orig in tables.fwd:
         if not orig:
@@ -323,57 +410,91 @@ def _accumulate(tables, before, orig_text, loc, locations, counts):
             counts[orig] = counts.get(orig, 0) + cnt
 
 
-def _mask_xml(content, ext, fn, locations, counts, sid):
+def _mask_xml(content, ext, fn, locations, counts, sid, cancel=None, progress_cb=None):
     """叶子遍历 + Word 跨 run 合并（参照 mask_ooxml_bytes，不改其本体）。"""
-    before = set(tr._tables().fwd)
     for event, (prefix, uri) in ET.iterparse(io.BytesIO(content), events=("start-ns",)):
         ET.register_namespace(prefix, uri)
     tree = ET.fromstring(content)
     loc = _part_label(fn)
+    last_cb = [0.0]
+
+    def _check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise fw.FileWorkbenchError("canceled", 409)
+
+    def _tick(done, total):
+        if progress_cb is None:
+            return
+        now = time.monotonic()
+        if done >= total or (now - last_cb[0]) >= 0.12:
+            last_cb[0] = now
+            progress_cb(done, total)
+
     if _docprops_entry(fn):
         # @guard G764 docProps core/app/custom 全覆盖：掩全部文本叶子（Company/Manager/自定义属性等）
-        for n in tree.iter():
-            if n.text and n.text.strip():
-                b = set(tr._tables().fwd)
-                m = tr.mask_body(n.text, sid)
-                _accumulate(tr._tables(), b, n.text, loc, locations, counts)
-                if m != n.text:
-                    n.text = m
+        nodes = [n for n in tree.iter() if n.text and n.text.strip()]
+        total = max(1, len(nodes))
+        for idx, n in enumerate(nodes, 1):
+            _check_cancel()
+            b = len(tr._tables().fwd)
+            m = tr.mask_body(n.text, sid)
+            _accumulate(tr._tables(), b, n.text, loc, locations, counts, masked_text=m)
+            if m != n.text:
+                n.text = m
+            _tick(idx, total)
         return ET.tostring(tree, encoding="utf-8", xml_declaration=True)
     if ext == "docx" and fn.lower().startswith("word/"):
-        for p in tree.iter():
-            if p.tag.split("}")[-1] != "p":
-                continue
+        p_nodes = [p for p in tree.iter() if p.tag.split("}")[-1] == "p"]
+        total = max(1, len(p_nodes))
+        for idx, p in enumerate(p_nodes, 1):
+            _check_cancel()
             t_nodes = [n for n in p.iter() if n.tag.split("}")[-1] == "t"]
             if not t_nodes:
+                _tick(idx, total)
                 continue
             touched = False
             for n in t_nodes:
                 if n.text:
-                    b = set(tr._tables().fwd)
+                    b = len(tr._tables().fwd)
                     m = tr.mask_body(n.text, sid)
-                    _accumulate(tr._tables(), b, n.text, loc, locations, counts)
+                    _accumulate(tr._tables(), b, n.text, loc, locations, counts, masked_text=m)
                     if m != n.text:
                         n.text = m
                         touched = True
             if not touched and len(t_nodes) > 1:
                 full = "".join(n.text or "" for n in t_nodes)
-                b = set(tr._tables().fwd)
+                b = len(tr._tables().fwd)
                 m = tr.mask_body(full, sid)
-                _accumulate(tr._tables(), b, full, loc, locations, counts)
+                _accumulate(tr._tables(), b, full, loc, locations, counts, masked_text=m)
                 if m != full:
                     t_nodes[0].text = m
                     for n in t_nodes[1:]:
                         n.text = ""
+            _tick(idx, total)
     else:
+        skip_v_ids = set()
+        if ext == "xlsx" and fn.lower().startswith("xl/worksheets/"):
+            for elem in tree.iter():
+                if elem.tag.split("}")[-1] == "c" and elem.attrib.get("t") == "s":
+                    for child in elem:
+                        if child.tag.split("}")[-1] == "v":
+                            skip_v_ids.add(id(child))
+        nodes = []
         for n in tree.iter():
+            if id(n) in skip_v_ids:
+                continue
             tag = n.tag.split("}")[-1]
             if (tag in ("t", "creator", "lastModifiedBy", "v") or tag.endswith("Text")) and n.text:
-                b = set(tr._tables().fwd)
-                m = tr.mask_body(n.text, sid)
-                _accumulate(tr._tables(), b, n.text, loc, locations, counts)
-                if m != n.text:
-                    n.text = m
+                nodes.append(n)
+        total = max(1, len(nodes))
+        for idx, n in enumerate(nodes, 1):
+            _check_cancel()
+            b = len(tr._tables().fwd)
+            m = tr.mask_body(n.text, sid)
+            _accumulate(tr._tables(), b, n.text, loc, locations, counts, masked_text=m)
+            if m != n.text:
+                n.text = m
+            _tick(idx, total)
     return ET.tostring(tree, encoding="utf-8", xml_declaration=True)
 
 
@@ -400,8 +521,13 @@ def scan_ooxml(job, src, staged, opts, cancel):
     with zipfile.ZipFile(src) as zin, \
             zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         items = zin.infolist()
-        total_parts = sum(1 for i in items if _should_mask(i.filename, ext))
-        total_media = sum(1 for i in items if _is_media(i.filename))
+        part_items = [i for i in items if _should_mask(i.filename, ext)]
+        media_items = [i for i in items if _is_media(i.filename)]
+        total_parts = len(part_items)
+        total_media = len(media_items)
+        total_weight = sum(max(1, i.file_size) for i in part_items) + sum(max(1, i.file_size) for i in media_items)
+        total_weight = max(1, total_weight)
+        done_weight = 0
         cur_part = 0
         cur_media = 0
         for item in items:
@@ -417,7 +543,9 @@ def scan_ooxml(job, src, staged, opts, cancel):
                     warnings.append("non_image_media_unscanned")
             elif _is_media(fn):
                 cur_media += 1
-                _progress(job, "ooxml_media", cur_media, max(1, total_media))
+                item_w = max(1, item.file_size)
+                _progress(job, "ooxml_media", cur_media, max(1, total_media),
+                          pct=min(99, int(done_weight * 100 / total_weight)))
                 if not scan_embedded:
                     skipped_images += 1
                 else:
@@ -447,11 +575,23 @@ def scan_ooxml(job, src, staged, opts, cancel):
                                 media_modified = True
                                 if "embedded_images_covered" not in warnings:
                                     warnings.append("embedded_images_covered")
+                done_weight += item_w
+                _progress(job, "ooxml_media", cur_media, max(1, total_media),
+                          pct=min(99, int(done_weight * 100 / total_weight)))
             elif _should_mask(fn, ext):
                 cur_part += 1
-                _progress(job, "ooxml_parts", cur_part, max(1, total_parts))
+                item_w = max(1, item.file_size)
+                _progress(job, "ooxml_parts", cur_part, max(1, total_parts),
+                          pct=min(99, int(done_weight * 100 / total_weight)))
+
+                def _xml_progress(done_nodes, total_nodes, _dw=done_weight, _iw=item_w, _cp=cur_part):
+                    sub = (_iw * done_nodes) / max(1, total_nodes)
+                    _progress(job, "ooxml_parts", _cp, max(1, total_parts),
+                              pct=min(99, int((_dw + sub) * 100 / total_weight)))
+
                 try:
-                    new = _mask_xml(content, ext, fn, locations, counts, job.id)
+                    new = _mask_xml(content, ext, fn, locations, counts, job.id,
+                                    cancel=cancel, progress_cb=_xml_progress)
                     if new != content:
                         masked_entries += 1
                     content = new
@@ -459,10 +599,13 @@ def scan_ooxml(job, src, staged, opts, cancel):
                     raise
                 except Exception:
                     raise fw.FileWorkbenchError("office_parse_failed", 422)
+                done_weight += item_w
+                _progress(job, "ooxml_parts", cur_part, max(1, total_parts),
+                          pct=min(99, int(done_weight * 100 / total_weight)))
             zout.writestr(item, content)
     tables = tr._tables()
     max_hits = int(cfg.get("files_max_hits", 20000))
-    hits = _build_hits(tables, locations, counts, max_hits)
+    hits = _build_hits(tables, locations, counts, max_hits, only_observed=bool(getattr(job, "batch_id", "")))
     # 零命中且内嵌图片未改动：staged 直接用原文件字节（G768 字节一致的前提）。
     if not hits and not media_modified:
         with open(src, "rb") as f:
@@ -493,7 +636,13 @@ def job_cfg(job):
 # ── 编辑校验（G767）─────────────────────────────────────────────────────────
 def _validate_edits(edits, hits_by_id):
     # @guard G767 replace 非空≤64无换行无花括号不撞原文；keep 仅 can_keep。
-    originals = {h.original for h in hits_by_id.values() if h.original}
+    originals = set()
+    for h in hits_by_id.values():
+        if h.original:
+            originals.add(h.original)
+        for v in (getattr(h, "orig_variants", None) or ()):
+            if v:
+                originals.add(v)
     for e in edits or []:
         hid = e.get("hit_id")
         h = hits_by_id.get(hid)
@@ -520,10 +669,19 @@ def _final_map(edits, hits_by_id):
         e = edit_by_id.get(hid)
         if h.credential:
             continue                       # 凭据 token 不动（G771）
+        tokens = getattr(h, "tokens", None) or [h.token]
+        variants = getattr(h, "orig_variants", None) or []
         if e and e.get("action") == "replace":
-            final[h.token] = e.get("text")
+            rep_txt = e.get("text")
+            for tok in tokens:
+                final[tok] = rep_txt
         elif e and e.get("action") == "keep":
-            final[h.token] = h.original
+            if len(variants) == len(tokens):
+                for tok, orig_v in zip(tokens, variants):
+                    final[tok] = orig_v
+            else:
+                for tok in tokens:
+                    final[tok] = h.original
         # 无编辑：保持 token（staged 已打码）
     return final
 
@@ -657,15 +815,18 @@ def scan_text(job, src, staged, opts, cancel):
     for idx, chunk in enumerate(chunks, 1):
         if cancel is not None and cancel.is_set():
             raise fw.FileWorkbenchError("canceled", 409)
-        _progress(job, "text_chunks", idx, total_chunks)
-        b = set(tr._tables().fwd)
+        _progress(job, "text_chunks", idx, total_chunks,
+                  pct=min(99, int(((idx - 1) * 100) / total_chunks)))
+        b = len(tr._tables().fwd)
         masked_chunk = tr.mask_body(chunk, job.id)
-        _accumulate(tr._tables(), b, chunk, "正文", locations, counts)
+        _accumulate(tr._tables(), b, chunk, "正文", locations, counts, masked_text=masked_chunk)
         out_parts.append(masked_chunk)
+        _progress(job, "text_chunks", idx, total_chunks,
+                  pct=min(99, int((idx * 100) / total_chunks)))
     masked = "".join(out_parts)
     tables = tr._tables()
     max_hits = int(job_cfg(job).get("files_max_hits", 20000))
-    hits = _build_hits(tables, locations, counts, max_hits)
+    hits = _build_hits(tables, locations, counts, max_hits, only_observed=bool(getattr(job, "batch_id", "")))
     with open(staged, "wb") as f:
         f.write(masked.encode("utf-8"))
     warnings = ["text_encoding_fallback"] if enc_fallback else []

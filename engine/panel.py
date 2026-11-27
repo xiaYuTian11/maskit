@@ -15,7 +15,7 @@ Data Maskit 控制面板 - 本地 Flask 服务
 # 本程序基于「希望有用」的目的分发，但不附带任何担保；亦无对适销性或特定用途
 # 适用性的默示担保。详见 GNU Affero 通用公共许可证。
 # 你应已随本程序收到一份 GNU AGPL 副本；若无，见 <https://www.gnu.org/licenses/>。
-__version__ = '0.21.0'
+__version__ = '0.22.0'
 import json
 import codecs
 import copy
@@ -24,6 +24,7 @@ import onboarding
 import logging
 import math
 import io
+import tempfile
 import zipfile
 import base64
 import xml.etree.ElementTree as ET
@@ -8581,7 +8582,29 @@ def api_files_capabilities():
                     "ocr_available": bool(ocr_ok),
                     "path_source": bool(cfg.get("files_path_source", True)) and not REMOTE_MODE,
                     "max_size_mb": cfg.get("files_max_size_mb", 1024),
-                    "max_text_mb": cfg.get("files_max_text_mb", 128)})
+                    "max_text_mb": cfg.get("files_max_text_mb", 128),
+                    "queue_max": int(cfg.get("files_queue_max", 8))})
+
+
+_BATCH_ID_RX = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _unlink_quiet(path):
+    """尽力删除临时文件：失败只留垃圾，不影响已生成的响应。"""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _validate_batch_id(raw):
+    import file_workbench as fw
+    val = str(raw or "").strip()
+    if not val:
+        return ""
+    if not _BATCH_ID_RX.fullmatch(val):
+        raise fw.FileWorkbenchError("invalid_batch_id", 400)
+    return val
 
 
 @app.post("/api/files/jobs")
@@ -8600,6 +8623,7 @@ def api_files_create():
                 # @guard G751 仅 files_path_source 且非 REMOTE_MODE 才允许 path 模式，否则 FILE_7411 / 400。
                 if not (cfg.get("files_path_source", True) and not REMOTE_MODE):
                     return jsonify({"ok": False, "error": fw.E_PATH_MODE}), 400
+                batch_id = _validate_batch_id(body.get("batch_id"))
                 src_path = str(body["path"])
                 if not os.path.isfile(src_path):
                     return jsonify({"ok": False, "error": "file_not_found"}), 400
@@ -8609,7 +8633,7 @@ def api_files_create():
                                     "limit_bytes": max_bytes}), 413
                 filename = os.path.basename(src_path)
                 carrier = _file_carrier_for(filename)
-                job = mgr.create_job(filename, size, carrier, source_path=src_path)
+                job = mgr.create_job(filename, size, carrier, source_path=src_path, batch_id=batch_id)
                 # 桌面 path 模式：源文件拷入任务目录（src.bin），后续扫描读它。
                 import shutil
                 shutil.copyfile(src_path, mgr.job_dir(job.id) / "src.bin")
@@ -8628,6 +8652,7 @@ def api_files_create():
         g.file_upload_target = str(target)        # G744：stream_factory 直写此处
         g.file_upload_max = max_bytes             # G743：有界写入兜底
         form = request.form
+        batch_id = _validate_batch_id(form.get("batch_id"))
         f = request.files.get("file")
         filename = form.get("filename") or (f.filename if f else "")
         src = target / "src.bin"
@@ -8650,7 +8675,7 @@ def api_files_create():
             return jsonify({"ok": False, "error": fw.E_TOO_LARGE, "blocking": True,
                             "limit_bytes": max_bytes}), 413
         carrier = _file_carrier_for(filename)
-        job = mgr.create_job(filename, size, carrier, job_id=job_id)
+        job = mgr.create_job(filename, size, carrier, job_id=job_id, batch_id=batch_id)
         ok, pc, err = _probe_job_file(str(src), carrier)
         mgr.probe_result(job.id, ok, page_count=pc, error=err)
         _emit_log("[file] %s 上传 %s (%d bytes)" % (job.id, filename, size))
@@ -8681,6 +8706,72 @@ def api_files_get(job_id):
 def api_files_hits(job_id):
     try:
         return jsonify({"ok": True, "hits": _file_manager().hits(job_id)})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/hits/merged")
+def api_files_hits_merged():
+    try:
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("job_ids")
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100 \
+                or any(not isinstance(x, str) or not x.strip() for x in raw_ids):
+            return jsonify({"ok": False, "error": "invalid_job_ids"}), 400
+        job_ids = list(dict.fromkeys(x.strip() for x in raw_ids))
+        res = _file_manager().merged_hits(job_ids)
+        return jsonify({"ok": True, **res})
+    except Exception as e:
+        return _file_err(e)
+
+
+@app.post("/api/files/export-zip")
+def api_files_export_zip():
+    try:
+        body = request.get_json(silent=True) or {}
+        raw_ids = body.get("job_ids")
+        if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100 \
+                or any(not isinstance(x, str) or not x.strip() for x in raw_ids):
+            return jsonify({"ok": False, "error": "invalid_job_ids"}), 400
+        job_ids = list(dict.fromkeys(x.strip() for x in raw_ids))
+        mgr = _file_manager()
+        items = []
+        used_names = set()
+        for jid in job_ids:
+            # 单个任务在 TTL 到期/别处删除后消失属正常竞态：跳过它，而不是让整包 404。
+            if mgr.find_job(jid) is None:
+                continue
+            job = mgr.check_download(jid)
+            out_dir = mgr.job_dir(jid) / "out"
+            files = list(out_dir.glob("*")) if out_dir.exists() else []
+            if not files:
+                return jsonify({"ok": False, "error": "no_output"}), 404
+            base = os.path.basename(job.filename) or ("masked-%s.bin" % jid)
+            stem, ext = os.path.splitext(base)
+            arc = base
+            idx = 2
+            while arc in used_names:
+                arc = "%s (%d)%s" % (stem, idx, ext)
+                idx += 1
+            used_names.add(arc)
+            items.append((str(files[0]), arc))
+        if not items:
+            return jsonify({"ok": False, "error": "no_output"}), 404
+        # 落磁盘临时文件再流式下发：成品单文件上限 1 GiB，100 个任务全塞进 BytesIO
+        # 最坏就是 100 GiB 常驻内存（与「内存上界必须可算」的准入论证冲突）。
+        fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="maskit-export-")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for path, arc in items:
+                    zout.write(path, arcname=arc)
+            resp = send_file(tmp_path, mimetype="application/zip", as_attachment=True,
+                             download_name="maskit-masked-files.zip")
+        except Exception:
+            _unlink_quiet(tmp_path)
+            raise
+        resp.call_on_close(lambda: _unlink_quiet(tmp_path))
+        return resp
     except Exception as e:
         return _file_err(e)
 

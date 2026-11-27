@@ -101,6 +101,7 @@ class FileJob:
     created_at: float = 0.0
     expires_at: float = 0.0
     source_path: str = ""       # 桌面 path 模式的源文件（save 守卫用）
+    batch_id: str = ""          # 多文件同批次共享脱敏映射标识
 
     def snapshot(self):
         return {
@@ -109,6 +110,7 @@ class FileJob:
             "mode": self.mode, "progress": self.progress, "coverage": self.coverage,
             "warnings": self.warnings, "hit_count": self.hit_count, "position": self.position,
             "error": self.error, "created_at": self.created_at, "expires_at": self.expires_at,
+            "batch_id": self.batch_id,
         }
 
 
@@ -126,6 +128,8 @@ class FileHit:
     editable: bool = True
     can_keep: bool = True
     credential: bool = False
+    tokens: list = field(default_factory=list)
+    orig_variants: list = field(default_factory=list)
 
     def api_view(self):
         d = {
@@ -173,6 +177,8 @@ class JobManager:
         self._queue = []           # 等待扫描的 job_id
         self._active = 0
         self._cancel_flags = {}    # job_id -> threading.Event
+        self._batch_tables = {}    # batch_id -> shared _TokenTables
+        self._batch_locks = {}     # batch_id -> threading.Lock
         self.data_root = Path(data_root)
         self.jobs_dir = self.data_root / "file-jobs"
         self.cfg = cfg or {}
@@ -216,12 +222,12 @@ class JobManager:
         return self.jobs_dir / job_id
 
     # ---- 创建与预检 ----
-    def create_job(self, filename, size, carrier, source_path="", job_id=None):
+    def create_job(self, filename, size, carrier, source_path="", job_id=None, batch_id=""):
         job_id = job_id or ("fj_" + secrets.token_hex(8))
         now = time.time()
         job = FileJob(id=job_id, status=ST_PROBING, carrier=carrier, filename=filename,
                       size=size, created_at=now, expires_at=now + self.review_ttl_min * 60,
-                      source_path=source_path)
+                      source_path=source_path, batch_id=str(batch_id or ""))
         with self._lock:
             self._jobs[job_id] = job
             self._cancel_flags[job_id] = threading.Event()
@@ -253,25 +259,113 @@ class JobManager:
         with self._lock:
             return self._require(job_id)
 
+    def find_job(self, job_id):
+        """缺失返回 None（不抛）。批量端点用它跳过 TTL 到期/别处删除的任务。"""
+        with self._lock:
+            return self._jobs.get(job_id)
+
     def list_jobs(self):
         with self._lock:
             return [j.snapshot() for j in self._jobs.values()]
 
-    def set_progress(self, job_id, stage, current, total):
+    def set_progress(self, job_id, stage, current, total, pct=None, indeterminate=False):
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None and job.status == ST_SCANNING:
-                job.progress = {
+                prog = {
                     "stage": str(stage),
                     "current": int(current),
                     "total": max(1, int(total)),
                 }
+                if pct is not None:
+                    prog["pct"] = max(0, min(99, int(pct)))
+                if indeterminate:
+                    prog["indeterminate"] = True
+                job.progress = prog
 
     def hits(self, job_id):
         with self._lock:
             self._require(job_id)
             reg = self._registries.get(job_id) or {}
             return [h.api_view() for h in reg.values()]
+
+    def merged_hits(self, job_ids):
+        """按敏感词规范键值聚合多个待确认任务的命中清单，避免跨文件重复确认。"""
+        with self._lock:
+            review_jobs = []
+            for jid in job_ids or []:
+                # 单个任务过期/被删不应让整份统一清单不可用（多标签页与 TTL 竞态）。
+                job = self._jobs.get(jid)
+                if job is not None and job.status == ST_REVIEW:
+                    review_jobs.append(job)
+            groups = {}
+            order = []
+            total_occ = 0
+            for job in review_jobs:
+                reg = self._registries.get(job.id) or {}
+                for h in reg.values():
+                    if h.credential:
+                        gkey = ("cred", h.digest or h.token)
+                    else:
+                        norm = (h.original or "").strip().casefold()
+                        gkey = ("text", norm or (h.original or h.hit_id))
+                    if gkey not in groups:
+                        groups[gkey] = {
+                            "label": h.label,
+                            "source": h.source,
+                            "count": 0,
+                            "locations": set(),
+                            "editable": h.editable,
+                            "can_keep": h.can_keep,
+                            "credential": h.credential,
+                            "original": h.original,
+                            "preview": h.preview,
+                            "digest": h.digest,
+                            "files": [],
+                        }
+                        order.append(gkey)
+                    g = groups[gkey]
+                    occ = int(h.count or 1)
+                    g["count"] += occ
+                    total_occ += occ
+                    g["locations"].update(h.locations or [])
+                    if h.source == "custom":
+                        g["source"] = "custom"
+                    if not h.credential and h.original:
+                        cur_orig = str(g["original"] or "")
+                        cand_orig = str(h.original)
+                        if not cur_orig or (cand_orig == cand_orig.strip() and cur_orig != cur_orig.strip()):
+                            g["original"] = cand_orig
+                    g["files"].append({
+                        "job_id": job.id,
+                        "filename": job.filename,
+                        "hit_id": h.hit_id,
+                        "count": occ,
+                    })
+            out = []
+            for idx, gkey in enumerate(order, 1):
+                g = groups[gkey]
+                item = {
+                    "merge_id": "m%d" % idx,
+                    "label": g["label"],
+                    "source": g["source"],
+                    "count": g["count"],
+                    "locations": sorted(g["locations"]),
+                    "editable": g["editable"],
+                    "can_keep": g["can_keep"],
+                    "files": g["files"],
+                }
+                if g["credential"]:
+                    item["preview"] = g["preview"]
+                    item["digest"] = g["digest"]
+                else:
+                    item["original"] = g["original"]
+                out.append(item)
+            return {
+                "hits": out,
+                "job_count": len(review_jobs),
+                "total_occurrences": total_occ,
+            }
 
     # ---- 状态机守卫（G741）----
     def _check_op(self, job, op):
@@ -308,9 +402,38 @@ class JobManager:
             self._executor(lambda: self._run_scan(job_id, job._scan_embedded))
         return job
 
+    def _batch_scope(self, batch_id):
+        import transparent as tr
+        with self._lock:
+            tables = self._batch_tables.get(batch_id)
+            if tables is None:
+                tables = tr.new_file_token_tables()
+                self._batch_tables[batch_id] = tables
+            lock = self._batch_locks.get(batch_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._batch_locks[batch_id] = lock
+            return tables, lock
+
+    def _maybe_release_batch(self, batch_id):
+        if not batch_id:
+            return
+        with self._lock:
+            still_alive = any(
+                j.batch_id == batch_id and j.status not in (ST_CANCELED, ST_EXPIRED)
+                for j in self._jobs.values()
+            )
+            if still_alive:
+                return
+            self._batch_tables.pop(batch_id, None)
+            self._batch_locks.pop(batch_id, None)
+        import transparent as tr
+        tr.file_suffix_unregister(batch_id)
+
     def _run_scan(self, job_id, scan_embedded):
         import transparent as tr
         cancel = None
+        batch_id = ""
         try:
             # 每次扫描前强制热重载配置（与扩展/试验台同口径），确保冷启动及面板修改的
             # 敏感词/白名单/规则开关即时生效；必须在进入隔离作用域之前执行。
@@ -320,6 +443,7 @@ class JobManager:
                 self.cfg = cfg_now
                 job = self._require(job_id)
                 carrier = self._carriers.get(job.carrier)
+                batch_id = job.batch_id
             # G750：未注册载体一律失败，绝不产出原文件冒充成品。
             # @guard G750 fail-closed：扫不了就失败，不写 shield-events，注册表只在内存。
             if carrier is None:
@@ -332,17 +456,35 @@ class JobManager:
             # 启用文件任务耐心模式（patient=True）：宁愿慢些等完，也绝不因实时 2s 速率桶截断而漏脱；
             # 若仍发生任何 NER 降级/跳过，必显式记入 warnings 与 coverage。
             ner_skips = {}
-            with tr.file_store_scope(job_id), tr._ner_doc_budget(
-                3600.0, cancel_event=cancel, patient=True
-            ):
-                outcome = carrier["scan"](job, str(src), str(staged),
+            if batch_id:
+                shared_tables, batch_lock = self._batch_scope(batch_id)
+                scope_key = batch_id
+            else:
+                shared_tables, batch_lock = None, None
+                scope_key = job_id
+
+            def _exec_in_scope():
+                with tr.file_store_scope(scope_key, shared_tables=shared_tables), tr._ner_doc_budget(
+                    3600.0, cancel_event=cancel, patient=True
+                ):
+                    res = carrier["scan"](job, str(src), str(staged),
                                           {"scan_embedded": scan_embedded, "mode": job.mode},
                                           cancel)
-                try:
-                    import ner_engine
-                    ner_skips = ner_engine.request_skips(reset=True) or {}
-                except Exception:
-                    ner_skips = {}
+                    try:
+                        import ner_engine
+                        sk = ner_engine.request_skips(reset=True) or {}
+                    except Exception:
+                        sk = {}
+                    return res, sk
+
+            if batch_lock is not None:
+                with batch_lock:
+                    if cancel is not None and cancel.is_set():
+                        self._finish_cancel(job_id)
+                        return
+                    outcome, ner_skips = _exec_in_scope()
+            else:
+                outcome, ner_skips = _exec_in_scope()
             with self._lock:
                 job = self._require(job_id)
                 if cancel is not None and cancel.is_set():
@@ -350,7 +492,10 @@ class JobManager:
                     return
                 reg = {}
                 for h in (outcome.get("hits") or []):
-                    reg[h.original if not h.credential else h.token] = h
+                    key = h.original if not h.credential else h.token
+                    if not key or key in reg:
+                        key = h.hit_id
+                    reg[key] = h
                 self._registries[job_id] = reg
                 job.hit_count = len(reg)
                 cov = dict(outcome.get("coverage") or {})
@@ -372,7 +517,12 @@ class JobManager:
                 return
             self._fail(job_id, getattr(e, "code", E_FAILCLOSED))
         finally:
-            tr.file_suffix_unregister(job_id)
+            try:
+                tr._drop(job_id)
+            except Exception:
+                pass
+            if not batch_id:
+                tr.file_suffix_unregister(job_id)
             self._release_slot(job_id)
 
     def _release_slot(self, job_id):
@@ -404,12 +554,15 @@ class JobManager:
         self._record_history(job_id)
 
     def _finish_cancel(self, job_id):
+        batch_id = ""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 job.status = ST_CANCELED
+                batch_id = job.batch_id
         self._cleanup_dir(job_id)
         self._record_history(job_id)
+        self._maybe_release_batch(batch_id)
 
     # ---- 应用 ----
     def request_apply(self, job_id, edits=None, redactions=None, options=None):
@@ -465,12 +618,14 @@ class JobManager:
                 if job_id in self._queue:
                     self._queue.remove(job_id)
                 job.status = ST_CANCELED
+                batch_id = job.batch_id
                 self._cleanup_dir(job_id)
                 self._record_history(job_id)
                 for i, qid in enumerate(self._queue, 1):
                     q = self._jobs.get(qid)
                     if q is not None:
                         q.position = i
+                self._maybe_release_batch(batch_id)
         return job
 
     # ---- 下载态校验（G747/G750）----
@@ -491,14 +646,17 @@ class JobManager:
         if job is None:
             return False
         self._cleanup_dir(job_id)
+        batch_id = ""
         with self._lock:
-            self._jobs.pop(job_id, None)
+            popped = self._jobs.pop(job_id, None)
+            batch_id = popped.batch_id if popped is not None else ""
             self._registries.pop(job_id, None)
             self._cancel_flags.pop(job_id, None)
             if job_id in self._queue:
                 self._queue.remove(job_id)
         import transparent as tr
         tr.file_suffix_unregister(job_id)
+        self._maybe_release_batch(batch_id)
         return job is not None
 
     def _cleanup_dir(self, job_id):
@@ -526,14 +684,19 @@ class JobManager:
         # @guard G749 待确认 60 / 完成 30 / 失败 10 分钟到期转 expired 并清目录。
         # 进行中（queued/scanning/applying）不打断；canceled/expired 已清过跳过。
         now = now or time.time()
+        expired_batches = set()
         with self._lock:
             for job in list(self._jobs.values()):
                 if job.status in _ACTIVE or job.status in (ST_CANCELED, ST_EXPIRED):
                     continue
                 if job.expires_at and now >= job.expires_at:
                     job.status = ST_EXPIRED
+                    if job.batch_id:
+                        expired_batches.add(job.batch_id)
                     self._cleanup_dir(job.id)
                     self._record_history(job.id)
+        for bid in expired_batches:
+            self._maybe_release_batch(bid)
 
     def startup_cleanup(self, now=None):
         # @guard G749 启动清 >24h 目录，未完成任务标失败（引擎重启即失）。

@@ -11,6 +11,7 @@ export interface FilesCapabilities {
   path_source: boolean
   max_size_mb: number
   max_text_mb: number
+  queue_max?: number
 }
 
 export interface FileJobView {
@@ -29,6 +30,7 @@ export interface FileJobView {
   error?: string
   created_at?: number
   expires_at?: number
+  batch_id?: string
 }
 
 export interface FileHitView {
@@ -43,6 +45,27 @@ export interface FileHitView {
   original?: string
   preview?: string
   digest?: string
+}
+
+export interface MergedHitFileRef {
+  job_id: string
+  filename: string
+  hit_id: string
+  count: number
+}
+
+export interface MergedFileHitView {
+  merge_id: string
+  label: string
+  source: string
+  count: number
+  locations: string[]
+  editable: boolean
+  can_keep: boolean
+  original?: string
+  preview?: string
+  digest?: string
+  files: MergedHitFileRef[]
 }
 
 export interface TextEdit {
@@ -110,9 +133,10 @@ export function getJob(id: string) {
   return shieldFetch<Json<{ job: FileJobView }>>(`/api/files/jobs/${id}`)
 }
 
-export function createJob(file: File) {
+export function createJob(file: File, batchId?: string) {
   const form = new FormData()
   form.append('file', file, file.name)
+  if (batchId) form.append('batch_id', batchId)
   return shieldFetch<Json<{ job: FileJobView }>>('/api/files/jobs', {
     method: 'POST',
     body: form,
@@ -120,10 +144,10 @@ export function createJob(file: File) {
   })
 }
 
-export function createJobFromPath(path: string) {
+export function createJobFromPath(path: string, batchId?: string) {
   return shieldFetch<Json<{ job: FileJobView }>>('/api/files/jobs', {
     method: 'POST',
-    body: JSON.stringify({ path }),
+    body: JSON.stringify(batchId ? { path, batch_id: batchId } : { path }),
     timeoutMs: 0,
   })
 }
@@ -139,6 +163,17 @@ export function getHits(id: string) {
   return shieldFetch<Json<{ hits: FileHitView[] }>>(`/api/files/jobs/${id}/hits`, {
     timeoutMs: 120000,
   })
+}
+
+export function getMergedHits(jobIds: string[]) {
+  return shieldFetch<Json<{ hits: MergedFileHitView[]; job_count: number; total_occurrences: number }>>(
+    '/api/files/hits/merged',
+    {
+      method: 'POST',
+      body: JSON.stringify({ job_ids: jobIds }),
+      timeoutMs: 120000,
+    },
+  )
 }
 
 export function getPreview(id: string, page: number) {
@@ -182,6 +217,20 @@ export async function pickDesktopFile(extensions: string[]): Promise<string | nu
   return typeof picked === 'string' && picked ? picked : null
 }
 
+export async function pickDesktopFiles(extensions: string[]): Promise<string[]> {
+  if (!isTauri()) return []
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({
+    directory: false,
+    multiple: true,
+    filters: extensions.length ? [{ name: 'Files', extensions }] : undefined,
+  })
+  if (Array.isArray(picked)) {
+    return picked.filter((p): p is string => typeof p === 'string' && p.length > 0)
+  }
+  return typeof picked === 'string' && picked ? [picked] : []
+}
+
 export function applyJob(
   id: string,
   edits: TextEdit[],
@@ -213,6 +262,24 @@ export async function downloadJob(id: string, filename: string) {
   const a = document.createElement('a')
   a.href = href
   a.download = filename || 'masked'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(href)
+}
+
+export async function downloadJobsZip(jobIds: string[], filename = 'maskit-masked-files.zip') {
+  const raw = await shieldFetch<Response>('/api/files/export-zip', {
+    method: 'POST',
+    body: JSON.stringify({ job_ids: jobIds }),
+    raw: true,
+    timeoutMs: 0,
+  })
+  const blob = await raw.blob()
+  const href = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = href
+  a.download = filename
   document.body.appendChild(a)
   a.click()
   a.remove()

@@ -318,6 +318,96 @@ class KernelTests(unittest.TestCase):
         self.assertIn("ner_degraded", j.warnings)
         self.assertGreaterEqual(j.coverage.get("ner_skipped_chunks", 0), 1)
 
+    def test_batch_shared_tokens_isolation_and_cleanup(self):
+        """同批次文件共享占位符且互不串入对方独有词，不污染全局表，全删后注销批次后缀。"""
+        import file_carriers as fc
+        snap_fwd = dict(tr._RECENT_FWD)
+        snap_sfx = set(tr._RECENT_SUFFIX)
+        mgr = fw.JobManager(self.tmp, history=fjs.HistoryStore(self.tmp), executor=_sync_executor)
+        fc.register(mgr)
+        try:
+            batch_id = "fb_unit_batch"
+            j1 = mgr.create_job("b1.txt", 30, "text", batch_id=batch_id)
+            (mgr.job_dir(j1.id) / "src.bin").write_bytes("甲 13800000000 与 13900000000".encode("utf-8"))
+            mgr.probe_result(j1.id, True)
+            j2 = mgr.create_job("b2.txt", 30, "text", batch_id=batch_id)
+            (mgr.job_dir(j2.id) / "src.bin").write_bytes("乙 13800000000 与 13700000000".encode("utf-8"))
+            mgr.probe_result(j2.id, True)
+
+            mgr.request_scan(j1.id)
+            mgr.request_scan(j2.id)
+            h1 = {h["original"]: h for h in mgr.hits(j1.id)}
+            h2 = {h["original"]: h for h in mgr.hits(j2.id)}
+
+            self.assertIn("13800000000", h1)
+            self.assertIn("13800000000", h2)
+            # 同批次相同敏感词必须拿到完全相同的占位符
+            self.assertEqual(h1["13800000000"]["token"], h2["13800000000"]["token"])
+            # 文件 2 不能混入文件 1 独有的号码
+            self.assertNotIn("13900000000", h2)
+            self.assertNotIn("13700000000", h1)
+            self.assertEqual(dict(tr._RECENT_FWD), snap_fwd)
+            self.assertEqual(set(tr._RECENT_SUFFIX), snap_sfx)
+            self.assertIn(batch_id, tr._FILE_JOB_SUFFIXES)
+
+            merged = mgr.merged_hits([j1.id, j2.id])
+            by_orig = {h["original"]: h for h in merged["hits"]}
+            self.assertEqual(by_orig["13800000000"]["count"], 2)
+            self.assertEqual(len(by_orig["13800000000"]["files"]), 2)
+            self.assertEqual(len(by_orig), 3)
+
+            mgr.delete(j1.id)
+            self.assertIn(batch_id, tr._FILE_JOB_SUFFIXES)
+            mgr.delete(j2.id)
+            self.assertNotIn(batch_id, tr._FILE_JOB_SUFFIXES)
+        finally:
+            mgr.stop()
+
+    def test_batch_lock_cancel_while_waiting_skips_scan(self):
+        """同批次任务在等待 batch_lock 期间被取消后，释放锁时不得再运行扫描且应转为 canceled。"""
+        j1_entered = threading.Event()
+        j1_release = threading.Event()
+        scanned_files = []
+
+        def slow_scan(job, src, staged, opts, cancel):
+            scanned_files.append(job.filename)
+            if job.filename == "hold.txt":
+                j1_entered.set()
+                j1_release.wait(5)
+            Path(staged).write_bytes(b"staged")
+            return {"hits": [_stub_hit()], "coverage": {"scanned": 1}, "warnings": []}
+
+        mgr = fw.JobManager(self.tmp, history=fjs.HistoryStore(self.tmp),
+                            concurrency=2, queue_max=4)
+        mgr.register_carrier("text", slow_scan, _stub_apply)
+        try:
+            batch_id = "fb_cancel_wait"
+            j1 = _ready_job(mgr, filename="hold.txt")
+            j2 = _ready_job(mgr, filename="waiter.txt")
+            j1.batch_id = batch_id
+            j2.batch_id = batch_id
+            mgr.request_scan(j1.id)
+            self.assertTrue(j1_entered.wait(3))
+            mgr.request_scan(j2.id)
+            # 等待 j2 工作线程进入 batch_lock 阻塞等待
+            time.sleep(0.08)
+            mgr.cancel(j2.id)
+            j1_release.set()
+
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                if (mgr.get_job(j1.id).status == fw.ST_REVIEW
+                        and mgr.get_job(j2.id).status == fw.ST_CANCELED):
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(mgr.get_job(j1.id).status, fw.ST_REVIEW)
+            self.assertEqual(mgr.get_job(j2.id).status, fw.ST_CANCELED)
+            self.assertEqual(scanned_files, ["hold.txt"])
+        finally:
+            j1_release.set()
+            mgr.stop()
+
 
 class IsolationTests(unittest.TestCase):
     def test_g745_zero_pollution(self):
@@ -499,6 +589,85 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(r.get_json()["error"], "no_file")
         after = set(jobs_dir.iterdir()) if jobs_dir.exists() else set()
         self.assertEqual(after - before, set(), "异常上传不能留下未注册任务目录")
+
+    def test_merged_hits_and_export_zip_endpoints(self):
+        """跨文件聚合清单与 ZIP 打包导出端点校验（含权限/凭据隐私/状态守卫）。"""
+        import io
+        import zipfile
+        phone = "13800000000"
+        secret = "sk-" + "test" + "0" * 24
+        batch = "fb_panel_zip"
+        ids = []
+        for idx, name in enumerate(("a.txt", "b.txt"), 1):
+            payload = (f"doc{idx} {phone} key={secret}\n").encode("utf-8")
+            r = self.client.post(
+                "/api/files/jobs",
+                headers=self.auth,
+                data={"file": (io.BytesIO(payload), name), "batch_id": batch},
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(r.status_code, 201)
+            ids.append(r.get_json()["job"]["id"])
+        try:
+            for jid in ids:
+                sr = self.client.post(f"/api/files/jobs/{jid}/scan", headers=self.auth, json={"mode": "manual"})
+                self.assertEqual(sr.status_code, 201)
+            deadline = time.time() + 15.0
+            mgr = self.panel._file_manager()
+            while time.time() < deadline:
+                if all(mgr.get_job(jid).status == fw.ST_REVIEW for jid in ids):
+                    break
+                time.sleep(0.05)
+            for jid in ids:
+                self.assertEqual(mgr.get_job(jid).status, fw.ST_REVIEW)
+
+            # 无 token 拒 403
+            self.assertEqual(self.client.post("/api/files/hits/merged", json={"job_ids": ids}).status_code, 403)
+            self.assertEqual(self.client.post("/api/files/export-zip", json={"job_ids": ids}).status_code, 403)
+
+            mr = self.client.post("/api/files/hits/merged", headers=self.auth, json={"job_ids": ids})
+            self.assertEqual(mr.status_code, 200)
+            mhits = mr.get_json()["hits"]
+            self.assertEqual(len(mhits), 2)
+            phone_hit = next(h for h in mhits if h.get("original") == phone)
+            self.assertEqual(phone_hit["count"], 2)
+            self.assertEqual(len(phone_hit["files"]), 2)
+            cred_hit = next(h for h in mhits if not h["editable"])
+            self.assertNotIn("original", cred_hit)
+            self.assertIn("digest", cred_hit)
+
+            # 未完成不能打包 ZIP
+            zr_early = self.client.post("/api/files/export-zip", headers=self.auth, json={"job_ids": ids})
+            self.assertEqual(zr_early.status_code, 409)
+
+            for fref in phone_hit["files"]:
+                ar = self.client.post(
+                    f"/api/files/jobs/{fref['job_id']}/apply",
+                    headers=self.auth,
+                    json={"edits": [{"hit_id": fref["hit_id"], "action": "replace", "text": "TEL_MASKED"}], "redactions": [], "options": {}},
+                )
+                self.assertEqual(ar.status_code, 202)
+            deadline = time.time() + 15.0
+            while time.time() < deadline:
+                if all(mgr.get_job(jid).status == fw.ST_DONE for jid in ids):
+                    break
+                time.sleep(0.05)
+            for jid in ids:
+                self.assertEqual(mgr.get_job(jid).status, fw.ST_DONE)
+
+            zr = self.client.post("/api/files/export-zip", headers=self.auth, json={"job_ids": ids})
+            self.assertEqual(zr.status_code, 200)
+            with zipfile.ZipFile(io.BytesIO(zr.data)) as zf:
+                self.assertEqual(sorted(zf.namelist()), ["a.txt", "b.txt"])
+                for n in zf.namelist():
+                    txt = zf.read(n).decode("utf-8")
+                    self.assertIn("TEL_MASKED", txt)
+                    self.assertNotIn(phone, txt)
+                    self.assertNotIn(secret, txt)
+            zr.close()
+        finally:
+            for jid in ids:
+                self.client.delete(f"/api/files/jobs/{jid}", headers=self.auth)
 
 
 if __name__ == "__main__":

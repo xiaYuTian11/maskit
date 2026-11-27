@@ -217,6 +217,31 @@ class FileWorkbenchUiTests(unittest.TestCase):
         self.assertIn("{ to: '/files', key: 'files', icon: FileLock2 }", self.layout)
         self.assertIn("t('nav.files')", self.layout)
 
+    def test_v220_batch_virtual_and_whats_new_contracts(self):
+        """批量多选、防撑爆虚拟滚动、跨文件统一去重视图及版本更新引导契约。"""
+        self.assertIn("multiple", self.page)
+        self.assertIn("pickDesktopFiles", self.page)
+        self.assertIn("pickDesktopFiles", self.api)
+        self.assertIn("getMergedHits", self.page)
+        self.assertIn("/api/files/hits/merged", self.api)
+        self.assertIn("downloadJobsZip", self.page)
+        self.assertIn("/api/files/export-zip", self.api)
+        self.assertIn("useVirtualizer", self.page)
+        self.assertIn("items-start", self.page)
+        self.assertIn("dispatchingIdsRef", self.page)
+        self.assertIn("WhatsNewDialog", self.layout)
+        self.assertIn("FeatureSpotlight", self.layout)
+        help_src = read("components/help/HelpCenter.tsx")
+        self.assertIn("help.page.files.title", help_src)
+        self.assertIn("help.whatsNew", help_src)
+        whats_new = read("lib/whatsNew.ts")
+        self.assertIn("shouldAutoOpenWhatsNew", whats_new)
+        self.assertIn("0.22.0", whats_new)
+        self.assertIn("files-dropzone", whats_new)
+        self.assertIn("settings-visual-masking", whats_new)
+        dlg_src = read("components/onboarding/WhatsNewDialog.tsx")
+        self.assertIn("consumePendingSpotlight()", dlg_src[dlg_src.index("const onEvent"):])
+
 
 class PanelRoundtripTests(unittest.TestCase):
     """按页面实际调用顺序跑一遍后端：capabilities → multipart 上传 → scan

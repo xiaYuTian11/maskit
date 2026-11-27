@@ -285,23 +285,13 @@ def _find_orig_spans(text, orig):
     return [(m.start(), m.end()) for m in re.finditer(re.escape(orig), text, re.I)]
 
 
-def _collect_new(tables, before, text, loc, locations, counts):
-    for orig in tables.fwd.keys() - before:
-        locations.setdefault(orig, set()).add(loc)
-    if text:
-        for orig in tables.fwd:
-            if not orig:
-                continue
-            cnt = text.count(orig)
-            if cnt == 0:
-                cnt = len(re.findall(re.escape(orig), text, re.I))
-            if cnt:
-                counts[orig] = counts.get(orig, 0) + cnt
+def _collect_new(tables, before, text, loc, locations, counts, masked_text=None):
+    fc._accumulate(tables, before, text or "", loc, locations, counts, masked_text=masked_text)
 
 
-def _final_text(hit, edit):
+def _final_text(hit, edit, orig=None):
     if edit is not None and edit.get("action") == "keep":
-        return getattr(hit, "_orig", None) or hit.original or hit.token
+        return orig or getattr(hit, "_orig", None) or hit.original or hit.token
     if edit is not None and edit.get("action") == "replace":
         return edit.get("text") or hit.token
     return hit.token
@@ -310,11 +300,14 @@ def _final_text(hit, edit):
 def _attach_origins(tables, hits):
     by_token = {rec[0]: orig for orig, rec in tables.fwd.items()}
     for hit in hits:
-        hit._orig = by_token.get(hit.token)
+        toks = getattr(hit, "tokens", None) or [hit.token]
+        origs = [by_token[t] for t in toks if t in by_token]
+        hit._origs = origs
+        hit._orig = origs[0] if origs else by_token.get(hit.token)
 
 
-def _build_manifest_hits(tables, locations, counts, max_hits):
-    hits = fc._build_hits(tables, locations, counts, max_hits)
+def _build_manifest_hits(tables, locations, counts, max_hits, only_observed=False):
+    hits = fc._build_hits(tables, locations, counts, max_hits, only_observed=only_observed)
     _attach_origins(tables, hits)
     return hits
 
@@ -360,7 +353,8 @@ def scan_pdf(job, src, staged, opts, cancel):
         for index in range(pages):
             if cancel is not None and cancel.is_set():
                 raise fw.FileWorkbenchError(E_PREVIEW, 409)
-            fc._progress(job, "pdf_pages", index + 1, pages)
+            fc._progress(job, "pdf_pages", index + 1, pages,
+                         pct=min(95, int((index * 95) / max(1, pages))))
             width_pt, height_pt = doc.get_page_size(index)
             if width_pt <= 0 or height_pt <= 0:
                 raise fw.FileWorkbenchError(E_BUDGET, 507)
@@ -387,15 +381,19 @@ def scan_pdf(job, src, staged, opts, cancel):
             except Exception:
                 raise fw.FileWorkbenchError(E_TEXTLAYER, 422)
             if text.strip():
-                b = set(tables.fwd)
+                b = len(tables.fwd)
                 masked = tr.mask_body(text, job.id)
-                _collect_new(tables, b, text, "第%d页文本层" % (index + 1), locations, counts)
+                _collect_new(tables, b, text, "第%d页文本层" % (index + 1),
+                             locations, counts, masked_text=masked)
                 # 同一敏感值在后续页再次出现时已存在 tables.fwd 中，不能只扫本页新增键，
                 # 否则第 2 页起文本层不建框、不栅格化，导致明文泄露。
-                page_matched_origs = [
-                    orig for orig, rec in tables.fwd.items()
-                    if orig and rec[0] in masked
-                ]
+                seen_page_origs = set()
+                page_matched_origs = []
+                for tok in tr._PLACEHOLDER_RX.findall(masked):
+                    rec = tables.rev.get(tok)
+                    if rec and rec[0] and rec[0] not in seen_page_origs:
+                        seen_page_origs.add(rec[0])
+                        page_matched_origs.append(rec[0])
                 loc_label = "第%d页文本层" % (index + 1)
                 full_warn = "page_%d_full_cover" % (index + 1)
                 for orig in page_matched_origs:
@@ -419,20 +417,23 @@ def scan_pdf(job, src, staged, opts, cancel):
             # OCR 自动框选
             if mode == "auto":
                 b = set(tables.fwd)
+                sess_before = set((tr._session_get(job.id) or {}).get("fwd") or ())
                 try:
                     detected = _detect_boxes(page_jpeg, image, job.id)
                 except PageOcrFailed:
                     detected = [{"kind": "full", "source": "auto"}]
                     warnings.append("page_%d_ocr_failed_full_cover" % (index + 1))
                     skipped_ocr += 1
+                sess_after = set((tr._session_get(job.id) or {}).get("fwd") or ())
                 texts = " ".join(x.get("text") or "" for x in detected)
                 texts = texts.strip()
                 if texts:
-                    tr.mask_body(texts, job.id)
+                    m_ocr = tr.mask_body(texts, job.id)
                     _collect_new(tables, b, texts,
-                                 "第%d页自动识别" % (index + 1), locations, counts)
+                                 "第%d页自动识别" % (index + 1), locations, counts, masked_text=m_ocr)
                 else:
-                    for orig in tables.fwd.keys() - b:
+                    matched_ocr = (tables.fwd.keys() - b) | (sess_after - sess_before)
+                    for orig in matched_ocr:
                         locations.setdefault(orig, set()).add("第%d页自动识别" % (index + 1))
                         if not counts.get(orig):
                             counts[orig] = 1
@@ -443,23 +444,29 @@ def scan_pdf(job, src, staged, opts, cancel):
                     boxes.append({"kind": "rect", "rect": box["rect"],
                                   "source": "auto", "orig": box.get("text") or "",
                                   "label": box.get("label") or ""})
-                for orig in tables.fwd.keys() - b:
+                for orig in (tables.fwd.keys() - b) | (sess_after - sess_before):
                     locations.setdefault(orig, set()).add("第%d页自动识别" % (index + 1))
                     page_hit_ids.add(orig)
             page_meta.append({"page": index + 1, "w": image.size[0], "h": image.size[1],
                               "preview": preview_name, "boxes": boxes,
                               "text_hit_origs": sorted(page_hit_ids)})
+            fc._progress(job, "pdf_pages", index + 1, pages,
+                         pct=min(95, int(((index + 1) * 95) / max(1, pages))))
     except Exception:
         doc.close()
         raise
     # 隐藏文字（文档信息/XMP/书签/注释/表单/附件）
-    fc._progress(job, "pdf_hidden", pages, max(1, pages))
+    fc._progress(job, "pdf_hidden", pages, max(1, pages), pct=96)
     hidden_hits = _scan_hidden(job.id, raw, locations, counts)
     final_hits = _build_manifest_hits(tables, locations, counts,
-                                      int(cfg.get("files_max_hits", 20000)))
+                                      int(cfg.get("files_max_hits", 20000)),
+                                      only_observed=bool(getattr(job, "batch_id", "")))
     token_to_id = {h.token: h.hit_id for h in final_hits}
-    orig_to_id = {getattr(h, "_orig", None): h.hit_id for h in final_hits
-                  if getattr(h, "_orig", None)}
+    orig_to_id = {}
+    for h in final_hits:
+        for o in (getattr(h, "_origs", None) or ([getattr(h, "_orig", None)] if getattr(h, "_orig", None) else [])):
+            if o:
+                orig_to_id[o] = h.hit_id
     for page in page_meta:
         pno = int(page.get("page") or 1)
         for idx, box in enumerate(page["boxes"]):
@@ -593,9 +600,14 @@ def apply_pdf(job, staged, out, edits, redactions, options):
     finals = {}
     for hit in hits:
         edit = next((e for e in (edits or []) if e.get("hit_id") == hit.hit_id), None)
-        orig = getattr(hit, "_orig", None) or hit.original
-        if orig:
-            finals[orig] = _final_text(hit, edit)
+        origs = getattr(hit, "_origs", None) or []
+        if not origs:
+            single = getattr(hit, "_orig", None) or hit.original
+            if single:
+                origs = [single]
+        for orig in origs:
+            if orig:
+                finals[orig] = _final_text(hit, edit, orig=orig)
     pages = manifest.get("pages") or []
     src = os.path.join(os.path.dirname(staged), "src.bin")
     with open(src, "rb") as f:
@@ -776,7 +788,7 @@ def scan_image(job, src, staged, opts, cancel):
         raise fw.FileWorkbenchError(E_CARRIER, 422)
     if frames > 1:
         raise fw.FileWorkbenchError(E_CARRIER, 400)
-    fc._progress(job, "image_ocr", 1, 1)
+    fc._progress(job, "image_ocr", 0, 1, indeterminate=True)
     job_dir = os.path.dirname(staged)
     preview_dir = os.path.join(job_dir, "preview")
     shutil.rmtree(preview_dir, ignore_errors=True)
@@ -796,14 +808,16 @@ def scan_image(job, src, staged, opts, cancel):
         if not ok:
             raise fw.FileWorkbenchError(E_OCR, 503)
         b = set(tables.fwd)
+        sess_before = set((tr._session_get(job.id) or {}).get("fwd") or ())
         try:
             detected = _detect_boxes(raw, img, job.id)
+            sess_after = set((tr._session_get(job.id) or {}).get("fwd") or ())
             texts = " ".join(x.get("text") or "" for x in detected).strip()
             if texts:
-                tr.mask_body(texts, job.id)
-                _collect_new(tables, b, texts, "图片自动识别", locations, counts)
+                m_ocr = tr.mask_body(texts, job.id)
+                _collect_new(tables, b, texts, "图片自动识别", locations, counts, masked_text=m_ocr)
             else:
-                for orig in tables.fwd.keys() - b:
+                for orig in (tables.fwd.keys() - b) | (sess_after - sess_before):
                     locations.setdefault(orig, set()).add("图片自动识别")
                     if not counts.get(orig):
                         counts[orig] = 1
@@ -815,9 +829,13 @@ def scan_image(job, src, staged, opts, cancel):
             warnings.append("image_ocr_failed_full_cover")
             skipped = 1
     hits = _build_manifest_hits(tables, locations, counts,
-                                int(cfg.get("files_max_hits", 20000)))
-    orig_to_id = {getattr(h, "_orig", None): h.hit_id for h in hits
-                  if getattr(h, "_orig", None)}
+                                int(cfg.get("files_max_hits", 20000)),
+                                only_observed=bool(getattr(job, "batch_id", "")))
+    orig_to_id = {}
+    for h in hits:
+        for o in (getattr(h, "_origs", None) or ([getattr(h, "_orig", None)] if getattr(h, "_orig", None) else [])):
+            if o:
+                orig_to_id[o] = h.hit_id
     for idx, box in enumerate(boxes):
         box["id"] = "auto-1-%d" % idx
         orig = box.pop("orig", None)

@@ -513,6 +513,117 @@ finally:
         with zipfile.ZipFile(io.BytesIO(out_bytes(mgr, job))) as zout:
             self.assertNotIn("word/media/video1.mp4", zout.namelist())
 
+    def test_xlsx_skips_shared_string_indices_and_progress_never_fakes_100(self):
+        """xlsx 必须跳过 <c t='s'><v> 索引、细粒度进度封顶 <100 且支持节点级中途取消。"""
+        ss_items = "".join(f"<si><t>138{i:08d}</t></si>" for i in range(120))
+        ss_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            + ss_items + "</sst>"
+        )
+        rows = "".join(
+            f'<row r="{r + 1}"><c r="A{r + 1}" t="s"><v>{r}</v></c></row>'
+            for r in range(120)
+        )
+        sheet_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+            + rows + "</sheetData></worksheet>"
+        )
+        mgr = make_mgr(self.tmp)
+        job = ready_docx(
+            mgr,
+            filename="统计表.xlsx",
+            entries={
+                "[Content_Types].xml": b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+                "xl/worksheets/sheet1.xml": sheet_xml.encode("utf-8"),
+                "xl/sharedStrings.xml": ss_xml.encode("utf-8"),
+            },
+        )
+        seen_inputs = []
+        seen_pcts = []
+        orig_mask_body = tr.mask_body
+        orig_set_progress = mgr.set_progress
+
+        def spy_mask(text, sid):
+            seen_inputs.append(text)
+            return orig_mask_body(text, sid)
+
+        def spy_prog(jid, stage, cur, total, pct=None, indeterminate=False):
+            if pct is not None:
+                seen_pcts.append((cur, total, pct))
+            return orig_set_progress(jid, stage, cur, total, pct=pct, indeterminate=indeterminate)
+
+        tr.mask_body = spy_mask
+        mgr.set_progress = spy_prog
+        try:
+            j = scan(mgr, job)
+        finally:
+            tr.mask_body = orig_mask_body
+            mgr.set_progress = orig_set_progress
+
+        self.assertEqual(j.status, fw.ST_REVIEW)
+        self.assertEqual(j.hit_count, 120)
+        # <c t="s"><v>0</v></c> ~ 119 索引绝不能喂给 mask_body
+        self.assertFalse(any(x.isdigit() and len(x) <= 3 for x in seen_inputs))
+        self.assertTrue(seen_pcts)
+        # 扫描过程中不允许报出 100%，且最后一个 part 开始时应 < 100
+        self.assertTrue(all(p < 100 for _, _, p in seen_pcts), seen_pcts)
+        last_part_starts = [p for c, t, p in seen_pcts if c == t]
+        self.assertTrue(last_part_starts and last_part_starts[0] < 100, seen_pcts)
+
+        # 中途取消应能迅速中断扫描并落 canceled
+        job_c = ready_docx(
+            mgr,
+            filename="取消表.xlsx",
+            entries={
+                "[Content_Types].xml": b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+                "xl/worksheets/sheet1.xml": sheet_xml.encode("utf-8"),
+                "xl/sharedStrings.xml": ss_xml.encode("utf-8"),
+            },
+        )
+        calls = [0]
+
+        def cancel_midway(text, sid):
+            calls[0] += 1
+            if calls[0] >= 5:
+                mgr._cancel_flags[job_c.id].set()
+            return orig_mask_body(text, sid)
+
+        tr.mask_body = cancel_midway
+        try:
+            mgr.request_scan(job_c.id)
+        finally:
+            tr.mask_body = orig_mask_body
+        self.assertEqual(mgr.get_job(job_c.id).status, fw.ST_CANCELED)
+
+    def test_single_file_case_variants_dedup_replace_and_keep(self):
+        """单文件内大小写变体敏感词合并为 1 条展示，替换全改、保留各还原原文。"""
+        mgr = make_mgr(self.tmp)
+        sample = "Alice@example.com 和 alice@example.com\n"
+        j1 = mgr.create_job("mail1.txt", len(sample), "text")
+        (mgr.job_dir(j1.id) / "src.bin").write_bytes(sample.encode("utf-8"))
+        mgr.probe_result(j1.id, True)
+        scan(mgr, j1)
+        hs1 = mgr.hits(j1.id)
+        self.assertEqual(len(hs1), 1, hs1)
+        self.assertEqual(hs1[0]["count"], 2)
+        apply(mgr, j1, edits=[{"hit_id": hs1[0]["hit_id"], "action": "replace", "text": "[EMAIL]"}])
+        out1 = out_bytes(mgr, j1).decode("utf-8")
+        self.assertEqual(out1.count("[EMAIL]"), 2)
+        self.assertNotIn("example.com", out1)
+
+        # keep 时两个不同大小写的占位符都要准确还原回各自原本大小写
+        j2 = mgr.create_job("mail2.txt", len(sample), "text")
+        (mgr.job_dir(j2.id) / "src.bin").write_bytes(sample.encode("utf-8"))
+        mgr.probe_result(j2.id, True)
+        scan(mgr, j2)
+        hs2 = mgr.hits(j2.id)
+        self.assertEqual(len(hs2), 1)
+        apply(mgr, j2, edits=[{"hit_id": hs2[0]["hit_id"], "action": "keep"}])
+        out2 = out_bytes(mgr, j2).decode("utf-8")
+        self.assertEqual(out2, sample)
+
 
 if __name__ == "__main__":
     unittest.main()

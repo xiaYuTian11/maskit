@@ -4,6 +4,30 @@
 
 每个版本章节的**开头**必须有 `### 更新摘要 / Summary`（中英各一至三条）—— 它会被原样用作用户能看到的「版本介绍」（GitHub Release 首屏与更新弹窗），所以只写用户能感知到的变化，不写实现细节。技术条目写在摘要下面的分节里。
 
+## [0.22.0] - 2026-11-27
+
+### 更新摘要 / Summary
+- 本地文件脱敏现已支持多选与拖拽批量扫描，同一敏感词跨文件自动去重合并并共享占位符，确认后可一键生成并打包 ZIP 下载或批量另存为。
+- 优化表格与长文档扫描速度和实时进度展示，重构高密度敏感词清单支持搜索、标签筛选与平滑滚动，并新增版本更新后的新功能亮点引导与聚焦提示。
+- Local file masking now supports multi-file batch scanning with shared placeholders, cross-file deduplicated review, ZIP export, and batch save.
+- Improved spreadsheet scan speed and live progress, rebuilt large finding lists with search, label filters, and smooth scrolling, and added What's New guidance on upgrades.
+
+### 新增与优化
+- 文件脱敏支持多选、拖拽及桌面端多文件选择自动入队扫描，同批次共享占位符并新增跨文件统一去重清单、一键批量生成、ZIP 打包下载与批量另存为。
+- File workbench now supports multi-file upload/drag/desktop pick with auto-queued scanning, batch-shared placeholders, cross-file deduplicated review, batch apply, ZIP export, and batch save.
+- 文件脱敏新增关键词搜索、实体标签筛选胶囊、状态过滤、批量保留/恢复遮盖与定高虚拟滚动清单，并解除左侧任务列表在长清单下的高度拉扯。
+- Added keyword search, label filter pills, status filtering, bulk keep/mask/clear actions, a fixed-height virtualized findings list, and a sticky scrollable jobs list on the Files page.
+- 新增版本升级后的轻量新功能亮点引导弹窗、目标区域脉冲聚焦与可消除 `NEW` 徽标，并在帮助中心补充「文件脱敏」说明条目。
+- Added a lightweight post-upgrade What's New guide, cross-route feature spotlight highlighting, dismissible `NEW` badges, and a Files workbench entry in the Help Center.
+
+### 修复
+- 修复大工作表及长文档在文本扫描与命中统计阶段长时间停留在 100% 看似卡死的问题：改为按字节权重与节点推进实时进度、跳过纯索引节点并重写命中统计为单次线性查表。
+- Fixed spreadsheet and large-document scans appearing frozen at 100% by weighting progress across bytes and XML nodes, skipping shared-string index nodes, and rewriting hit counting to a single linear pass.
+- 修复单个文件内部同一敏感词因大小写或首尾空白差异重复展示及跨文件提示/入队竞态边界问题，同时确保图片识别等无分段阶段展示不确定动画进度条。
+- Fixed duplicate findings from casing or whitespace variants within a file, batch queue dispatch and save-notice edge cases, and indeterminate progress display for single-pass image OCR.
+- 修复批量打包下载把全部成品读进内存（大文件集合下会拖垮引擎）的问题，改为落盘临时文件流式下发；单个任务过期或被删时跳过，不再整包失败。
+- Fixed batch ZIP download holding every output file in memory; it now streams from a temp file and skips expired or deleted jobs instead of failing the whole archive.
+
 ## [0.21.0] - 2026-11-26
 
 ### 更新摘要 / Summary

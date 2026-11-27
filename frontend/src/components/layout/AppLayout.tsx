@@ -43,6 +43,8 @@ import { toast } from '@/lib/toast'
 import { shieldFetch } from '@/lib/shield-fetch'
 import { HelpCenter } from '@/components/help/HelpCenter'
 import { OnboardingWizard, ONBOARDING_STORAGE_KEY } from '@/components/onboarding/OnboardingWizard'
+import { FeatureSpotlight, WhatsNewDialog } from '@/components/onboarding/WhatsNewDialog'
+import { hasUnseenNavFeature, markFeatureSeen, readSeenFeatures } from '@/lib/whatsNew'
 import { SponsorDialog } from '@/components/common/SponsorDialog'
 import { SponsorNudge } from '@/components/common/SponsorNudge'
 
@@ -215,6 +217,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [rescuingOrigin, setRescuingOrigin] = useState(false)
   // 首次引导的显式开关：undefined = 交给组件按「是否首次运行」自己决定，true = 用户手动要求重看
   const [onboardingOpen, setOnboardingOpen] = useState<boolean | undefined>(undefined)
+  const [whatsNewOpen, setWhatsNewOpen] = useState<boolean | undefined>(undefined)
+  const [seenFeatures, setSeenFeatures] = useState<Set<string>>(() => readSeenFeatures())
 
   // 客户端（壳）版本兜底：/api/status 拿不到时（面板不可达）引擎版本必然为空，
   // 而报障恰恰最需要版本号。来源由 title 标注，不冒充引擎版本。
@@ -279,6 +283,16 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { lang, setLang, t, tf } = useI18n()
   const navigate = useNavigate()
   const routeLocation = useLocation()
+  useEffect(() => {
+    const syncSeen = () => setSeenFeatures(readSeenFeatures())
+    window.addEventListener('maskit:feature_seen', syncSeen)
+    return () => window.removeEventListener('maskit:feature_seen', syncSeen)
+  }, [])
+  useEffect(() => {
+    if (routeLocation.pathname === '/files') {
+      setSeenFeatures(markFeatureSeen('files-workbench'))
+    }
+  }, [routeLocation.pathname])
   // 后台自动检查发现的新版本号。null = 没有新版/还没查。
   // 更新入口原本只在「设置 → 工具」里，且必须用户主动点「检查更新」才知道有新版——
   // 等于绝大多数人永远停在旧版本，安全修复发出去也到不了用户手上。
@@ -460,6 +474,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <nav className="flex-1 space-y-0.5 overflow-y-auto p-2">
           {NAV_ITEMS.map((item) => {
             const label = t(`nav.${item.key}`)
+            const showNew = hasUnseenNavFeature(item.key, seenFeatures)
             return (
             <NavLink
               key={item.to}
@@ -478,7 +493,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
               {() => (
                 <>
                   <item.icon className="h-4 w-4 shrink-0" />
-                  {!collapsed && <span className="truncate">{label}</span>}
+                  {!collapsed && <span className="min-w-0 flex-1 truncate">{label}</span>}
+                  {showNew && !collapsed && (
+                    <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wide text-primary-ink">
+                      {t('whatsNew.badge')}
+                    </span>
+                  )}
+                  {showNew && collapsed && (
+                    <span className="absolute right-2.5 top-1.5 h-1.5 w-1.5 rounded-full bg-primary" />
+                  )}
                 </>
               )}
             </NavLink>
@@ -642,6 +665,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 try { localStorage.removeItem(ONBOARDING_STORAGE_KEY) } catch {}
                 setOnboardingOpen(true)
               }}
+              onOpenWhatsNew={() => setWhatsNewOpen(true)}
             />
             {/* 赞助入口（顶栏图标位）：纯自愿赞赏，不锁任何功能；合规边界见 docs/SPONSOR.md */}
             <Button
@@ -797,6 +821,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
         onOpenChange={setOnboardingOpen}
         firstRun={status ? (status.upstreams?.length ?? 0) === 0 : undefined}
       />
+      <WhatsNewDialog
+        open={whatsNewOpen}
+        onOpenChange={setWhatsNewOpen}
+        currentVersion={status?.version || shellVersion}
+        firstRun={status ? (status.upstreams?.length ?? 0) === 0 : undefined}
+      />
+      <FeatureSpotlight />
       {/* 必须 Portal 到 document.body：外层根节点带 isolate 会锁死层叠上下文，
           不跳出的话 DialogPortal(z-50) 与拖拽拦截层(z-[55]) 会盖住三键导致弹窗期无法点击。 */}
       {isCustomChrome && typeof document !== 'undefined' &&

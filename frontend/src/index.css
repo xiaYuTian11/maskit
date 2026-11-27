@@ -378,3 +378,26 @@ details[open] > summary .chev {
     animation: none;
   }
 }
+
+@keyframes feature-spotlight-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px hsl(var(--primary) / 0.55), 0 0 18px 2px hsl(var(--primary) / 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 4px hsl(var(--primary) / 0.85), 0 0 28px 6px hsl(var(--primary) / 0.42);
+  }
+}
+
+.feature-spotlight {
+  position: relative;
+  border-color: hsl(var(--primary) / 0.75) !important;
+  animation: feature-spotlight-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feature-spotlight {
+    animation: none;
+    box-shadow: 0 0 0 2px hsl(var(--primary) / 0.8);
+  }
+}

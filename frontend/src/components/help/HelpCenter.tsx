@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BookOpen, CircleHelp, ExternalLink, RotateCcw } from 'lucide-react'
+import { BookOpen, CircleHelp, ExternalLink, RotateCcw, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -22,13 +22,20 @@ const PAGES = [
   { titleKey: 'help.page.stats.title', descKey: 'help.page.stats.description' },
   { titleKey: 'help.page.clients.title', descKey: 'help.page.clients.description' },
   { titleKey: 'help.page.extension.title', descKey: 'help.page.extension.description' },
+  { titleKey: 'help.page.files.title', descKey: 'help.page.files.description' },
   { titleKey: 'help.page.words.title', descKey: 'help.page.words.description' },
   { titleKey: 'help.page.audit.title', descKey: 'help.page.audit.description' },
   { titleKey: 'help.page.settings.title', descKey: 'help.page.settings.description' },
 ]
 
 /** 常驻帮助入口：提供页面导览、核心使用路径和完整教程入口。 */
-export function HelpCenter({ onRestartTour }: { onRestartTour: () => void }) {
+export function HelpCenter({
+  onRestartTour,
+  onOpenWhatsNew,
+}: {
+  onRestartTour: () => void
+  onOpenWhatsNew?: () => void
+}) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
 
@@ -93,9 +100,16 @@ export function HelpCenter({ onRestartTour }: { onRestartTour: () => void }) {
             </section>
           </div>
           <div className="flex flex-wrap justify-between gap-2 border-t pt-4">
-            <Button variant="outline" size="sm" onClick={() => { setOpen(false); onRestartTour() }}>
-              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />{t('help.restartTour')}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => { setOpen(false); onRestartTour() }}>
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />{t('help.restartTour')}
+              </Button>
+              {onOpenWhatsNew ? (
+                <Button variant="outline" size="sm" onClick={() => { setOpen(false); onOpenWhatsNew() }}>
+                  <Sparkles className="mr-1.5 h-3.5 w-3.5" />{t('help.whatsNew')}
+                </Button>
+              ) : null}
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={() => { void openDoc(SETTINGS_DOC_URL) }}>
                 {t('help.settingsDoc')}<ExternalLink className="ml-1.5 h-3.5 w-3.5" />
